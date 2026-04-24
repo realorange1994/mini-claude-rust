@@ -187,13 +187,8 @@ impl TerminalHandler {
                 {
                     let buf = self.thinking_buf.read().unwrap();
                     if !buf.is_empty() {
-                        let preview = buf.lines().next().unwrap_or("");
-                        let preview = if preview.len() > 120 {
-                            &preview[..120]
-                        } else {
-                            preview
-                        };
-                            eprintln!("\n[THINK] {}", preview);
+                        let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
+                        eprintln!("\n[THINK] {}", preview);
                     }
                 }
                 let mut buf = self.thinking_buf.write().unwrap();
@@ -219,12 +214,7 @@ impl TerminalHandler {
                 if !*seen {
                     let buf = self.thinking_buf.read().unwrap();
                     if !buf.is_empty() {
-                        let preview = buf.lines().next().unwrap_or("");
-                        let preview = if preview.len() > 120 {
-                            &preview[..120]
-                        } else {
-                            preview
-                        };
+                        let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
                         eprintln!("\n[THINK] {}", preview);
                     }
                 }

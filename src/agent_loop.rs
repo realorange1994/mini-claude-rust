@@ -394,9 +394,18 @@ impl AgentLoop {
                                                 let limit = max_tool_chars;
                                                 let first = limit * 4 / 5;
                                                 let last = limit - first;
+                                                let mut first_end = first;
+                                                while first_end > 0 && !result.output.is_char_boundary(first_end) {
+                                                    first_end -= 1;
+                                                }
+                                                let last_start = result.output.len() - last;
+                                                let mut last_end = last_start;
+                                                while last_end < result.output.len() && !result.output.is_char_boundary(last_end) {
+                                                    last_end += 1;
+                                                }
                                                 format!("{}\n\n... [OUTPUT TRUNCATED] ...\n\n{}",
-                                                    &result.output[..first],
-                                                    &result.output[result.output.len() - last..])
+                                                    &result.output[..first_end],
+                                                    &result.output[last_end..])
                                             } else {
                                                 result.output.clone()
                                             };
