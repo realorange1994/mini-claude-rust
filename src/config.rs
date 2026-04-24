@@ -1,0 +1,305 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub use crate::permissions::PermissionMode;
+pub use crate::tools::Registry;
+pub use crate::mcp::Manager as McpManager;
+pub use crate::skills::Loader as SkillLoader;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub model: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub max_turns: usize,
+    pub max_context_msgs: usize,
+    pub permission_mode: PermissionMode,
+    pub allowed_commands: Vec<String>,
+    pub denied_patterns: Vec<String>,
+    pub project_dir: PathBuf,
+    pub mcp_manager: Option<McpManager>,
+    pub skill_loader: Option<SkillLoader>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-4-20250514".to_string(),
+            api_key: None,
+            base_url: None,
+            max_turns: 30,
+            max_context_msgs: 100,
+            permission_mode: PermissionMode::Ask,
+            allowed_commands: vec![
+                "ls".to_string(),
+                "cat".to_string(),
+                "head".to_string(),
+                "tail".to_string(),
+                "wc".to_string(),
+                "find".to_string(),
+                "grep".to_string(),
+                "rg".to_string(),
+                "git status".to_string(),
+                "git diff".to_string(),
+                "git log".to_string(),
+                "git branch".to_string(),
+                "python".to_string(),
+                "python3".to_string(),
+                "pip".to_string(),
+                "npm".to_string(),
+                "node".to_string(),
+                "echo".to_string(),
+                "pwd".to_string(),
+                "which".to_string(),
+                "env".to_string(),
+                "date".to_string(),
+            ],
+            denied_patterns: vec![
+                r"rm -rf /".to_string(),
+                r"rm -rf ~".to_string(),
+                r"sudo rm".to_string(),
+                r"git push --force".to_string(),
+                r"git reset --hard".to_string(),
+                r"> /dev/sda".to_string(),
+                r"mkfs".to_string(),
+                r"dd if=".to_string(),
+            ],
+            project_dir: PathBuf::from("."),
+            mcp_manager: None,
+            skill_loader: None,
+        }
+    }
+}
+
+impl Config {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+// Settings file structures
+#[derive(Debug, Deserialize)]
+pub struct ClaudeSettings {
+    pub env: EnvSettings,
+    #[serde(default)]
+    pub mcp: McpSettings,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnvSettings {
+    #[serde(rename = "ANTHROPIC_AUTH_TOKEN")]
+    pub anthropic_auth_token: Option<String>,
+    #[serde(rename = "ANTHROPIC_BASE_URL")]
+    pub anthropic_base_url: Option<String>,
+    #[serde(rename = "ANTHROPIC_MODEL")]
+    pub anthropic_model: Option<String>,
+    #[serde(rename = "ANTHROPIC_DEFAULT_SONNET_MODEL")]
+    pub anthropic_default_sonnet_model: Option<String>,
+    #[serde(rename = "ANTHROPIC_DEFAULT_OPUS_MODEL")]
+    pub anthropic_default_opus_model: Option<String>,
+    #[serde(rename = "ANTHROPIC_DEFAULT_HAIKU_MODEL")]
+    pub anthropic_default_haiku_model: Option<String>,
+    #[serde(rename = "ANTHROPIC_REASONING_MODEL")]
+    pub anthropic_reasoning_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct McpSettings {
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpServerConfig {
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpConfigFile {
+    #[serde(rename = "mcpServers")]
+    pub mcp_servers: std::collections::HashMap<String, McpConfigEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpConfigEntry {
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<std::collections::HashMap<String, String>>,
+    pub url: Option<String>,
+}
+
+pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
+    let mut cfg = Config::default();
+    cfg.project_dir = project_dir.to_path_buf();
+
+    let settings_path = project_dir.join(".claude").join("settings.json");
+    if let Ok(data) = std::fs::read_to_string(&settings_path) {
+        if let Ok(settings) = serde_json::from_str::<ClaudeSettings>(&data) {
+            if let Some(key) = settings.env.anthropic_auth_token {
+                cfg.api_key = Some(key);
+            }
+            if let Some(url) = settings.env.anthropic_base_url {
+                cfg.base_url = Some(url);
+            }
+            if let Some(model) = settings.env.anthropic_model {
+                cfg.model = model;
+            } else if let Some(model) = settings.env.anthropic_default_sonnet_model {
+                cfg.model = model;
+            } else if let Some(model) = settings.env.anthropic_default_opus_model {
+                cfg.model = model;
+            } else if let Some(model) = settings.env.anthropic_default_haiku_model {
+                cfg.model = model;
+            } else if let Some(model) = settings.env.anthropic_reasoning_model {
+                cfg.model = model;
+            }
+
+            // Load MCP servers from settings.json
+            let mcp_manager = crate::mcp::Manager::new();
+            for (name, srv) in settings.mcp.servers {
+                if let Some(cmd) = srv.command {
+                    let args = srv.args.unwrap_or_default();
+                    let env = srv.env.unwrap_or_default();
+                    mcp_manager.register(&name, &cmd, &args, env);
+                }
+            }
+            cfg.mcp_manager = Some(mcp_manager);
+        }
+    }
+
+    // Load MCP config from .mcp.json
+    let mcp_path = project_dir.join(".mcp.json");
+    if let Ok(data) = std::fs::read_to_string(&mcp_path) {
+        if let Ok(mcp_cfg) = serde_json::from_str::<McpConfigFile>(&data) {
+            let mcp_manager = cfg.mcp_manager.get_or_insert_with(|| crate::mcp::Manager::new());
+            for (name, entry) in mcp_cfg.mcp_servers {
+                if let Some(url) = entry.url {
+                    mcp_manager.register_remote(&name, &url, entry.env.unwrap_or_default());
+                } else if let Some(cmd) = entry.command {
+                    let args = entry.args.unwrap_or_default();
+                    mcp_manager.register(&name, &cmd, &args, entry.env.unwrap_or_default());
+                }
+            }
+        }
+    }
+
+    // Start MCP servers after all loading is done
+    if let Some(ref mgr) = cfg.mcp_manager {
+        if !mgr.list_servers().is_empty() {
+            if let Err(e) = mgr.start_all() {
+                eprintln!("MCP start error: {}", e);
+            }
+        }
+    }
+
+    // Initialize skill loader
+    let workspace = project_dir.join("skills");
+    let mut skill_loader = crate::skills::Loader::new(&workspace);
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let builtin_skills = exe_dir.join("skills");
+            if builtin_skills.exists() {
+                skill_loader.set_builtin_dir(&builtin_skills);
+            }
+        }
+    }
+    skill_loader.refresh();
+    cfg.skill_loader = Some(skill_loader);
+
+    // Return found if any config was loaded
+    if cfg.api_key.is_some() || cfg.model != Config::default().model || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {
+        Some(cfg)
+    } else {
+        None
+    }
+}
+
+pub fn build_system_prompt(
+    registry: &Registry,
+    permission_mode: &PermissionMode,
+    project_dir: &Path,
+    skill_loader: Option<&SkillLoader>,
+) -> String {
+    // Get Rust compiler version (matching Go's runtime.Version())
+    let rust_version = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| format!("rustc/{}", env!("CARGO_PKG_VERSION")));
+
+    let mut prompt = format!(
+        r#"You are miniClaudeCode, a lightweight AI coding assistant that operates in the terminal.
+
+## Environment
+- OS: {} / {} / {}
+- Working Directory: {}
+- Shell: PowerShell on Windows, sh/bash on Unix
+
+You have access to the following tools to help the user with software engineering tasks:
+"#,
+        std::env::consts::OS,
+        rust_version,
+        std::env::consts::ARCH,
+        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()
+    );
+
+    // Add tool list
+    for tool in registry.all_tools() {
+        prompt.push_str(&format!("- **{}**: {}\n", tool.name(), tool.description()));
+    }
+
+    // Operating Rules
+    prompt.push_str("\n## Operating Rules\n\n");
+    prompt.push_str("1. Always read a file before editing it.\n");
+    prompt.push_str("2. Use tools to accomplish tasks -- don't just describe what to do.\n");
+    prompt.push_str("3. When running bash commands, prefer non-destructive read operations.\n");
+    prompt.push_str("4. For file edits, provide enough context in old_string to uniquely match.\n");
+    prompt.push_str("5. Be concise and direct in your responses.\n");
+    prompt.push_str("6. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.\n");
+    prompt.push_str("7. Use git directly for git operations -- it is available in the PATH.\n\n");
+
+    // Permission mode
+    let mode_upper = permission_mode.to_string().to_uppercase();
+    let mode_desc = match permission_mode {
+        PermissionMode::Ask => "In ASK mode, potentially dangerous operations will require user confirmation.",
+        PermissionMode::Auto => "In AUTO mode, all operations are auto-approved (use with caution).",
+        PermissionMode::Plan => "In PLAN mode, only read-only operations are allowed. Write operations are blocked.",
+    };
+    prompt.push_str(&format!("## Current Permission Mode: {}\n{}\n", mode_upper, mode_desc));
+
+    // Project instructions from CLAUDE.md
+    let claude_md = project_dir.join("CLAUDE.md");
+    if claude_md.exists() {
+        if let Ok(content) = std::fs::read_to_string(&claude_md) {
+            prompt.push_str("\n## Project Instructions (from CLAUDE.md)\n\n");
+            prompt.push_str(content.trim());
+            prompt.push('\n');
+        }
+    }
+
+    // Skills section
+    if let Some(loader) = skill_loader {
+        // Add always-on skills to system prompt
+        let always_skills = loader.get_always_skills();
+        if !always_skills.is_empty() {
+            let skill_names: Vec<String> = always_skills.iter().map(|s| s.name.clone()).collect();
+            prompt.push_str(&loader.build_system_prompt_for_skills(&skill_names));
+        }
+
+        // Add skills summary for discovery
+        let summary = loader.build_skills_summary();
+        if !summary.is_empty() {
+            if !prompt.ends_with("\n\n") {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str("## Available Skills\n\n");
+            prompt.push_str(&summary);
+        }
+    }
+
+    prompt
+}
