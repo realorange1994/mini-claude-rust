@@ -2,6 +2,8 @@
 
 pub mod client;
 
+pub use client::parse_tool_result;
+
 use self::client::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -98,7 +98,6 @@ pub fn find_round_boundaries(entries: &[ConversationEntry]) -> Vec<(usize, usize
 
 /// Safe boundary detection - finds safe truncation points
 /// A safe boundary is between rounds (after tool result, before user message)
-#[allow(dead_code)]
 pub fn find_safe_boundaries(entries: &[ConversationEntry]) -> Vec<usize> {
     let mut boundaries = Vec::new();
 

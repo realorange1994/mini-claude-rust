@@ -1,23 +1,11 @@
-mod tools;
-mod mcp;
-mod skills;
-mod transcript;
-
 use anyhow::Result;
 use clap::Parser;
+use miniclaudecode_rust::agent_loop;
+use miniclaudecode_rust::config::{load_config_from_file, Config};
+use miniclaudecode_rust::permissions::PermissionMode;
+use miniclaudecode_rust::tools;
 use std::io::{self, Write};
 use std::path::PathBuf;
-
-mod agent_loop;
-mod compact;
-mod config;
-mod context;
-mod filehistory;
-mod permissions;
-mod streaming;
-
-use config::{load_config_from_file, Config};
-use permissions::PermissionMode;
 
 const BANNER: &str = r#"
   ╔══════════════════════════════════════╗

@@ -240,7 +240,7 @@ fn binary_exists(name: &str) -> bool {
 }
 
 /// Check dependencies for a skill
-fn check_dependencies(
+pub fn check_dependencies(
     requires: &[String],
     bins: &[String],
     envs: &[String],
@@ -292,7 +292,7 @@ fn check_dependencies(
     (available, missing)
 }
 
-fn parse_frontmatter(content: &str) -> SkillMeta {
+pub fn parse_frontmatter(content: &str) -> SkillMeta {
     let mut meta = SkillMeta {
         name: String::new(),
         description: String::new(),

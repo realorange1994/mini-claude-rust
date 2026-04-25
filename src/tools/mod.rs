@@ -20,6 +20,20 @@ mod exa_search;
 mod mcp_tools;
 mod skill_tools;
 
+// Re-export tool structs for integration tests
+pub use exec_tool::ExecTool;
+pub use file_read::FileReadTool;
+pub use file_write::FileWriteTool;
+pub use file_edit::FileEditTool;
+pub use multi_edit::MultiEditTool;
+pub use fileops::FileOpsTool;
+pub use list_dir::ListDirTool;
+pub use grep_tool::GrepTool;
+pub use glob_tool::GlobTool;
+pub use git_tool::GitTool;
+pub use runtime_info::RuntimeInfoTool;
+pub use web_search::WebSearchTool;
+
 use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -149,7 +163,7 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
 
 /// Expand `~` to home directory and resolve relative paths.
 /// Works on both Unix and Windows (HOME → USERPROFILE → HOMEDRIVE+HOMEPATH).
-pub(crate) fn expand_path(p: &str) -> std::path::PathBuf {
+pub fn expand_path(p: &str) -> std::path::PathBuf {
     let p = if p.starts_with('~') {
         if let Ok(home) = std::env::var("HOME") {
             p.replacen('~', &home, 1)
@@ -176,7 +190,7 @@ pub(crate) fn expand_path(p: &str) -> std::path::PathBuf {
 
 /// Check if a directory name should be ignored during traversal.
 /// Common build artifacts, dependency directories, and cache directories.
-pub(crate) fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
+pub fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_string_lossy().as_ref(),
         ".git" | "node_modules" | "__pycache__" | ".venv" | "venv"
@@ -187,7 +201,7 @@ pub(crate) fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
 }
 
 /// Strip HTML tags and decode common entities.
-pub(crate) fn strip_tags(html: &str) -> String {
+pub fn strip_tags(html: &str) -> String {
     let mut result = String::new();
     let mut in_tag = false;
 
@@ -211,7 +225,7 @@ pub(crate) fn strip_tags(html: &str) -> String {
 
 /// Check if a string contains internal/private network URLs or IPs.
 /// Uses both string matching and regex for comprehensive detection.
-pub(crate) fn contains_internal_url(s: &str) -> bool {
+pub fn contains_internal_url(s: &str) -> bool {
     use std::sync::OnceLock;
     use regex::Regex;
 
@@ -231,7 +245,7 @@ pub(crate) fn contains_internal_url(s: &str) -> bool {
 
 /// Restore CRLF line endings in a string that was normalized to LF.
 /// Uses O(n) algorithm instead of O(n²) with chars().nth().
-pub(crate) fn restore_crlf(s: &str) -> String {
+pub fn restore_crlf(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 10);
     let mut prev_was_cr = false;
     for c in s.chars() {
@@ -245,7 +259,7 @@ pub(crate) fn restore_crlf(s: &str) -> String {
 }
 
 /// Safely truncate a string to at most `max` bytes without adding ellipsis.
-pub(crate) fn truncate_at(s: &str, max: usize) -> &str {
+pub fn truncate_at(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }

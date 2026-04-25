@@ -875,7 +875,7 @@ impl AgentLoop {
 }
 
 /// Check if an error is transient (retryable)
-fn is_transient_error(err_str: &str) -> bool {
+pub fn is_transient_error(err_str: &str) -> bool {
     let patterns = [
         "connection",
         "timeout",
@@ -899,7 +899,7 @@ fn is_transient_error(err_str: &str) -> bool {
 }
 
 /// Limit a string to max chars, adding "..." if truncated
-fn limit_str(s: &str, max: usize) -> String {
+pub fn limit_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -912,7 +912,7 @@ fn limit_str(s: &str, max: usize) -> String {
 }
 
 /// Generate a summary of tool arguments for display
-fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
+pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
     let input: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(args_json).unwrap_or_default();
 
@@ -1004,7 +1004,7 @@ fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
 }
 
 /// Extract the most relevant part of a tool result for display (matching Go's toolResultPreview)
-fn tool_result_preview(tool_name: &str, output: &str) -> String {
+pub fn tool_result_preview(tool_name: &str, output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
 
     match tool_name {
@@ -1046,7 +1046,7 @@ fn tool_result_preview(tool_name: &str, output: &str) -> String {
 }
 
 /// Strip STDOUT/STDERR headers and return the actual content
-fn clean_exec_output(output: &str) -> String {
+pub fn clean_exec_output(output: &str) -> String {
     let mut cleaned = output.strip_prefix("STDOUT:\n").unwrap_or(output);
     cleaned = cleaned.strip_prefix("STDERR:\n").unwrap_or(cleaned);
     cleaned = cleaned.trim_end();

@@ -224,7 +224,7 @@ impl PermissionGate {
                 let read_only_tools = [
                     "read_file", "grep", "glob", "list_dir", "git",
                     "system", "process", "terminal", "web_search",
-                    "web_fetch", "runtime_info", "list_mcp_tools",
+                    "web_search_scraper", "web_fetch", "runtime_info", "list_mcp_tools",
                     "mcp_server_status", "list_skills",
                 ];
 

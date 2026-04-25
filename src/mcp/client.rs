@@ -480,7 +480,7 @@ impl Client {
 
 // ─── Parse ToolResult from JSON ───
 
-fn parse_tool_result(value: &serde_json::Value) -> Option<ToolResult> {
+pub fn parse_tool_result(value: &serde_json::Value) -> Option<ToolResult> {
     let content = value.get("content").and_then(|c| c.as_array())?;
     let is_error = value.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
 

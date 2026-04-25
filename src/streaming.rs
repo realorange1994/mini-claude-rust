@@ -266,7 +266,7 @@ impl Default for TerminalHandler {
     }
 }
 
-fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
+pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
     let input: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(args_json).unwrap_or_default();
 
@@ -550,7 +550,7 @@ pub async fn process_sse_events(
 }
 
 /// Parse a complete Anthropic message JSON (non-streaming format) and extract tool calls/text
-fn parse_anthropic_message(
+pub fn parse_anthropic_message(
     msg: &serde_json::Value,
     collect: &CollectHandler,
     term: &TerminalHandler,
@@ -624,7 +624,7 @@ fn parse_anthropic_message(
 }
 
 /// Parse an SSE data event into a StreamChunk
-fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
+pub fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
     // Handle different event types from Anthropic SSE
     if let Some(gamma) = event.get("type").and_then(|v| v.as_str()) {
         match gamma {
