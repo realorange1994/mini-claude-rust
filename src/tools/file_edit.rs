@@ -1,10 +1,9 @@
 //! FileEditTool - Edit a file by replacing exact strings
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, expand_path, restore_crlf};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 pub struct FileEditTool;
 
@@ -133,36 +132,4 @@ impl Tool for FileEditTool {
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))
     }
-}
-
-fn expand_path(p: &str) -> std::path::PathBuf {
-    let p = if p.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            p.replacen('~', &home, 1)
-        } else {
-            p.to_string()
-        }
-    } else {
-        p.to_string()
-    };
-
-    let path = std::path::Path::new(&p);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| Path::new(".").to_path_buf())
-            .join(path)
-    }
-}
-
-fn restore_crlf(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + s.len() / 10);
-    for (i, c) in s.chars().enumerate() {
-        if c == '\n' && (i == 0 || s.chars().nth(i - 1) != Some('\r')) {
-            result.push('\r');
-        }
-        result.push(c);
-    }
-    result
 }

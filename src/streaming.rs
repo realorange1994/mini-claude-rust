@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 
+use crate::tools::truncate_at;
+
 /// Streaming chunk types
 #[derive(Debug, Clone)]
 pub enum ChunkType {
@@ -271,18 +273,6 @@ impl Default for TerminalHandler {
     }
 }
 
-/// Safely truncate a string to at most `max` bytes without adding ellipsis
-fn truncate_at(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
     let input: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(args_json).unwrap_or_default();
@@ -471,6 +461,7 @@ pub async fn process_sse_events(
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
 
     let mut builder = client.post(&url)
+        .header("x-api-key", api_key)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")

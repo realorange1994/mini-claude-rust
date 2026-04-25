@@ -1,6 +1,6 @@
 //! GlobTool - Find files matching glob patterns
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, expand_path, is_ignored_dir};
 use glob::glob;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -191,26 +191,6 @@ impl Tool for GlobTool {
     }
 }
 
-fn expand_path(p: &str) -> PathBuf {
-    let p = if p.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            p.replacen('~', &home, 1)
-        } else {
-            p.to_string()
-        }
-    } else {
-        p.to_string()
-    };
-
-    let path = std::path::Path::new(&p);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::Path::new(".").to_path_buf())
-            .join(path)
-    }
-}
 
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pattern = glob::Pattern::new(pattern);
@@ -218,14 +198,4 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         Ok(p) => p.matches(name),
         Err(_) => false,
     }
-}
-
-fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
-    matches!(
-        name.to_string_lossy().as_ref(),
-        ".git" | "node_modules" | "__pycache__" | ".venv" | "venv"
-            | "dist" | "build" | ".DS_Store" | ".tox"
-            | ".mypy_cache" | ".pytest_cache" | ".ruff_cache"
-            | ".coverage" | "htmlcov"
-    )
 }

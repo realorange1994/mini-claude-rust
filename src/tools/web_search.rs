@@ -1,6 +1,6 @@
 //! WebSearchTool - Web search using Bing/360
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, contains_internal_url, strip_tags};
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -69,8 +69,7 @@ impl Tool for WebSearchTool {
             .get("count")
             .and_then(|v| v.as_i64())
             .unwrap_or(10)
-            .max(1)
-            .min(10) as usize;
+            .clamp(1, 10) as usize;
 
         let results = search_bing(query, count);
 
@@ -146,33 +145,36 @@ fn search_bing(query: &str, max_results: usize) -> Result<Vec<SearchResult>, Str
 }
 
 fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    use std::sync::OnceLock;
+    static BING_LI_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TITLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static SNIPPET_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let li_re = BING_LI_RE.get_or_init(|| regex::Regex::new(r#"<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>"#).unwrap());
+    let title_re = TITLE_RE.get_or_init(|| regex::Regex::new(r#"<h2[^>]*>(.*?)</h2>"#).unwrap());
+    let url_re = URL_RE.get_or_init(|| regex::Regex::new(r#"href="([^"]+)""#).unwrap());
+    let snippet_re = SNIPPET_RE.get_or_init(|| regex::Regex::new(r#"<p[^>]*>(.*?)</p>"#).unwrap());
+
     let mut results = Vec::new();
 
-    // Simple regex-based parsing for Bing results
-    let re = regex::Regex::new(r#"<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>"#).unwrap();
-    
-    for cap in re.captures_iter(html) {
+    for cap in li_re.captures_iter(html) {
         if results.len() >= max_results {
             break;
         }
 
         let block = &cap[1];
 
-        // Extract title and URL
-        let title_re = regex::Regex::new(r#"<h2[^>]*>(.*?)</h2>"#).unwrap();
         let title = title_re
             .captures(block)
             .map(|c| strip_tags(&c[1]))
             .unwrap_or_default();
 
-        let url_re = regex::Regex::new(r#"href="([^"]+)""#).unwrap();
         let url = url_re
             .captures(block)
             .map(|c| c[1].to_string())
             .unwrap_or_default();
 
-        // Extract snippet
-        let snippet_re = regex::Regex::new(r#"<p[^>]*>(.*?)</p>"#).unwrap();
         let snippet = snippet_re
             .captures(block)
             .map(|c| strip_tags(&c[1]))
@@ -213,30 +215,36 @@ fn search_360(query: &str, max_results: usize) -> Result<Vec<SearchResult>, Stri
 }
 
 fn parse_360_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    use std::sync::OnceLock;
+    static RES_LI_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TITLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static SNIPPET_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let li_re = RES_LI_RE.get_or_init(|| regex::Regex::new(r#"<li[^>]*class="[^"]*res[^"]*"[^>]*>(.*?)</li>"#).unwrap());
+    let title_re = TITLE_RE.get_or_init(|| regex::Regex::new(r#"<h3[^>]*>(.*?)</h3>"#).unwrap());
+    let url_re = URL_RE.get_or_init(|| regex::Regex::new(r#"href="([^"]+)""#).unwrap());
+    let snippet_re = SNIPPET_RE.get_or_init(|| regex::Regex::new(r#"<p[^>]*>(.*?)</p>"#).unwrap());
+
     let mut results = Vec::new();
 
-    let re = regex::Regex::new(r#"<li[^>]*class="[^"]*res[^"]*"[^>]*>(.*?)</li>"#).unwrap();
-    
-    for cap in re.captures_iter(html) {
+    for cap in li_re.captures_iter(html) {
         if results.len() >= max_results {
             break;
         }
 
         let block = &cap[1];
 
-        let title_re = regex::Regex::new(r#"<h3[^>]*>(.*?)</h3>"#).unwrap();
         let title = title_re
             .captures(block)
             .map(|c| strip_tags(&c[1]))
             .unwrap_or_default();
 
-        let url_re = regex::Regex::new(r#"href="([^"]+)""#).unwrap();
         let url = url_re
             .captures(block)
             .map(|c| c[1].to_string())
             .unwrap_or_default();
 
-        let snippet_re = regex::Regex::new(r#"<p[^>]*>(.*?)</p>"#).unwrap();
         let snippet = snippet_re
             .captures(block)
             .map(|c| strip_tags(&c[1]))
@@ -254,44 +262,3 @@ fn parse_360_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     results
 }
 
-pub(crate) fn strip_tags(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
-    }
-
-    // Decode HTML entities
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-}
-
-fn contains_internal_url(s: &str) -> bool {
-    let internal_patterns = [
-        r"localhost",
-        r"127\.0\.0\.1",
-        r"0\.0\.0\.0",
-        r"192\.168\.\d+\.\d+",
-        r"10\.\d+\.\d+\.\d+",
-        r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+",
-    ];
-
-    for pattern in &internal_patterns {
-        if regex::Regex::new(pattern).unwrap().is_match(s) {
-            return true;
-        }
-    }
-
-    false
-}

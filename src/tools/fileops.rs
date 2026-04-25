@@ -1,10 +1,10 @@
 //! FileOpsTool - File and directory operations
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, expand_path};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct FileOpsTool;
 
@@ -284,24 +284,6 @@ impl FileOpsTool {
     }
 }
 
-fn expand_path(p: &str) -> PathBuf {
-    let p = if p.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            p.replacen('~', &home, 1)
-        } else {
-            p.to_string()
-        }
-    } else {
-        p.to_string()
-    };
-
-    let path = Path::new(&p);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()).join(path)
-    }
-}
 
 fn parse_mode(s: &str) -> Option<u32> {
     let s = s.trim();

@@ -144,3 +144,114 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         registry.register(skill_tools::ListSkillsTool::new(arc_loader));
     }
 }
+
+// ─── Shared utility functions ───
+
+/// Expand `~` to home directory and resolve relative paths.
+/// Works on both Unix and Windows (HOME → USERPROFILE → HOMEDRIVE+HOMEPATH).
+pub(crate) fn expand_path(p: &str) -> std::path::PathBuf {
+    let p = if p.starts_with('~') {
+        if let Ok(home) = std::env::var("HOME") {
+            p.replacen('~', &home, 1)
+        } else if let Ok(home) = std::env::var("USERPROFILE") {
+            p.replacen('~', &home, 1)
+        } else if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            p.replacen('~', &format!("{}{}", drive, path), 1)
+        } else {
+            p.to_string()
+        }
+    } else {
+        p.to_string()
+    };
+
+    let path = std::path::Path::new(&p);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::Path::new(".").to_path_buf())
+            .join(path)
+    }
+}
+
+/// Check if a directory name should be ignored during traversal.
+/// Common build artifacts, dependency directories, and cache directories.
+pub(crate) fn is_ignored_dir(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_string_lossy().as_ref(),
+        ".git" | "node_modules" | "__pycache__" | ".venv" | "venv"
+            | "dist" | "build" | ".DS_Store" | ".tox"
+            | ".mypy_cache" | ".pytest_cache" | ".ruff_cache"
+            | ".coverage" | "htmlcov" | "target"
+    )
+}
+
+/// Strip HTML tags and decode common entities.
+pub(crate) fn strip_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+
+    result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// Check if a string contains internal/private network URLs or IPs.
+/// Uses both string matching and regex for comprehensive detection.
+pub(crate) fn contains_internal_url(s: &str) -> bool {
+    use std::sync::OnceLock;
+    use regex::Regex;
+
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|\[::1\]|\[::ffff:127\.0\.0\.1\]|0x7f000001|0177\.0\.0\.1)"
+        ).unwrap()
+    });
+
+    // Also check for URL-encoded variants
+    let decoded = s.replace("%61", "a")  // %61 = 'a'
+        .replace("%41", "A");            // %41 = 'A'
+
+    re.is_match(s) || re.is_match(&decoded)
+}
+
+/// Restore CRLF line endings in a string that was normalized to LF.
+/// Uses O(n) algorithm instead of O(n²) with chars().nth().
+pub(crate) fn restore_crlf(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + s.len() / 10);
+    let mut prev_was_cr = false;
+    for c in s.chars() {
+        if c == '\n' && !prev_was_cr {
+            result.push('\r');
+        }
+        prev_was_cr = c == '\r';
+        result.push(c);
+    }
+    result
+}
+
+/// Safely truncate a string to at most `max` bytes without adding ellipsis.
+pub(crate) fn truncate_at(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}

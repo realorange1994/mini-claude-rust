@@ -28,7 +28,7 @@ pub struct CompactStats {
 
 /// Estimate token count from text (~4 chars per token, like Go)
 pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Estimate tokens for a conversation entry
@@ -69,7 +69,7 @@ pub fn estimate_entry_tokens(entry: &ConversationEntry) -> usize {
 
 /// Estimate total tokens for all entries
 pub fn estimate_total_tokens(entries: &[ConversationEntry]) -> usize {
-    entries.iter().map(|e| estimate_entry_tokens(e)).sum()
+    entries.iter().map(estimate_entry_tokens).sum()
 }
 
 /// Round boundary detection - finds where tool-use rounds start/end
@@ -241,13 +241,6 @@ impl Compactor {
     fn aggressive_compact(&self, context: &mut ConversationContext) {
         // Keep only first and last 2 entries
         context.minimum_history();
-    }
-
-    /// Check if context needs compaction
-    #[allow(dead_code)]
-    pub fn needs_compaction(&self, entry_count: usize) -> bool {
-        let _tokens = estimate_total_tokens(&vec![]); // placeholder
-        self.determine_phase(entry_count * 10) != CompactPhase::None
     }
 
     /// Get current phase

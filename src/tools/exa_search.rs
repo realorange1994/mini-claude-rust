@@ -1,6 +1,6 @@
 //! ExaSearchTool - Exa deep web search
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, contains_internal_url, strip_tags};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -170,19 +170,23 @@ fn fallback_bing_search(query: &str, num_results: usize) -> String {
 
     let mut output = format!("Search results for: {}\n\n", query);
 
-    // Simple parsing
-    let re = regex::Regex::new(r#"<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>"#).unwrap();
-    
+    // Cached regex patterns
+    use std::sync::OnceLock;
+    static LI_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TITLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let li_re = LI_RE.get_or_init(|| regex::Regex::new(r#"<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>"#).unwrap());
+    let title_re = TITLE_RE.get_or_init(|| regex::Regex::new(r#"<h2[^>]*>(.*?)</h2>"#).unwrap());
+    let url_re = URL_RE.get_or_init(|| regex::Regex::new(r#"href="([^"]+)""#).unwrap());
+
     let mut count = 0;
-    for cap in re.captures_iter(&body) {
+    for cap in li_re.captures_iter(&body) {
         if count >= num_results {
             break;
         }
 
         let block = &cap[1];
-
-        let title_re = regex::Regex::new(r#"<h2[^>]*>(.*?)</h2>"#).unwrap();
-        let url_re = regex::Regex::new(r#"href="([^"]+)""#).unwrap();
 
         if let Some(title_cap) = title_re.captures(block) {
             let title = strip_tags(&title_cap[1]);
@@ -202,28 +206,3 @@ fn fallback_bing_search(query: &str, num_results: usize) -> String {
     output.trim().to_string()
 }
 
-fn strip_tags(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
-    }
-
-    result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
-fn contains_internal_url(s: &str) -> bool {
-    let patterns = ["localhost", "127.0.0.1", "192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."];
-    patterns.iter().any(|p| s.contains(p))
-}

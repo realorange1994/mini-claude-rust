@@ -85,12 +85,14 @@ impl Tool for RuntimeInfoTool {
 }
 
 fn rust_version() -> String {
-    // Get Rust compiler version
-    if let Ok(version) = std::env::var("RUST_VERSION") {
-        return version;
-    }
-    if let Ok(version) = std::env::var("RUSTC_VERSION") {
-        return version;
+    if let Ok(output) = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+    {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            return version;
+        }
     }
     "unknown".to_string()
 }

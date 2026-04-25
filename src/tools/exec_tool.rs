@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use std::sync::OnceLock;
+
 pub struct ExecTool;
 
 impl ExecTool {
@@ -61,35 +63,43 @@ impl Tool for ExecTool {
         let command = params.get("command")?.as_str()?.trim();
         let lower = command.to_lowercase();
 
-        // Check for dangerous patterns
-        let dangerous_patterns = [
-            r"\brm\s+-[rf]{1,2}\b",
-            r"\bdel\s+/[fq]\b",
-            r"\brmdir\s+/s\b",
-            r"format\b",
-            r"\b(mkfs|diskpart)\b",
-            r"\bdd\s+.*\bof=",
-            r">\s*/dev/sd",
-            r"\b(shutdown|reboot|poweroff)\b",
-            r":\(\)\s*\{.*\};\s*:",
-            r"&\S*&\S*&",
-        ];
+        // Check for dangerous patterns (cached regexes)
+        static DANGEROUS: OnceLock<Vec<Regex>> = OnceLock::new();
+        let dangerous = DANGEROUS.get_or_init(|| {
+            [
+                r"\brm\s+-[rf]{1,2}\b",
+                r"\bdel\s+/[fq]\b",
+                r"\brmdir\s+/s\b",
+                r"format\b",
+                r"\b(mkfs|diskpart)\b",
+                r"\bdd\s+.*\bof=",
+                r">\s*/dev/sd",
+                r"\b(shutdown|reboot|poweroff)\b",
+                r":\(\)\s*\{.*\};\s*:",
+                r"&\S*&\S*&",
+            ].iter()
+            .map(|p| Regex::new(p).unwrap())
+            .collect()
+        });
 
-        for pattern in &dangerous_patterns {
-            let re = Regex::new(pattern).unwrap();
+        for re in dangerous {
             if re.is_match(&lower) {
-                return Some(ToolResult::error(format!("Dangerous command pattern detected: {}", pattern)));
+                return Some(ToolResult::error(format!("Dangerous command pattern detected: {}", re.as_str())));
             }
         }
 
-        // Check for internal URLs
-        let url_patterns = [
-            r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)[:/]",
-            r"https?://[0-9]+(?:\.[0-9]+){3}:\d+",
-        ];
+        // Check for internal URLs (cached regexes)
+        static URL_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+        let url_patterns = URL_PATTERNS.get_or_init(|| {
+            [
+                r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)[:/]",
+                r"https?://[0-9]+(?:\.[0-9]+){3}:\d+",
+            ].iter()
+            .map(|p| Regex::new(p).unwrap())
+            .collect()
+        });
 
-        for pattern in &url_patterns {
-            let re = Regex::new(pattern).unwrap();
+        for re in url_patterns {
             if re.is_match(&lower) {
                 return Some(ToolResult::error("Internal/private URL detected"));
             }
@@ -108,12 +118,11 @@ impl Tool for ExecTool {
             return ToolResult::error("Error: empty command");
         }
 
-        let _timeout = params
+        let timeout_secs = params
             .get("timeout")
             .and_then(|v| v.as_i64())
             .unwrap_or(120)
-            .max(1)
-            .min(600) as u64;
+            .clamp(1, 600) as u64;
 
         let working_dir = params
             .get("working_dir")
@@ -134,60 +143,92 @@ impl Tool for ExecTool {
             ("bash", "-c")
         };
 
-        let output = Command::new(shell)
+        let output_result = Command::new(shell)
             .arg(flag)
             .arg(command)
             .current_dir(&working_dir)
-            .output();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
 
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+        let mut child = match output_result {
+            Ok(c) => c,
+            Err(e) => return ToolResult::error(format!("Error: {}", e)),
+        };
 
-                let mut result = String::new();
-                if !stdout.is_empty() {
-                    result.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
+        // Apply timeout using wait_with_timeout pattern
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let start = std::time::Instant::now();
+        let timed_out = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break false,
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break true;
                     }
-                    result.push_str(&stderr);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-
-                // Add exit code
-                result.push_str(&format!("\nExit code: {}", exit_code));
-
-                // Truncate if too large
-                const MAX_OUTPUT: usize = 50000;
-                if result.len() > MAX_OUTPUT {
-                    let half = MAX_OUTPUT / 2;
-                    let mut first_end = half;
-                    while first_end > 0 && !result.is_char_boundary(first_end) { first_end -= 1; }
-                    let mid_start = result.len() - half;
-                    let mut mid_end = mid_start;
-                    while mid_end < result.len() && !result.is_char_boundary(mid_end) { mid_end += 1; }
-                    let truncated = result.len() - (first_end + (result.len() - mid_end));
-                    result = format!(
-                        "{}\n\n... ({} chars truncated) ...\n\n{}",
-                        &result[..first_end],
-                        truncated,
-                        &result[mid_end..]
-                    );
-                }
-
-                if result.is_empty() {
-                    result = "(no output)".to_string();
-                }
-
-                ToolResult {
-                    output: result,
-                    is_error: !output.status.success(),
-                }
+                Err(_) => break false,
             }
-            Err(e) => ToolResult::error(format!("Error: {}", e)),
+        };
+
+        if timed_out {
+            return ToolResult::error(format!(
+                "Error: command timed out after {}s: {}",
+                timeout_secs, command
+            ));
+        }
+
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => return ToolResult::error(format!("Error: {}", e)),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        let mut result = String::new();
+        if !stdout.is_empty() {
+            result.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&stderr);
+        }
+
+        // Add exit code
+        result.push_str(&format!("\nExit code: {}", exit_code));
+
+        // Truncate if too large
+        const MAX_OUTPUT: usize = 50000;
+        if result.len() > MAX_OUTPUT {
+            let half = MAX_OUTPUT / 2;
+            let mut first_end = half;
+            while first_end > 0 && !result.is_char_boundary(first_end) { first_end -= 1; }
+            let mid_start = result.len() - half;
+            let mut mid_end = mid_start;
+            while mid_end < result.len() && !result.is_char_boundary(mid_end) { mid_end += 1; }
+            let truncated = result.len() - (first_end + (result.len() - mid_end));
+            result = format!(
+                "{}\n\n... ({} chars truncated) ...\n\n{}",
+                &result[..first_end],
+                truncated,
+                &result[mid_end..]
+            );
+        }
+
+        if result.is_empty() {
+            result = "(no output)".to_string();
+        }
+
+        ToolResult {
+            output: result,
+            is_error: !output.status.success(),
         }
     }
 }

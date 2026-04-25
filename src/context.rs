@@ -136,13 +136,17 @@ impl ConversationContext {
             if keep > 0 {
                 let first = self.entries[..1].to_vec();
                 let recent = self.entries[self.entries.len() - keep..].to_vec();
-                
-                // Preserve user/assistant alternation
-                if !recent.is_empty() && !first.is_empty() && first[0].role == recent[0].role {
-                    self.entries = [&first[..], &recent[1..]].concat();
-                } else {
-                    self.entries = [&first[..], &recent[..]].concat();
+
+                // Merge and ensure role alternation — remove consecutive same-role entries
+                let mut merged: Vec<ConversationEntry> = Vec::with_capacity(first.len() + recent.len());
+                for entry in first.into_iter().chain(recent) {
+                    if merged.last().is_none_or(|last| last.role != entry.role) {
+                        merged.push(entry);
+                    }
+                    // Skip entries with same role as last kept entry
                 }
+
+                self.entries = merged;
             } else {
                 self.entries = vec![self.entries[0].clone()];
             }

@@ -1,7 +1,6 @@
 //! WebFetchTool - Fetch and extract readable content from URLs
 
-use crate::tools::{Tool, ToolResult};
-use crate::tools::web_search::strip_tags;
+use crate::tools::{Tool, ToolResult, contains_internal_url, strip_tags};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -92,10 +91,10 @@ fn fetch_url(url: &str, extract_mode: &str) -> ToolResult {
         client_builder = client_builder.proxy(proxy_url);
     }
 
-    let client = client_builder
-        .build()
-        .map_err(|e| format!("Client error: {}", e))
-        .unwrap();
+    let client = match client_builder.build() {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("Error: client build failed: {}", e)),
+    };
 
     let request = client
         .get(url)
@@ -305,7 +304,9 @@ fn extract_text_from_html(html: &str) -> String {
 }
 
 fn extract_html_title(html: &str) -> String {
-    let re = regex::Regex::new(r"(?i)<title[^>]*>(.*?)</title>").unwrap();
+    use std::sync::OnceLock;
+    static TITLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = TITLE_RE.get_or_init(|| regex::Regex::new(r"(?i)<title[^>]*>(.*?)</title>").unwrap());
     re.captures(html)
         .map(|c| strip_tags(&c[1]))
         .unwrap_or_default()
@@ -329,21 +330,3 @@ fn extract_html_meta(html: &str, name: &str) -> String {
     String::new()
 }
 
-fn contains_internal_url(url: &str) -> bool {
-    let internal_patterns = [
-        r"localhost",
-        r"127\.0\.0\.1",
-        r"0\.0\.0\.0",
-        r"192\.168\.\d+\.\d+",
-        r"10\.\d+\.\d+\.\d+",
-        r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+",
-    ];
-
-    for pattern in &internal_patterns {
-        if regex::Regex::new(pattern).unwrap().is_match(url) {
-            return true;
-        }
-    }
-
-    false
-}

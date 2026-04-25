@@ -1,10 +1,9 @@
 //! FileReadTool - Read file contents with optional line range
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, expand_path};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024; // 2 MB
 const READ_FILE_DEFAULT_LIMIT: usize = 2000;
@@ -95,7 +94,7 @@ impl Tool for FileReadTool {
         let mut lines: Vec<&str> = content.lines().collect();
         
         // Remove trailing empty element
-        if lines.last().map_or(false, |l| l.is_empty()) {
+        if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
 
@@ -152,23 +151,3 @@ impl Tool for FileReadTool {
     }
 }
 
-fn expand_path(p: &str) -> std::path::PathBuf {
-    let p = if p.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            p.replacen('~', &home, 1)
-        } else {
-            p.to_string()
-        }
-    } else {
-        p.to_string()
-    };
-
-    let path = std::path::Path::new(&p);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| Path::new(".").to_path_buf())
-            .join(path)
-    }
-}

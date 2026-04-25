@@ -4,7 +4,7 @@ use crate::context::{ConversationContext, ConversationEntry, MessageContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
-use crate::tools::{ToolResult, Registry};
+use crate::tools::{truncate_at, ToolResult, Registry};
 use crate::transcript::Transcript;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -14,16 +14,11 @@ use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
 
 /// Transition tracking for context management
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 enum Transition {
+    #[default]
     None,
     ToolsToText,
-}
-
-impl Default for Transition {
-    fn default() -> Self {
-        Transition::None
-    }
 }
 
 /// The core agent loop that drives the AI interaction
@@ -41,6 +36,7 @@ pub struct AgentLoop {
     transcript: Transcript,
     compactor: RwLock<Compactor>,
     file_history: FileHistory,
+    rt: tokio::runtime::Runtime,
 }
 
 impl AgentLoop {
@@ -64,6 +60,12 @@ impl AgentLoop {
             .timeout(Duration::from_secs(300))
             .default_headers({
                 let mut headers = reqwest::header::HeaderMap::new();
+                // Set both x-api-key (Anthropic native) and Bearer (OpenAI-compatible)
+                // to support both native Anthropic API and third-party proxy APIs
+                headers.insert(
+                    reqwest::header::HeaderName::from_static("x-api-key"),
+                    api_key.parse().unwrap(),
+                );
                 headers.insert(
                     reqwest::header::AUTHORIZATION,
                     format!("Bearer {}", api_key).parse().unwrap(),
@@ -91,6 +93,9 @@ impl AgentLoop {
         // Initialize file history for undo/rewind
         let file_history = FileHistory::new();
 
+        // Create a single tokio runtime reused across all run() calls
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
         Self {
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
@@ -105,6 +110,7 @@ impl AgentLoop {
             transcript,
             compactor,
             file_history,
+            rt,
         }
     }
 
@@ -131,8 +137,7 @@ impl AgentLoop {
         let tools = self.get_tools_schema();
 
         // Run the async agent loop in a blocking way
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(self.run_agent_loop(&system_prompt, &messages, &tools));
+        let result = self.rt.block_on(self.run_agent_loop(&system_prompt, &messages, &tools));
 
         match result {
             Ok(response) => {
@@ -500,7 +505,6 @@ impl AgentLoop {
                     eprintln!("[!] Turn failed: {}", e);
 
                     // Detect context length error
-                    let err_str = e.to_string();
                     if err_str.contains("context_length") || err_str.contains("400") ||
                        err_str.contains("stream stalled") || err_str.contains("context canceled") {
                         context_errors += 1;
@@ -726,7 +730,8 @@ impl AgentLoop {
 
         let response = self.client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("x-api-key", &self.api_key)
+            .header("Authorization", format!("Bearer {}", &self.api_key))
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01")
             .json(&payload)
@@ -937,18 +942,6 @@ fn limit_str(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}...", &s[..end])
-}
-
-/// Safely truncate a string to at most `max` bytes without adding ellipsis
-fn truncate_at(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 /// Extract the most relevant part of a tool result for display (matching Go's toolResultPreview)
