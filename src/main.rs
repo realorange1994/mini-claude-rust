@@ -70,6 +70,21 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    // Suppress tokio runtime shutdown panic message
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            return;
+        };
+        if msg.contains("Cannot drop a runtime in a context where blocking is not allowed") {
+            return;  // Suppress this specific panic
+        }
+        eprintln!("thread panicked: {}", msg);
+    }));
+
     let args = Args::parse();
 
     // Priority: flags > env > .claude/settings.json > defaults

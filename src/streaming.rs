@@ -1,12 +1,11 @@
 //! Streaming response handling for agent loop
 //! Full implementation of SSE parsing, stall detection, and chunk collection.
 
-use futures::StreamExt;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use reqwest::Client;
+use futures::StreamExt;
 
 use crate::tools::truncate_at;
 
@@ -438,7 +437,7 @@ impl Default for StallDetector {
 
 /// ProcessSseEvents processes SSE events from the Anthropic API.
 pub async fn process_sse_events(
-    client: &Client,
+    client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
     model: &str,
@@ -449,7 +448,6 @@ pub async fn process_sse_events(
     collect: &CollectHandler,
     term: &TerminalHandler,
     stall: &Arc<StallDetector>,
-    cancel_rx: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> Result<Vec<ToolCallInfo>> {
     // Build request payload
     let mut payload = serde_json::Map::new();
@@ -464,18 +462,16 @@ pub async fn process_sse_events(
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
 
-    let mut builder = client.post(&url)
+    let response = client
+        .post(&url)
         .header("x-api-key", api_key)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")
         .header("anthropic-version", "2023-06-01")
-        .body(serde_json::to_string(&payload)?);
-
-    // Add anthropic-version properly
-    builder = builder.header("anthropic-version", "2023-06-01");
-
-    let response = builder.send().await?;
+        .body(serde_json::to_string(&payload)?)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -488,80 +484,67 @@ pub async fn process_sse_events(
     let mut buf = String::new();
     let mut sse_detected = false;
 
-    loop {
-        // Check for cancellation
-        tokio::select! {
-            _ = cancel_rx.recv() => {
-                return Err(anyhow!("context canceled"));
+    while let Some(result) = stream.next().await {
+        let bytes = match result {
+            Ok(b) => b,
+            Err(e) => return Err(anyhow!("stream error: {}", e)),
+        };
+
+        // Reset stall tracking on each event
+        stall.reset();
+
+        let raw = String::from_utf8_lossy(&bytes);
+
+        // Try to detect non-SSE JSON response (raw Anthropic message format)
+        if !sse_detected {
+            let trimmed = raw.trim();
+            if trimmed.starts_with('{') && !trimmed.starts_with("data:") && !trimmed.starts_with("event:") {
+                // Non-SSE JSON - parse as complete message and return
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    let tool_calls = parse_anthropic_message(&msg, collect, term);
+                    return Ok(tool_calls);
+                }
             }
-            result = stream.next() => {
-                match result {
-                    Some(Ok(bytes)) => {
-                        // Reset stall tracking on each event
-                        stall.reset();
+            sse_detected = true;
+        }
 
-                        let raw = String::from_utf8_lossy(&bytes);
+        // Process bytes as SSE
+        for b in bytes {
+            if b == b'\n' {
+                let line = buf.trim().to_string();
+                buf.clear();
 
-                        // Try to detect non-SSE JSON response (raw Anthropic message format)
-                        if !sse_detected {
-                            let trimmed = raw.trim();
-                            if trimmed.starts_with('{') && !trimmed.starts_with("data:") && !trimmed.starts_with("event:") {
-                                // Non-SSE JSON - parse as complete message and return
-                                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                    let tool_calls = parse_anthropic_message(&msg, collect, term);
-                                    return Ok(tool_calls);
-                                }
-                                continue;
-                            }
-                            sse_detected = true;
-                        }
+                if line.is_empty() {
+                    continue;
+                }
 
-                        // Process bytes as SSE
-                        for b in bytes {
-                            if b == b'\n' {
-                                let line = buf.trim().to_string();
-                                buf.clear();
+                // Parse SSE line: "data: <json>"
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(chunk) = parse_sse_event(&event) {
+                            collect.handle(chunk.clone());
+                            term.handle(chunk.clone());
 
-                                if line.is_empty() {
-                                    continue;
-                                }
-
-                                // Parse SSE line: "data: <json>"
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                        if let Some(chunk) = parse_sse_event(&event) {
-                                            collect.handle(chunk.clone());
-                                            term.handle(chunk.clone());
-
-                                            if collect.is_tool_use_as_text() {
-                                                return Err(anyhow!("model confused: echoed tool syntax as text"));
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if b != b'\r' {
-                                buf.push(b as char);
+                            if collect.is_tool_use_as_text() {
+                                return Err(anyhow!("model confused: echoed tool syntax as text"));
                             }
                         }
-                    }
-                    Some(Err(e)) => {
-                        return Err(anyhow!("stream error: {}", e));
-                    }
-                    None => {
-                        // Stream ended
-                        term.handle(StreamChunk {
-                            chunk_type: ChunkType::Done,
-                            content: String::new(),
-                            id: None,
-                            name: None,
-                            usage: None,
-                        });
-                        break;
                     }
                 }
+            } else if b != b'\r' {
+                buf.push(b as char);
             }
         }
     }
+
+    // Signal end of stream
+    term.handle(StreamChunk {
+        chunk_type: ChunkType::Done,
+        content: String::new(),
+        id: None,
+        name: None,
+        usage: None,
+    });
 
     Ok(collect.tool_calls())
 }
@@ -600,44 +583,35 @@ fn parse_anthropic_message(
                             block.get("name").and_then(|n| n.as_str()),
                         ) {
                             let args = block.get("input").map(|i| i.to_string()).unwrap_or_default();
-                            // Push tool call chunk
-                            collect.handle(StreamChunk {
+                            // Push tool call chunk - send to collect first, then term (same as SSE path)
+                            let tool_call_chunk = StreamChunk {
                                 chunk_type: ChunkType::ToolCall,
                                 content: String::new(),
                                 id: Some(id.to_string()),
                                 name: Some(name.to_string()),
                                 usage: None,
-                            });
+                            };
+                            collect.handle(tool_call_chunk.clone());
+                            term.handle(tool_call_chunk);
                             // Push arguments chunk
-                            collect.handle(StreamChunk {
-                                chunk_type: ChunkType::ToolArgument,
-                                content: args.clone(),
-                                id: None,
-                                name: None,
-                                usage: None,
-                            });
-                            // Print tool call with arguments
-                            term.handle(StreamChunk {
-                                chunk_type: ChunkType::ToolCall,
-                                content: String::new(),
-                                id: Some(id.to_string()),
-                                name: Some(name.to_string()),
-                                usage: None,
-                            });
-                            term.handle(StreamChunk {
+                            let args_chunk = StreamChunk {
                                 chunk_type: ChunkType::ToolArgument,
                                 content: args,
                                 id: None,
                                 name: None,
                                 usage: None,
-                            });
-                            term.handle(StreamChunk {
+                            };
+                            collect.handle(args_chunk.clone());
+                            term.handle(args_chunk);
+                            // Push block stop to flush
+                            let block_stop = StreamChunk {
                                 chunk_type: ChunkType::BlockStop,
                                 content: String::new(),
                                 id: None,
                                 name: None,
                                 usage: None,
-                            });
+                            };
+                            term.handle(block_stop);
                         }
                     }
                     _ => {}

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 /// Transition tracking for context management
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -93,8 +93,12 @@ impl AgentLoop {
         // Initialize file history for undo/rewind
         let file_history = FileHistory::new();
 
-        // Create a single tokio runtime reused across all run() calls
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Create multi-thread tokio runtime for this agent
+        // This properly handles spawn_blocking calls from reqwest
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
         Self {
             config: gate.config.clone(),
@@ -126,7 +130,7 @@ impl AgentLoop {
         let _ = self.transcript.add_user(user_message.to_string());
 
         let system_prompt = crate::config::build_system_prompt(
-            &self.registry.blocking_read(),
+            &*self.registry.blocking_read(),
             &self.config.permission_mode,
             &self.config.project_dir,
             self.config.skill_loader.as_ref(),
@@ -136,10 +140,8 @@ impl AgentLoop {
         let messages = self.entries_to_messages();
         let tools = self.get_tools_schema();
 
-        // Run the async agent loop in a blocking way
-        let result = self.rt.block_on(self.run_agent_loop(&system_prompt, &messages, &tools));
-
-        match result {
+        // Run the async agent loop using stored runtime
+        match self.rt.block_on(self.run_agent_loop(&system_prompt, &messages, &tools)) {
             Ok(response) => {
                 // Log assistant response to transcript
                 let _ = self.transcript.add_assistant(response.clone(), Vec::new());
@@ -602,8 +604,6 @@ impl AgentLoop {
         let term = TerminalHandler::new();
         let stall = Arc::new(StallDetector::new());
 
-        let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
-
         let result = process_sse_events(
             &self.client,
             &self.base_url,
@@ -616,11 +616,7 @@ impl AgentLoop {
             &collect,
             &term,
             &stall,
-            &mut cancel_rx,
         ).await;
-
-        // Cancel any pending operations
-        let _ = cancel_tx.send(()).await;
 
         result?;
 
