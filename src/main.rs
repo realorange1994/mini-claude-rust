@@ -77,6 +77,9 @@ fn main() -> Result<()> {
 
     // Load from .claude/settings.json and .mcp.json
     if let Some(project_dir) = args.dir.clone().or_else(|| std::env::current_dir().ok()) {
+        if let Err(e) = std::env::set_current_dir(&project_dir) {
+            eprintln!("[!] Failed to change working directory to {}: {}", project_dir.display(), e);
+        }
         if let Some(file_cfg) = load_config_from_file(&project_dir) {
             if let Some(api_key) = file_cfg.api_key {
                 cfg.api_key = Some(api_key);
