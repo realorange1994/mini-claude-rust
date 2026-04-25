@@ -37,6 +37,7 @@ pub struct AgentLoop {
     compactor: RwLock<Compactor>,
     file_history: FileHistory,
     rt: tokio::runtime::Runtime,
+    interrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentLoop {
@@ -113,6 +114,7 @@ impl AgentLoop {
             compactor,
             file_history,
             rt,
+            interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -201,6 +203,7 @@ impl AgentLoop {
             compactor,
             file_history,
             rt,
+            interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -268,6 +271,9 @@ impl AgentLoop {
 
     /// Process a user message through the agent loop
     pub fn run(&self, user_message: &str) -> String {
+        // Clear interrupted flag at start of new request
+        self.interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
+
         // Add user message to context
         {
             let mut ctx = self.context.blocking_write();
@@ -369,6 +375,11 @@ impl AgentLoop {
         const MAX_CONTEXT_RECOVERY: usize = 3;
 
         loop {
+            // Check for interruption (Ctrl+C)
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok("[Interrupted by user]".to_string());
+            }
+
             turn += 1;
             if turn > self.max_turns {
                 break;
@@ -1024,6 +1035,16 @@ impl AgentLoop {
     /// Get the transcript filename for resume hint
     pub fn transcript_filename(&self) -> &str {
         self.transcript.filename()
+    }
+
+    /// Set interrupted flag (from Ctrl+C handler)
+    pub fn set_interrupted(&self, value: bool) {
+        self.interrupted.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check if interrupted
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

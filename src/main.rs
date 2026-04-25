@@ -6,7 +6,6 @@ use miniclaudecode_rust::permissions::PermissionMode;
 use miniclaudecode_rust::tools;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const BANNER: &str = r#"
@@ -181,16 +180,32 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
     // Get transcript filename for resume hint
     let transcript_file = agent.transcript_filename().to_string();
 
-    // Set up Ctrl+C handler
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    let transcript_for_signal = transcript_file.clone();
+    // Track Ctrl+C presses for double-press exit
+    let last_ctrlc = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
 
+    let last_ctrlc_clone = last_ctrlc.clone();
+    let transcript_for_signal = transcript_file.clone();
+    let agent_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let agent_interrupted_clone = agent_interrupted.clone();
     ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-        println!("\n\nInterrupted!");
-        println!("To resume this session: --resume {}", transcript_for_signal);
-        std::process::exit(0);
+        let now = std::time::Instant::now();
+        let mut last = last_ctrlc_clone.lock().unwrap();
+
+        // Check if this is a double press within 2 seconds
+        if let Some(last_time) = *last {
+            if now.duration_since(last_time).as_secs() < 2 {
+                // Double press - exit immediately
+                println!("\n\nExiting!");
+                println!("To resume this session: --resume {}", transcript_for_signal);
+                std::process::exit(0);
+            }
+        }
+
+        // First press - just interrupt
+        *last = Some(now);
+        agent_interrupted_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        println!("\n[Interrupted] Press Ctrl+C again within 2s to exit, or continue working.");
     }).expect("Failed to set Ctrl+C handler");
 
     let stdin = io::stdin();
