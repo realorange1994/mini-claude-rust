@@ -23,7 +23,7 @@ impl Tool for FileHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "List version history for a file, or list all files with history. Supports glob patterns to filter files."
+        "List version history for files. Usage: (1) With 'path': show version history for that file. (2) Without 'path': list all files with history. Supports 'pattern' glob filter (e.g., '*.rs'), 'offset' and 'limit' for pagination. Each version shows timestamp and size. Use file_history_read to view content, file_restore/file_rewind to restore."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -169,7 +169,7 @@ impl Tool for FileHistoryReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a specific version of a file from history. Supports offset and limit for pagination."
+        "Read content from a specific version of a file in history. Parameters: 'path' (required), 'version' (1=oldest, omit for current), 'offset' (line number, 1-indexed), 'limit' (max lines, default 2000). Use file_history first to see available versions. Output includes line numbers and pagination hints."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -282,7 +282,7 @@ impl Tool for FileHistoryGrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search within file history versions. Can search across all versions of a file, or across all files with history."
+        "Search within file history using regex. Parameters: 'pattern' (required, regex), 'path' (optional, searches all files if omitted), 'version' (optional, searches all versions if omitted), 'context' (lines around match, default 2), 'ignore_case' (default false). Output format: file:version:line:content. Useful for finding when code was changed or deleted."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -452,7 +452,7 @@ impl Tool for FileRestoreTool {
     }
 
     fn description(&self) -> &str {
-        "Restore a file to its previous version before the last modification. Use this to undo the most recent write or edit to a file."
+        "Restore a file to its previous version (undo last write/edit). Only goes back one version. For multiple versions back, use file_rewind. Returns preview of restored content. Use file_history first to check available versions."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -518,7 +518,7 @@ impl Tool for FileRewindTool {
     }
 
     fn description(&self) -> &str {
-        "Rewind a file to N versions back. Use file_history first to see available versions, then rewind to a specific version."
+        "Rewind a file N versions back. Parameters: 'path' (required), 'steps' (required, how many versions to go back: 1=previous, 2=two versions back, etc.). Use file_history first to see available versions. Returns preview of rewound content. For single version undo, use file_restore."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
