@@ -731,13 +731,7 @@ impl AgentLoop {
 
                                 // Print tool call with arguments (matching streaming behavior)
                                 let summary = tool_arg_summary(&name, &args);
-                                if name == "exec" {
-                                    if !summary.is_empty() {
-                                        eprintln!("  $ {}", summary);
-                                    } else {
-                                        eprintln!("  [{}]", name);
-                                    }
-                                } else if !summary.is_empty() {
+                                if !summary.is_empty() {
                                     eprintln!("  [{}]: {}", name, summary);
                                 } else {
                                     eprintln!("  [{}]", name);
