@@ -1020,6 +1020,11 @@ impl AgentLoop {
             mgr.stop_all();
         }
     }
+
+    /// Get the transcript filename for resume hint
+    pub fn transcript_filename(&self) -> &str {
+        self.transcript.filename()
+    }
 }
 
 /// Check if an error is transient (retryable)

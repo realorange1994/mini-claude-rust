@@ -40,6 +40,18 @@ impl Transcript {
         }
     }
 
+    /// Get the transcript file path
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    /// Get the transcript filename
+    pub fn filename(&self) -> &str {
+        self.path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.jsonl")
+    }
+
     /// Write an entry to the transcript file
     pub fn write_entry(&self, entry: &TranscriptEntry) -> std::io::Result<()> {
         let mut file = OpenOptions::new()

@@ -64,6 +64,9 @@ urlencoding = "2.1"
 # CPU count
 num_cpus = "1.16"
 
+# Ctrl+C handler
+ctrlc = "3.4"
+
 [dev-dependencies]
 tempfile = "3.8"
 wiremock = "0.6"

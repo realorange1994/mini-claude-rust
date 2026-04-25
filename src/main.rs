@@ -6,6 +6,8 @@ use miniclaudecode_rust::permissions::PermissionMode;
 use miniclaudecode_rust::tools;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const BANNER: &str = r#"
   ╔══════════════════════════════════════╗
@@ -176,6 +178,21 @@ fn main() -> Result<()> {
 fn run_interactive(mut agent: agent_loop::AgentLoop) {
     println!("{}", BANNER);
 
+    // Get transcript filename for resume hint
+    let transcript_file = agent.transcript_filename().to_string();
+
+    // Set up Ctrl+C handler
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    let transcript_for_signal = transcript_file.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        println!("\n\nInterrupted!");
+        println!("To resume this session: --resume {}", transcript_for_signal);
+        std::process::exit(0);
+    }).expect("Failed to set Ctrl+C handler");
+
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -188,6 +205,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         let mut input = String::new();
         if stdin.read_line(&mut input).is_err() {
             println!("\nGoodbye!");
+            println!("To resume this session: --resume {}", agent.transcript_filename());
             agent.close();
             break;
         }
@@ -203,7 +221,8 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
 
             match cmd.as_str() {
                 "/quit" | "/exit" | "/q" => {
-                    println!("Goodbye!");
+                    println!("\nGoodbye!");
+                    println!("To resume this session: --resume {}", agent.transcript_filename());
                     agent.close();
                     break;
                 }
