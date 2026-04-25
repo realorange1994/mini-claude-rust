@@ -344,35 +344,39 @@ fn find_transcript(target: &str) -> Option<PathBuf> {
 
     if target == "last" {
         // Find most recent transcript
-        return list_transcripts(&transcript_dir)
+        let transcripts = list_transcripts(&transcript_dir);
+        if transcripts.is_empty() {
+            eprintln!("[!] No transcripts found in {}", transcript_dir.display());
+        }
+        return transcripts
             .first()
             .map(|name| transcript_dir.join(name));
     }
 
-    // Try as number
+    // Try as number first
     if let Ok(num) = target.parse::<usize>() {
         let transcripts = list_transcripts(&transcript_dir);
         if num > 0 && num <= transcripts.len() {
             return Some(transcript_dir.join(&transcripts[num - 1]));
+        } else if transcripts.is_empty() {
+            eprintln!("[!] No transcripts found in {}", transcript_dir.display());
+        } else {
+            eprintln!("[!] Index {} out of range (1-{})", num, transcripts.len());
         }
     }
 
-    // Try as filename
-    let path = PathBuf::from(target);
-    if path.exists() {
-        return Some(path);
-    }
-
-    // Try in transcript directory
+    // Try as exact filename
     let in_dir = transcript_dir.join(target);
     if in_dir.exists() {
         return Some(in_dir);
     }
 
     // Try with .jsonl extension
-    let with_ext = transcript_dir.join(format!("{}.jsonl", target));
-    if with_ext.exists() {
-        return Some(with_ext);
+    if !target.ends_with(".jsonl") {
+        let with_ext = transcript_dir.join(format!("{}.jsonl", target));
+        if with_ext.exists() {
+            return Some(with_ext);
+        }
     }
 
     None
