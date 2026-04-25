@@ -177,8 +177,8 @@ fn main() -> Result<()> {
 fn run_interactive(mut agent: agent_loop::AgentLoop) {
     println!("{}", BANNER);
 
-    // Get transcript filename for resume hint
-    let transcript_file = agent.transcript_filename().to_string();
+    // Get transcript filename for resume hint (strip .jsonl extension)
+    let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
 
     // Track Ctrl+C presses for double-press exit
     let last_ctrlc = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
@@ -186,7 +186,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
     let interrupted = agent.interrupted_flag();
 
     let last_ctrlc_clone = last_ctrlc.clone();
-    let transcript_for_signal = transcript_file.clone();
+    let transcript_for_signal = transcript_stem.to_string();
     let interrupted_clone = interrupted.clone();
 
     ctrlc::set_handler(move || {
@@ -221,7 +221,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         let mut input = String::new();
         if stdin.read_line(&mut input).is_err() {
             println!("\nGoodbye!");
-            println!("To resume this session: --resume {}", agent.transcript_filename());
+            println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
             agent.close();
             break;
         }
@@ -238,7 +238,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
             match cmd.as_str() {
                 "/quit" | "/exit" | "/q" => {
                     println!("\nGoodbye!");
-                    println!("To resume this session: --resume {}", agent.transcript_filename());
+                    println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
                     agent.close();
                     break;
                 }
