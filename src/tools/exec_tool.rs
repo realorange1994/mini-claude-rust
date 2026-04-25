@@ -88,6 +88,34 @@ impl Tool for ExecTool {
             }
         }
 
+        // Check for .git directory destruction
+        let git_harmful = [
+            r"rm\s+-rf.*\.git",
+            r"rm\s+-r.*\.git",
+            r"rmdir.*\.git",
+            r"del.*\.git",
+            r"rmrf.*\.git",
+        ];
+        for pattern in &git_harmful {
+            if Regex::new(pattern).unwrap().is_match(&lower) {
+                return Some(ToolResult::error("Command would destroy .git directory"));
+            }
+        }
+
+        // Check for home directory destruction
+        let home_harmful = [
+            r"rm\s+-rf\s*~",
+            r"rm\s+-rf\s+/home",
+            r"rm\s+-rf\s+/",
+            r"rm\s+-rf\s+C:\\Users",
+            r"del\s+/[fq]\s+\w+\\.*",
+        ];
+        for pattern in &home_harmful {
+            if Regex::new(pattern).unwrap().is_match(&lower) {
+                return Some(ToolResult::error("Command would destroy home directory or system root"));
+            }
+        }
+
         // Check for internal URLs (cached regexes)
         static URL_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
         let url_patterns = URL_PATTERNS.get_or_init(|| {

@@ -134,6 +134,22 @@ impl FileOpsTool {
     }
 
     fn op_remove_all(&self, path: &Path) -> ToolResult {
+        let path_str = path.display().to_string();
+
+        // Protect system directories
+        let normalized = path_str.replace('\\', "/");
+        if normalized == "/"
+            || normalized == "."
+            || normalized == "./"
+            || normalized == ".\\"
+            || normalized.ends_with("/.git")
+            || normalized.ends_with("\\.git")
+            || normalized.ends_with("/~")
+            || normalized.ends_with("\\~")
+        {
+            return ToolResult::error("Cannot remove protected path (root, .git, or home directory)");
+        }
+
         if let Err(e) = fs::remove_dir_all(path) {
             return ToolResult::error(format!("Error removing recursively: {}", e));
         }
