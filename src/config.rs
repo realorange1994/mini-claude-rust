@@ -214,8 +214,9 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     skill_loader.refresh();
     cfg.skill_loader = Some(skill_loader);
 
-    // Initialize file history for undo/rewind
-    cfg.file_history = Some(FileHistory::new());
+    // Initialize file history for undo/rewind (with disk persistence)
+    let snapshots_dir = project_dir.join(".claude").join("snapshots");
+    cfg.file_history = Some(FileHistory::new_with_dir(&snapshots_dir));
 
     // Return found if any config was loaded
     if cfg.api_key.is_some() || cfg.model != Config::default().model || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {

@@ -4,7 +4,7 @@ use crate::context::{ConversationContext, ConversationEntry, MessageContent, Too
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
-use crate::tools::{truncate_at, ToolResult, Registry};
+use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -552,7 +552,7 @@ impl AgentLoop {
                                     if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
                                         if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                                             if !path.is_empty() {
-                                                let _ = file_history.snapshot(std::path::Path::new(path));
+                                                let _ = file_history.snapshot(&expand_path(path));
                                             }
                                         }
                                     }
