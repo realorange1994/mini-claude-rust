@@ -124,26 +124,42 @@ impl Manager {
         }
     }
 
-    /// Call a tool by name, searching across all servers
+    /// Call a tool by name, searching across all servers.
+    /// Releases the client map lock before doing I/O to avoid blocking other operations.
     pub fn call_tool(&self, name: &str, args: HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {
-        let clients = self.clients.read().unwrap();
-
-        for (_server_name, client) in clients.iter() {
-            for tool in client.tools() {
-                if tool.name == name {
-                    return client.call_tool(name, args);
+        // Find the right client while holding the lock, then release before I/O
+        let client = {
+            let clients = self.clients.read().unwrap();
+            let mut found: Option<Arc<Client>> = None;
+            for (_server_name, client) in clients.iter() {
+                for tool in client.tools() {
+                    if tool.name == name {
+                        found = Some(client.clone());
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
                 }
             }
-        }
+            found
+        };
 
-        Err(format!("tool not found: {}", name))
+        match client {
+            Some(c) => c.call_tool(name, args),
+            None => Err(format!("tool not found: {}", name)),
+        }
     }
 
-    /// Call a tool on a specific server
+    /// Call a tool on a specific server.
+    /// Releases the client map lock before doing I/O.
     pub fn call_tool_with_server(&self, server: &str, tool: &str, args: HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {
-        let clients = self.clients.read().unwrap();
-        let client = clients.get(server)
-            .ok_or_else(|| format!("server not found: {}", server))?;
+        let client = {
+            let clients = self.clients.read().unwrap();
+            clients.get(server)
+                .cloned()
+                .ok_or_else(|| format!("server not found: {}", server))
+        }?;
 
         client.call_tool(tool, args)
     }

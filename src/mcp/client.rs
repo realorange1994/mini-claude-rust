@@ -317,38 +317,47 @@ impl Client {
             params,
         };
 
-        self.write_stdio_request(&req)?;
-        self.read_stdio_response()
-    }
-
-    fn write_stdio_request(&self, req: &JsonRpcRequest) -> Result<(), String> {
-        let data = serde_json::to_string(req).map_err(|e| format!("marshal: {}", e))?;
+        // Atomically write request then read response while holding the lock,
+        // to prevent interleaving with concurrent requests on the same stdin/stdout.
         let mut stdio = self.stdio.lock().unwrap();
+
+        // Write request
+        let data = serde_json::to_string(&req).map_err(|e| format!("marshal: {}", e))?;
         let stdin = stdio.stdin.as_mut().ok_or("stdin not available".to_string())?;
         writeln!(stdin, "{}", data).map_err(|e| format!("write: {}", e))?;
         stdin.flush().map_err(|e| format!("flush: {}", e))?;
-        Ok(())
-    }
 
-    fn read_stdio_response(&self) -> Result<serde_json::Value, String> {
-        let mut stdio = self.stdio.lock().unwrap();
+        // Read response, skipping notifications and validating ID match
         let reader = stdio.stdout.as_mut().ok_or("stdout not available".to_string())?;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).map_err(|e| format!("read: {}", e))?;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
 
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| format!("read: {}", e))?;
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            return Err("empty response".to_string());
+            let resp: JsonRpcResponse = serde_json::from_str(&line)
+                .map_err(|e| format!("parse: {} (raw: {})", e, &line[..line.len().min(200)]))?;
+
+            // Skip notifications (no id field) — e.g. notifications/progress, notifications/message
+            if resp.id.is_none() {
+                continue;
+            }
+
+            // Validate response ID matches our request ID
+            if resp.id != Some(id) {
+                // ID mismatch — this shouldn't happen with atomic write+read,
+                // but handle defensively by skipping stale responses
+                continue;
+            }
+
+            if let Some(err) = resp.error {
+                return Err(format!("MCP error [{}]: {}", err.code, err.message));
+            }
+
+            return resp.result.ok_or_else(|| "no result in response".to_string());
         }
-
-        let resp: JsonRpcResponse = serde_json::from_str(&line)
-            .map_err(|e| format!("parse: {} (raw: {})", e, &line[..line.len().min(200)]))?;
-
-        if let Some(err) = resp.error {
-            return Err(format!("MCP error [{}]: {}", err.code, err.message));
-        }
-
-        resp.result.ok_or_else(|| "no result in response".to_string())
     }
 
     fn send_stdio(&self, notification: &JsonRpcNotification) -> Result<(), String> {
