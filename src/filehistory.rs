@@ -17,6 +17,7 @@ pub struct FileSnapshot {
 }
 
 /// FileHistory - tracks file modifications for undo/rewind
+#[derive(Debug)]
 pub struct FileHistory {
     snapshots: RwLock<HashMap<PathBuf, Vec<FileSnapshot>>>,
     max_snapshots: usize,
@@ -109,6 +110,18 @@ impl FileHistory {
     pub fn count(&self, path: &Path) -> usize {
         let snapshots = self.snapshots.read().unwrap();
         snapshots.get(path).map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Get all snapshots for a file (for history listing)
+    pub fn get_snapshots(&self, path: &Path) -> Vec<FileSnapshot> {
+        let snapshots = self.snapshots.read().unwrap();
+        snapshots.get(path).cloned().unwrap_or_default()
+    }
+
+    /// List all files that have history
+    pub fn list_all_files(&self) -> Vec<PathBuf> {
+        let snapshots = self.snapshots.read().unwrap();
+        snapshots.keys().cloned().collect()
     }
 
     /// Clear all snapshots for a file

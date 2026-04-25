@@ -76,6 +76,7 @@ impl AgentLoop {
         let client = client_builder.build().unwrap_or_default();
 
         let max_turns = config.max_turns;
+        let file_history = config.file_history.clone().unwrap_or_else(FileHistory::new);
         let context = ConversationContext::new(config.clone());
         let gate = PermissionGate::new(config);
 
@@ -89,9 +90,6 @@ impl AgentLoop {
 
         // Initialize compactor
         let compactor = RwLock::new(Compactor::new());
-
-        // Initialize file history for undo/rewind
-        let file_history = FileHistory::new();
 
         // Create multi-thread tokio runtime for this agent
         // This properly handles spawn_blocking calls from reqwest

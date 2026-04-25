@@ -6,6 +6,7 @@ pub use crate::permissions::PermissionMode;
 pub use crate::tools::Registry;
 pub use crate::mcp::Manager as McpManager;
 pub use crate::skills::Loader as SkillLoader;
+pub use crate::filehistory::FileHistory;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -20,6 +21,7 @@ pub struct Config {
     pub project_dir: PathBuf,
     pub mcp_manager: Option<McpManager>,
     pub skill_loader: Option<SkillLoader>,
+    pub file_history: Option<FileHistory>,
 }
 
 impl Default for Config {
@@ -68,6 +70,7 @@ impl Default for Config {
             project_dir: PathBuf::from("."),
             mcp_manager: None,
             skill_loader: None,
+            file_history: None,
         }
     }
 }
@@ -210,6 +213,9 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     }
     skill_loader.refresh();
     cfg.skill_loader = Some(skill_loader);
+
+    // Initialize file history for undo/rewind
+    cfg.file_history = Some(FileHistory::new());
 
     // Return found if any config was loaded
     if cfg.api_key.is_some() || cfg.model != Config::default().model || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {

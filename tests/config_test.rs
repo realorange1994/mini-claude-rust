@@ -63,6 +63,7 @@ fn config_custom_values() {
         denied_patterns: vec![],
         mcp_manager: None,
         skill_loader: None,
+        file_history: None,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));
