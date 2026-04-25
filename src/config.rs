@@ -1,3 +1,4 @@
+use chrono::Local;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -240,13 +241,15 @@ pub fn build_system_prompt(
 - OS: {} / {} / {}
 - Working Directory: {}
 - Shell: PowerShell on Windows, sh/bash on Unix
+- Current Date/Time: {}
 
 You have access to the following tools to help the user with software engineering tasks:
 "#,
         std::env::consts::OS,
         rust_version,
         std::env::consts::ARCH,
-        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()
+        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+        Local::now().format("%Y-%m-%d %H:%M:%S")
     );
 
     // Add tool list
