@@ -35,7 +35,7 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory."
+        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use `curl.exe` instead of `curl` on Windows (curl is alias to Invoke-WebRequest). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -147,6 +147,7 @@ impl Tool for ExecTool {
             .arg(flag)
             .arg(command)
             .current_dir(&working_dir)
+            .stdin(std::process::Stdio::null())  // Isolate from REPL stdin
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();
