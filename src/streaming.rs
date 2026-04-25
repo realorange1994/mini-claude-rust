@@ -278,10 +278,20 @@ fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
         serde_json::from_str(args_json).unwrap_or_default();
 
     match tool_name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" | "multi_edit" | "fileops" => {
+        "read_file" | "write_file" | "edit_file" | "multi_edit" | "fileops" => {
             if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                return path.to_string();
+                if !path.is_empty() {
+                    return path.to_string();
+                }
             }
+        }
+        "list_dir" => {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    return path.to_string();
+                }
+            }
+            return ".".to_string(); // Default to current directory
         }
         "exec" | "terminal" => {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
@@ -607,17 +617,24 @@ fn parse_anthropic_message(
                             // Push arguments chunk
                             collect.handle(StreamChunk {
                                 chunk_type: ChunkType::ToolArgument,
-                                content: args,
+                                content: args.clone(),
                                 id: None,
                                 name: None,
                                 usage: None,
                             });
-                            // Print tool call
+                            // Print tool call with arguments
                             term.handle(StreamChunk {
                                 chunk_type: ChunkType::ToolCall,
                                 content: String::new(),
                                 id: Some(id.to_string()),
                                 name: Some(name.to_string()),
+                                usage: None,
+                            });
+                            term.handle(StreamChunk {
+                                chunk_type: ChunkType::ToolArgument,
+                                content: args,
+                                id: None,
+                                name: None,
                                 usage: None,
                             });
                             term.handle(StreamChunk {

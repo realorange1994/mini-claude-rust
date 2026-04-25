@@ -287,7 +287,7 @@ impl Client {
     fn call_tool_stdio(&self, name: &str, args: &HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {
         let params = serde_json::json!({
             "name": name,
-            "arguments": if args.is_empty() { serde_json::Value::Null } else { serde_json::to_value(args).unwrap_or(serde_json::Value::Null) }
+            "arguments": args
         });
 
         let resp = self.request_stdio("tools/call", Some(params))?;
@@ -298,7 +298,7 @@ impl Client {
     fn call_tool_remote(&self, name: &str, args: &HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {
         let params = serde_json::json!({
             "name": name,
-            "arguments": if args.is_empty() { serde_json::Value::Null } else { serde_json::to_value(args).unwrap_or(serde_json::Value::Null) }
+            "arguments": args
         });
 
         let resp = self.request_remote("tools/call", Some(params))?;

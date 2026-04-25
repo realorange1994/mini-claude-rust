@@ -257,45 +257,6 @@ impl AgentLoop {
                         // Execute tools
                         last_transition = Transition::ToolsToText;
 
-                        // Print all tool calls upfront
-                        for tc in &tool_calls {
-                            let params: HashMap<String, serde_json::Value> =
-                                serde_json::from_str(&tc.arguments).unwrap_or_default();
-                            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                                eprintln!("  $ {}", cmd);
-                            } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                                eprintln!("  [{}] {}", tc.name, path);
-                            } else if !params.is_empty() {
-                                // Show first meaningful parameter
-                                let mut printed = false;
-                                for (key, val) in &params {
-                                    match val {
-                                        serde_json::Value::String(s) if !s.is_empty() => {
-                                            eprintln!("  [{}] {}={}", tc.name, key, limit_str(s, 120));
-                                            printed = true;
-                                            break;
-                                        }
-                                        serde_json::Value::Number(n) => {
-                                            eprintln!("  [{}] {}={}", tc.name, key, n);
-                                            printed = true;
-                                            break;
-                                        }
-                                        serde_json::Value::Bool(b) => {
-                                            eprintln!("  [{}] {}={}", tc.name, key, b);
-                                            printed = true;
-                                            break;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if !printed {
-                                    eprintln!("  [{}]", tc.name);
-                                }
-                            } else {
-                                eprintln!("  [{}]", tc.name);
-                            }
-                        }
-
                         // Pre-check permissions sequentially (avoid concurrent stdin reads in ask mode)
                         struct ToolCallEntry {
                             index: usize,
@@ -439,9 +400,10 @@ impl AgentLoop {
                                 let preview = limit_str(output, 150);
                                 eprintln!("  [x] {} ({}): {}", tc.name, elapsed_str, preview);
                             } else {
+                                // Print success result preview
                                 let preview = tool_result_preview(&tc.name, output);
-                                if tc.name == "exec" {
-                                    eprintln!("  {}", preview);
+                                if preview.is_empty() {
+                                    eprintln!("  [+] {}", tc.name);
                                 } else {
                                     eprintln!("  [+] {}: {}", tc.name, preview);
                                 }
@@ -766,6 +728,21 @@ impl AgentLoop {
                                 block.get("name").and_then(|n| n.as_str()),
                             ) {
                                 let args = block.get("input").map(|i| i.to_string()).unwrap_or_default();
+
+                                // Print tool call with arguments (matching streaming behavior)
+                                let summary = tool_arg_summary(&name, &args);
+                                if name == "exec" {
+                                    if !summary.is_empty() {
+                                        eprintln!("  $ {}", summary);
+                                    } else {
+                                        eprintln!("  [{}]", name);
+                                    }
+                                } else if !summary.is_empty() {
+                                    eprintln!("  [{}]: {}", name, summary);
+                                } else {
+                                    eprintln!("  [{}]", name);
+                                }
+
                                 tool_calls.push(ToolCallInfo {
                                     id: id.to_string(),
                                     name: name.to_string(),
@@ -942,6 +919,98 @@ fn limit_str(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}...", &s[..end])
+}
+
+/// Generate a summary of tool arguments for display
+fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
+    let input: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_str(args_json).unwrap_or_default();
+
+    match tool_name {
+        "read_file" | "write_file" | "edit_file" | "multi_edit" | "fileops" => {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    return path.to_string();
+                }
+            }
+        }
+        "list_dir" => {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    return path.to_string();
+                }
+            }
+            return ".".to_string();
+        }
+        "exec" | "terminal" => {
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                if cmd.len() > 120 {
+                    return format!("{}...", &cmd[..120.min(cmd.len())]);
+                }
+                return cmd.to_string();
+            }
+        }
+        "grep" => {
+            if let (Some(pattern), Some(path)) = (
+                input.get("pattern").and_then(|v| v.as_str()),
+                input.get("path").and_then(|v| v.as_str()),
+            ) {
+                return format!("\"{}\" in {}", pattern, path);
+            }
+            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
+                return pattern.to_string();
+            }
+        }
+        "glob" => {
+            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
+                return pattern.to_string();
+            }
+        }
+        "system" => {
+            if let Some(op) = input.get("operation").and_then(|v| v.as_str()) {
+                return op.to_string();
+            }
+        }
+        "git" => {
+            if let Some(args) = input.get("args").and_then(|v| v.as_str()) {
+                return format!("git {}", args);
+            }
+        }
+        "web_search" | "exa_search" => {
+            if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
+                return query.to_string();
+            }
+        }
+        "web_fetch" => {
+            if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
+                return url.to_string();
+            }
+        }
+        _ => {}
+    }
+
+    // Fallback: compact format
+    let parts: Vec<String> = input
+        .iter()
+        .filter_map(|(k, v)| {
+            let v_str = match v {
+                serde_json::Value::String(s) if !s.is_empty() => {
+                    if s.len() > 80 {
+                        format!("{}...", &s[..80])
+                    } else {
+                        s.clone()
+                    }
+                }
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => return None,
+            };
+            Some(format!("{}={}", k, v_str))
+        })
+        .take(3)
+        .collect();
+
+    parts.join(", ")
 }
 
 /// Extract the most relevant part of a tool result for display (matching Go's toolResultPreview)
