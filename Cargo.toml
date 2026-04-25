@@ -68,7 +68,7 @@ num_cpus = "1.16"
 ctrlc = "3.4"
 
 # Cancellation token
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3.8"

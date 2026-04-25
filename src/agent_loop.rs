@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// Transition tracking for context management
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -953,22 +954,42 @@ impl AgentLoop {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         // Check for interruption before request
-        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.is_interrupted() {
             return Err(anyhow!("Request cancelled by user"));
         }
 
-        let response = self.client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("Authorization", format!("Bearer {}", &self.api_key))
-            .header("Content-Type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .json(&payload)
-            .send()
-            .await?;
+        let (cancel_token, cancel_handle) = self.interrupt_cancel_token();
 
-        // Check for interruption after request
-        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+        // Race HTTP send against cancellation
+        let response = tokio::select! {
+            resp = self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("Authorization", format!("Bearer {}", &self.api_key))
+                .header("Content-Type", "application/json")
+                .header("anthropic-version", "2023-06-01")
+                .json(&payload)
+                .send() => {
+                    match resp {
+                        Ok(r) => r,
+                        Err(e) => {
+                            cancel_handle.abort();
+                            if self.is_interrupted() {
+                                return Err(anyhow!("Request cancelled by user"));
+                            }
+                            return Err(anyhow!("API request failed: {}", e));
+                        }
+                    }
+                }
+            _ = cancel_token.cancelled() => {
+                cancel_handle.abort();
+                return Err(anyhow!("Request cancelled by user"));
+            }
+        };
+
+        cancel_handle.abort();
+
+        if self.is_interrupted() {
             return Err(anyhow!("Request cancelled by user"));
         }
 
@@ -978,7 +999,18 @@ impl AgentLoop {
             return Err(anyhow!("API error {}: {}", status, body));
         }
 
-        let body: serde_json::Value = response.json().await?;
+        // Race JSON parsing against cancellation
+        let (cancel_token2, cancel_handle2) = self.interrupt_cancel_token();
+        let body_result = tokio::select! {
+            val = response.json::<serde_json::Value>() => val,
+            _ = cancel_token2.cancelled() => {
+                cancel_handle2.abort();
+                return Err(anyhow!("Request cancelled by user"));
+            }
+        };
+        cancel_handle2.abort();
+
+        let body = body_result.map_err(|e| anyhow!("Failed to parse response: {}", e))?;
 
         // Parse response
         let mut tool_calls = Vec::new();
@@ -1162,6 +1194,25 @@ impl AgentLoop {
     /// Check if interrupted
     pub fn is_interrupted(&self) -> bool {
         self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Create a CancellationToken that gets cancelled when the interrupted flag is set.
+    /// Polls every 100ms. Drop the join handle to stop polling.
+    fn interrupt_cancel_token(&self) -> (CancellationToken, tokio::task::JoinHandle<()>) {
+        let token = CancellationToken::new();
+        let cloned = token.clone();
+        let interrupted = self.interrupted.clone();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                    cloned.cancel();
+                    return;
+                }
+            }
+        });
+        (token, handle)
     }
 
     /// Get a clone of the interrupted flag for use in Ctrl+C handler

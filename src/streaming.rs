@@ -468,16 +468,50 @@ pub async fn process_sse_events(
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
 
-    let response = client
-        .post(&url)
-        .header("x-api-key", api_key)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("anthropic-version", "2023-06-01")
-        .body(serde_json::to_string(&payload)?)
-        .send()
-        .await?;
+    // Create a cancellation token driven by the interrupted flag (polls every 100ms)
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel_token.clone();
+    let interrupted_clone = interrupted.clone();
+    let cancel_guard = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            if interrupted_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                cancel_clone.cancel();
+                return;
+            }
+        }
+    });
+
+    // Race HTTP send against cancellation
+    let response = tokio::select! {
+        resp = client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("anthropic-version", "2023-06-01")
+            .body(serde_json::to_string(&payload)?)
+            .send() => {
+                match resp {
+                    Ok(r) => r,
+                    Err(e) => {
+                        cancel_guard.abort();
+                        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Err(anyhow!("Request cancelled by user"));
+                        }
+                        return Err(anyhow!("API request failed: {}", e));
+                    }
+                }
+            }
+        _ = cancel_token.cancelled() => {
+            cancel_guard.abort();
+            return Err(anyhow!("Request cancelled by user"));
+        }
+    };
+
+    cancel_guard.abort();
 
     if !response.status().is_success() {
         let status = response.status();
