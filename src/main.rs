@@ -11,11 +11,12 @@ const BANNER: &str = r#"
   ╔══════════════════════════════════════╗
   ║       miniClaudeCode v0.1.0         ║
   ║  Distilled Agent Loop Framework     ║
-  ╚══════════════════════════════════════╝ 
+  ╚══════════════════════════════════════╝
 
   Type your message to start. Commands:
     /tools   -- list available tools
     /mode    -- show/change permission mode
+    /resume  -- resume from previous session
     /help    -- show help
     /quit    -- exit
 "#;
@@ -51,6 +52,10 @@ struct Args {
     /// Project directory
     #[arg(long)]
     dir: Option<PathBuf>,
+
+    /// Resume from a previous session (transcript file path or 'last' for most recent)
+    #[arg(long)]
+    resume: Option<String>,
 
     /// Message to process (one-shot mode)
     #[arg(trailing_var_arg = true)]
@@ -130,7 +135,29 @@ fn main() -> Result<()> {
     let registry = tools::Registry::new();
     tools::register_builtin_tools(&registry);
     tools::register_mcp_and_skills(&registry, &cfg);
-    let agent = agent_loop::AgentLoop::new(cfg, registry, args.stream);
+
+    // Handle --resume flag
+    let resume_path = args.resume.as_ref().map(|s| find_transcript(s)).flatten();
+
+    let agent = if let Some(transcript_path) = resume_path {
+        // Create a new registry for the resumed session
+        let resume_registry = tools::Registry::new();
+        tools::register_builtin_tools(&resume_registry);
+        tools::register_mcp_and_skills(&resume_registry, &cfg);
+
+        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, args.stream, &transcript_path) {
+            Ok(agent) => {
+                println!("[+] Resumed session from: {}", transcript_path.display());
+                agent
+            }
+            Err(e) => {
+                eprintln!("[!] Failed to resume: {}. Starting new session.", e);
+                agent_loop::AgentLoop::new(cfg, registry, args.stream)
+            }
+        }
+    } else {
+        agent_loop::AgentLoop::new(cfg, registry, args.stream)
+    };
 
     // One-shot mode
     if let Some(message) = args.message {
@@ -208,6 +235,60 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     println!("{}", BANNER);
                     continue;
                 }
+                "/resume" => {
+                    // List available transcripts or resume specific one
+                    let transcript_dir = PathBuf::from(".claude").join("transcripts");
+
+                    if parts.len() > 1 {
+                        // Resume specific transcript
+                        let target = parts[1];
+                        let transcript_path = find_transcript(target);
+                        if transcript_path.is_none() {
+                            println!("Transcript not found: {}", target);
+                            continue;
+                        }
+
+                        // Close current agent and start new one from transcript
+                        agent.close();
+                        let registry = tools::Registry::new();
+                        tools::register_builtin_tools(&registry);
+                        tools::register_mcp_and_skills(&registry, &agent.config);
+
+                        match agent_loop::AgentLoop::from_transcript(
+                            agent.config.clone(),
+                            registry,
+                            true, // use stream
+                            &transcript_path.unwrap(),
+                        ) {
+                            Ok(new_agent) => {
+                                agent = new_agent;
+                                println!("[+] Resumed session from transcript");
+                            }
+                            Err(e) => {
+                                println!("[!] Failed to resume: {}", e);
+                            }
+                        }
+                    } else {
+                        // List available transcripts
+                        if !transcript_dir.exists() {
+                            println!("No transcripts found. Start a session first.");
+                            continue;
+                        }
+
+                        let transcripts = list_transcripts(&transcript_dir);
+                        if transcripts.is_empty() {
+                            println!("No transcripts found.");
+                            continue;
+                        }
+
+                        println!("\nAvailable transcripts:");
+                        for (i, t) in transcripts.iter().enumerate() {
+                            println!("  {}. {}", i + 1, t);
+                        }
+                        println!("\nUsage: /resume <number> or /resume <filename>");
+                    }
+                    continue;
+                }
                 _ => {
                     println!("Unknown command: {}. Type /help for help.", cmd);
                     continue;
@@ -220,4 +301,70 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         println!("{}", result);
         println!();
     }
+}
+
+/// Find transcript file by name, number, or 'last'
+fn find_transcript(target: &str) -> Option<PathBuf> {
+    let transcript_dir = PathBuf::from(".claude").join("transcripts");
+
+    if target == "last" {
+        // Find most recent transcript
+        return list_transcripts(&transcript_dir)
+            .first()
+            .map(|name| transcript_dir.join(name));
+    }
+
+    // Try as number
+    if let Ok(num) = target.parse::<usize>() {
+        let transcripts = list_transcripts(&transcript_dir);
+        if num > 0 && num <= transcripts.len() {
+            return Some(transcript_dir.join(&transcripts[num - 1]));
+        }
+    }
+
+    // Try as filename
+    let path = PathBuf::from(target);
+    if path.exists() {
+        return Some(path);
+    }
+
+    // Try in transcript directory
+    let in_dir = transcript_dir.join(target);
+    if in_dir.exists() {
+        return Some(in_dir);
+    }
+
+    // Try with .jsonl extension
+    let with_ext = transcript_dir.join(format!("{}.jsonl", target));
+    if with_ext.exists() {
+        return Some(with_ext);
+    }
+
+    None
+}
+
+/// List transcript files sorted by modification time (most recent first)
+fn list_transcripts(dir: &PathBuf) -> Vec<String> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+
+    let mut transcripts: Vec<(String, std::time::SystemTime)> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+                if let Some(mtime) = mtime {
+                    transcripts.push((name, mtime));
+                }
+            }
+        }
+    }
+
+    // Sort by modification time, most recent first
+    transcripts.sort_by(|a, b| b.1.cmp(&a.1));
+    transcripts.iter().map(|(name, _)| name.clone()).collect()
 }

@@ -1,14 +1,14 @@
 use crate::compact::Compactor;
 use crate::config::Config;
-use crate::context::{ConversationContext, ConversationEntry, MessageContent};
+use crate::context::{ConversationContext, ConversationEntry, MessageContent, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::tools::{truncate_at, ToolResult, Registry};
-use crate::transcript::Transcript;
+use crate::transcript::{Transcript, TranscriptEntry};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -114,6 +114,156 @@ impl AgentLoop {
             file_history,
             rt,
         }
+    }
+
+    /// Create agent from existing transcript (resume session)
+    pub fn from_transcript(
+        config: Config,
+        registry: Registry,
+        use_stream: bool,
+        transcript_path: &Path,
+    ) -> Result<Self> {
+        let api_key = config.api_key.clone().unwrap_or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
+                .unwrap_or_default()
+        });
+
+        if api_key.is_empty() {
+            return Err(anyhow!("ANTHROPIC_API_KEY environment variable is not set"));
+        }
+
+        let base_url = config.base_url.clone().unwrap_or_else(|| {
+            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+        });
+
+        let client_builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .default_headers({
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::HeaderName::from_static("x-api-key"),
+                    api_key.parse().unwrap(),
+                );
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", api_key).parse().unwrap(),
+                );
+                headers
+            });
+
+        let client = client_builder.build().unwrap_or_default();
+
+        let max_turns = config.max_turns;
+        let file_history = config.file_history.clone().unwrap_or_else(FileHistory::new);
+        let gate = PermissionGate::new(config.clone());
+
+        // Read transcript and rebuild context
+        let transcript = Transcript::new(&transcript_path.to_path_buf());
+        let entries = transcript.read_all()
+            .map_err(|e| anyhow!("Failed to read transcript: {}", e))?;
+
+        let context = Self::rebuild_context_from_transcript(&entries, config.clone());
+
+        // Create new transcript file for this session
+        let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let transcript_dir = PathBuf::from(".claude").join("transcripts");
+        let _ = std::fs::create_dir_all(&transcript_dir);
+        let new_transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
+        let new_transcript = Transcript::new(&new_transcript_path);
+
+        // Log resume info
+        let _ = new_transcript.add_user(format!(
+            "Resumed from {} ({} messages restored)",
+            transcript_path.display(),
+            entries.len()
+        ));
+
+        let compactor = RwLock::new(Compactor::new());
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        Ok(Self {
+            config: gate.config.clone(),
+            registry: Arc::new(RwLock::new(registry)),
+            gate,
+            context: Arc::new(RwLock::new(context)),
+            client,
+            use_stream,
+            max_tool_chars: 8192,
+            max_turns,
+            base_url,
+            api_key,
+            transcript: new_transcript,
+            compactor,
+            file_history,
+            rt,
+        })
+    }
+
+    /// Rebuild conversation context from transcript entries
+    fn rebuild_context_from_transcript(
+        entries: &[TranscriptEntry],
+        config: Config,
+    ) -> ConversationContext {
+        let mut context = ConversationContext::new(config);
+
+        for entry in entries {
+            match entry.role.as_str() {
+                "user" => {
+                    // Skip the initial metadata message
+                    if entry.content.starts_with("model=") && entry.content.contains("mode=") {
+                        continue;
+                    }
+                    context.add_user_message(entry.content.clone());
+                }
+                "assistant" => {
+                    if !entry.tool_calls.is_empty() {
+                        // Convert tool calls to context format
+                        let tool_use_blocks: Vec<ToolUseBlock> = entry.tool_calls.iter()
+                            .filter(|tc| tc.result.is_none())
+                            .map(|tc| {
+                                let input: HashMap<String, serde_json::Value> =
+                                    serde_json::from_str(&tc.arguments).unwrap_or_default();
+                                ToolUseBlock {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    input,
+                                }
+                            })
+                            .collect();
+
+                        if !tool_use_blocks.is_empty() {
+                            context.add_assistant_tool_calls(tool_use_blocks);
+                        } else if !entry.content.is_empty() {
+                            context.add_assistant_text(entry.content.clone());
+                        }
+                    } else if !entry.content.is_empty() {
+                        context.add_assistant_text(entry.content.clone());
+                    }
+                }
+                "tool" => {
+                    // Convert tool results
+                    let tool_result_blocks: Vec<ToolResultBlock> = entry.tool_calls.iter()
+                        .map(|tc| ToolResultBlock {
+                            tool_use_id: tc.id.clone(),
+                            content: vec![ToolResultContent::Text { text: entry.content.clone() }],
+                            is_error: false,
+                        })
+                        .collect();
+
+                    if !tool_result_blocks.is_empty() {
+                        context.add_tool_results(tool_result_blocks);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        context
     }
 
     /// Process a user message through the agent loop
