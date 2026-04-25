@@ -216,46 +216,96 @@ impl AgentLoop {
     ) -> ConversationContext {
         let mut context = ConversationContext::new(config);
 
+        // Group consecutive tool_use entries and tool_result entries
+        // Anthropic API expects:
+        // - assistant message can have multiple tool_use blocks
+        // - user message can have multiple tool_result blocks
+        let mut pending_tool_uses: Vec<ToolUseBlock> = Vec::new();
+        let mut pending_tool_results: Vec<ToolResultBlock> = Vec::new();
+
         for entry in entries {
             match entry.type_.as_str() {
                 TYPE_USER => {
+                    // Flush any pending tool results first
+                    if !pending_tool_results.is_empty() {
+                        context.add_tool_results(pending_tool_results.clone());
+                        pending_tool_results.clear();
+                    }
+                    // Flush any pending tool uses (shouldn't happen before user, but handle it)
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
                     context.add_user_message(entry.content.clone());
                 }
                 TYPE_ASSISTANT => {
+                    // Flush pending items first
+                    if !pending_tool_results.is_empty() {
+                        context.add_tool_results(pending_tool_results.clone());
+                        pending_tool_results.clear();
+                    }
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
+                    // Add assistant text if present
                     if !entry.content.is_empty() {
                         context.add_assistant_text(entry.content.clone());
                     }
                 }
                 TYPE_TOOL_USE => {
-                    // tool_use: create assistant message with tool call
+                    // Accumulate tool_use blocks - they will be flushed when we see
+                    // a tool_result, user, or assistant entry
                     if let (Some(name), Some(id)) = (&entry.tool_name, &entry.tool_id) {
                         let input: HashMap<String, serde_json::Value> = entry.tool_args
                             .clone()
                             .unwrap_or_default();
-                        context.add_assistant_tool_calls(vec![ToolUseBlock {
+                        pending_tool_uses.push(ToolUseBlock {
                             id: id.clone(),
                             name: name.clone(),
                             input,
-                        }]);
+                        });
                     }
                 }
                 TYPE_TOOL_RESULT => {
-                    // tool_result: create tool result message
+                    // Flush pending tool uses first (create assistant message with all tool calls)
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
+                    // Accumulate tool_result blocks
                     if let Some(id) = &entry.tool_id {
-                        context.add_tool_results(vec![ToolResultBlock {
+                        pending_tool_results.push(ToolResultBlock {
                             tool_use_id: id.clone(),
                             content: vec![ToolResultContent::Text { text: entry.content.clone() }],
                             is_error: false,
-                        }]);
+                        });
                     }
                 }
                 TYPE_SYSTEM | TYPE_ERROR => {
+                    // Flush pending items before system/error
+                    if !pending_tool_results.is_empty() {
+                        context.add_tool_results(pending_tool_results.clone());
+                        pending_tool_results.clear();
+                    }
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
                     // Skip system and error entries
                 }
                 _ => {
                     // Skip unknown types
                 }
             }
+        }
+
+        // Flush any remaining pending items at the end
+        if !pending_tool_uses.is_empty() {
+            context.add_assistant_tool_calls(pending_tool_uses);
+        }
+        if !pending_tool_results.is_empty() {
+            context.add_tool_results(pending_tool_results);
         }
 
         context
