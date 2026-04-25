@@ -5,7 +5,7 @@ use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::tools::{truncate_at, ToolResult, Registry};
-use crate::transcript::{Transcript, TranscriptEntry};
+use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,7 @@ pub struct AgentLoop {
     compactor: RwLock<Compactor>,
     file_history: FileHistory,
     rt: tokio::runtime::Runtime,
+    /// Shared interrupted flag (can be set from Ctrl+C handler)
     interrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -87,7 +88,8 @@ impl AgentLoop {
         let _ = std::fs::create_dir_all(&transcript_dir);
         let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
         let transcript = Transcript::new(&transcript_path);
-        let _ = transcript.add_user(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode));
+        // Write system entry with model/mode info (matching Go format)
+        let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode));
 
         // Initialize compactor
         let compactor = RwLock::new(Compactor::new());
@@ -207,7 +209,7 @@ impl AgentLoop {
         })
     }
 
-    /// Rebuild conversation context from transcript entries
+    /// Rebuild conversation context from transcript entries (Go format)
     fn rebuild_context_from_transcript(
         entries: &[TranscriptEntry],
         config: Config,
@@ -215,54 +217,44 @@ impl AgentLoop {
         let mut context = ConversationContext::new(config);
 
         for entry in entries {
-            match entry.role.as_str() {
-                "user" => {
-                    // Skip the initial metadata message
-                    if entry.content.starts_with("model=") && entry.content.contains("mode=") {
-                        continue;
-                    }
+            match entry.type_.as_str() {
+                TYPE_USER => {
                     context.add_user_message(entry.content.clone());
                 }
-                "assistant" => {
-                    if !entry.tool_calls.is_empty() {
-                        // Convert tool calls to context format
-                        let tool_use_blocks: Vec<ToolUseBlock> = entry.tool_calls.iter()
-                            .filter(|tc| tc.result.is_none())
-                            .map(|tc| {
-                                let input: HashMap<String, serde_json::Value> =
-                                    serde_json::from_str(&tc.arguments).unwrap_or_default();
-                                ToolUseBlock {
-                                    id: tc.id.clone(),
-                                    name: tc.name.clone(),
-                                    input,
-                                }
-                            })
-                            .collect();
-
-                        if !tool_use_blocks.is_empty() {
-                            context.add_assistant_tool_calls(tool_use_blocks);
-                        } else if !entry.content.is_empty() {
-                            context.add_assistant_text(entry.content.clone());
-                        }
-                    } else if !entry.content.is_empty() {
+                TYPE_ASSISTANT => {
+                    if !entry.content.is_empty() {
                         context.add_assistant_text(entry.content.clone());
                     }
                 }
-                "tool" => {
-                    // Convert tool results
-                    let tool_result_blocks: Vec<ToolResultBlock> = entry.tool_calls.iter()
-                        .map(|tc| ToolResultBlock {
-                            tool_use_id: tc.id.clone(),
-                            content: vec![ToolResultContent::Text { text: entry.content.clone() }],
-                            is_error: false,
-                        })
-                        .collect();
-
-                    if !tool_result_blocks.is_empty() {
-                        context.add_tool_results(tool_result_blocks);
+                TYPE_TOOL_USE => {
+                    // tool_use: create assistant message with tool call
+                    if let (Some(name), Some(id)) = (&entry.tool_name, &entry.tool_id) {
+                        let input: HashMap<String, serde_json::Value> = entry.tool_args
+                            .clone()
+                            .unwrap_or_default();
+                        context.add_assistant_tool_calls(vec![ToolUseBlock {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input,
+                        }]);
                     }
                 }
-                _ => {}
+                TYPE_TOOL_RESULT => {
+                    // tool_result: create tool result message
+                    if let Some(id) = &entry.tool_id {
+                        context.add_tool_results(vec![ToolResultBlock {
+                            tool_use_id: id.clone(),
+                            content: vec![ToolResultContent::Text { text: entry.content.clone() }],
+                            is_error: false,
+                        }]);
+                    }
+                }
+                TYPE_SYSTEM | TYPE_ERROR => {
+                    // Skip system and error entries
+                }
+                _ => {
+                    // Skip unknown types
+                }
             }
         }
 
@@ -297,8 +289,8 @@ impl AgentLoop {
         // Run the async agent loop using stored runtime
         match self.rt.block_on(self.run_agent_loop(&system_prompt, &messages, &tools)) {
             Ok(response) => {
-                // Log assistant response to transcript
-                let _ = self.transcript.add_assistant(response.clone(), Vec::new());
+                // Log assistant response to transcript (Go format: content + model)
+                let _ = self.transcript.add_assistant(response.clone(), Some(self.config.model.clone()));
 
                 let mut ctx = self.context.blocking_write();
                 ctx.add_assistant_text(response.clone());
@@ -306,7 +298,7 @@ impl AgentLoop {
             }
             Err(e) => {
                 let err_msg = format!("Error: {}", e);
-                let _ = self.transcript.add_assistant(err_msg.clone(), Vec::new());
+                let _ = self.transcript.add_assistant(err_msg.clone(), Some(self.config.model.clone()));
                 err_msg
             }
         }
@@ -367,7 +359,12 @@ impl AgentLoop {
     }
 
     /// Run the agent loop asynchronously
-    async fn run_agent_loop(&self, system_prompt: &str, _messages: &[serde_json::Value], tools: &[serde_json::Value]) -> Result<String> {
+    async fn run_agent_loop(
+        &self,
+        system_prompt: &str,
+        _messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+    ) -> Result<String> {
         let mut turn = 0;
         let mut last_transition = Transition::None;
         let mut consecutive_stalls = 0;
@@ -456,24 +453,39 @@ impl AgentLoop {
                         // Execute approved tool calls concurrently
                         let mut handles = Vec::new();
                         for entry in entries {
-                            let transcript = &self.transcript;
+                            // Check for interruption before each tool
+                            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+
+                            // Record tool_use to transcript BEFORE execution (matching Go's WriteToolUse)
+                            let params_for_transcript: HashMap<String, serde_json::Value> =
+                                serde_json::from_str(&entry.tc.arguments).unwrap_or_default();
+                            let _ = self.transcript.add_tool_use(
+                                entry.tc.id.clone(),
+                                entry.tc.name.clone(),
+                                params_for_transcript,
+                            );
+
                             if entry.denied {
                                 // Denied tools are handled immediately
                                 let output = entry.err_text;
-                                let _ = transcript.add_tool_result(
+                                // Record tool_result to transcript
+                                let _ = self.transcript.add_tool_result(
                                     entry.tc.id.clone(),
                                     entry.tc.name.clone(),
-                                    entry.tc.arguments.clone(),
                                     output.clone(),
                                 );
+                                let tc = entry.tc.clone();
                                 handles.push(tokio::task::spawn(async move {
-                                    (entry.index, output, true, std::time::Duration::ZERO)
+                                    (entry.index, output, true, std::time::Duration::ZERO, false, tc.id, tc.name)
                                 }));
                             } else {
                                 // Approved tools execute concurrently
                                 let tc = entry.tc.clone();
                                 let params = entry.params.clone();
                                 let max_tool_chars = self.max_tool_chars;
+                                let interrupted = self.interrupted.clone();
 
                                 // Clone what we need for the spawned task
                                 let registry_clone = self.registry.clone();
@@ -539,34 +551,49 @@ impl AgentLoop {
                                             (output, true, elapsed)
                                         }
                                     };
-                                    (entry.index, output.0, output.1, output.2)
+                                    (entry.index, output.0, output.1, output.2, interrupted.load(std::sync::atomic::Ordering::SeqCst), tc.id, tc.name)
                                 }));
                             }
                         }
 
-                        // Collect results in order
-                        let mut tool_results: Vec<(usize, String, bool, std::time::Duration)> = Vec::new();
+                        // Check if interrupted during tool execution
+                        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Ok("[Interrupted by user]".to_string());
+                        }
+
+                        // Collect results in order and record to transcript
+                        let mut tool_results: Vec<(usize, String, bool, std::time::Duration, String, String)> = Vec::new();
                         for handle in handles {
                             if let Ok(result) = handle.await {
-                                tool_results.push(result);
+                                // result is (index, output, is_error, elapsed, was_interrupted, tool_id, tool_name)
+                                if result.4 {
+                                    // Tool was interrupted
+                                    return Ok("[Interrupted by user]".to_string());
+                                }
+                                // Record tool_result to transcript (matching Go's WriteToolResult)
+                                let _ = self.transcript.add_tool_result(
+                                    result.5.clone(),  // tool_id
+                                    result.6.clone(),  // tool_name
+                                    result.1.clone(),  // output
+                                );
+                                tool_results.push((result.0, result.1, result.2, result.3, result.5, result.6));
                             }
                         }
                         tool_results.sort_by_key(|r| r.0);
 
                         // Display results (matching Go's ASCII format: [+] tool: preview / [x] tool (time): error)
-                        for (i, output, is_error, elapsed) in &tool_results {
-                            let tc = &tool_calls[*i];
+                        for (_i, output, is_error, elapsed, _tool_id, tool_name) in &tool_results {
                             let elapsed_str = format!("{:.2}s", elapsed.as_secs_f64());
                             if *is_error {
                                 let preview = limit_str(output, 150);
-                                eprintln!("  [x] {} ({}): {}", tc.name, elapsed_str, preview);
+                                eprintln!("  [x] {} ({}): {}", tool_name, elapsed_str, preview);
                             } else {
                                 // Print success result preview
-                                let preview = tool_result_preview(&tc.name, output);
+                                let preview = tool_result_preview(tool_name, output);
                                 if preview.is_empty() {
-                                    eprintln!("  [+] {}", tc.name);
+                                    eprintln!("  [+] {}", tool_name);
                                 } else {
-                                    eprintln!("  [+] {}: {}", tc.name, preview);
+                                    eprintln!("  [+] {}: {}", tool_name, preview);
                                 }
                             }
                         }
@@ -587,8 +614,8 @@ impl AgentLoop {
                         let tool_result_blocks: Vec<crate::context::ToolResultBlock> = tool_calls.iter().enumerate().map(|(i, tc)| {
                             // Find the result for this tool call
                             let (output, is_error) = tool_results.iter()
-                                .find(|(idx, _, _, _)| *idx == i)
-                                .map(|(_, output, is_error, _)| (output.clone(), *is_error))
+                                .find(|(idx, _, _, _, _, _)| *idx == i)
+                                .map(|(_, output, is_error, _, _, _)| (output.clone(), *is_error))
                                 .unwrap_or_else(|| ("Error: no result".to_string(), true));
 
                             crate::context::ToolResultBlock {
@@ -601,6 +628,11 @@ impl AgentLoop {
                         let mut ctx = self.context.write().await;
                         ctx.add_assistant_tool_calls(tool_use_blocks);
                         ctx.add_tool_results(tool_result_blocks);
+
+                        // Check for interruption after tool execution
+                        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Ok("[Interrupted by user]".to_string());
+                        }
 
                     } else if !text.is_empty() {
                         // Final response
@@ -725,10 +757,20 @@ impl AgentLoop {
         // Try streaming first if enabled
         if self.use_stream {
             for attempt in 0..MAX_RETRIES {
+                // Check for interruption before each attempt
+                if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(anyhow!("Request cancelled by user"));
+                }
+
                 match self.try_stream_once(system_prompt, messages, tools).await {
                     Ok(result) => return Ok(result),
                     Err(e) => {
                         let err_str = e.to_string();
+
+                        // Check if interrupted
+                        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Err(anyhow!("Request cancelled by user"));
+                        }
 
                         // Check if it's a transient error
                         if !is_transient_error(&err_str) {
@@ -775,7 +817,13 @@ impl AgentLoop {
             &collect,
             &term,
             &stall,
+            self.interrupted.clone(),
         ).await;
+
+        // Check if interrupted
+        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("Request cancelled by user"));
+        }
 
         result?;
 
@@ -804,11 +852,20 @@ impl AgentLoop {
         let mut backoff_ms = INITIAL_BACKOFF_MS;
 
         for attempt in 0..MAX_RETRIES {
+            // Check for interruption before each attempt
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(anyhow!("Request cancelled by user"));
+            }
+
             match self.call_api_non_streaming(system_prompt, messages, tools).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    let err_str = e.to_string();
+                    // Check if interrupted
+                    if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(anyhow!("Request cancelled by user"));
+                    }
 
+                    let err_str = e.to_string();
                     if !is_transient_error(&err_str) {
                         return Err(e);
                     }
@@ -845,6 +902,11 @@ impl AgentLoop {
 
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
+        // Check for interruption before request
+        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("Request cancelled by user"));
+        }
+
         let response = self.client
             .post(&url)
             .header("x-api-key", &self.api_key)
@@ -854,6 +916,11 @@ impl AgentLoop {
             .json(&payload)
             .send()
             .await?;
+
+        // Check for interruption after request
+        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("Request cancelled by user"));
+        }
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1045,6 +1112,11 @@ impl AgentLoop {
     /// Check if interrupted
     pub fn is_interrupted(&self) -> bool {
         self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get a clone of the interrupted flag for use in Ctrl+C handler
+    pub fn interrupted_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.interrupted.clone()
     }
 }
 

@@ -1,34 +1,174 @@
 //! Transcript module - JSONL format conversation logging
+//! Fully compatible with Go format
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 
-/// A single conversation entry
+/// Entry type constants (matching Go format)
+pub const TYPE_USER: &str = "user";
+pub const TYPE_ASSISTANT: &str = "assistant";
+pub const TYPE_TOOL_USE: &str = "tool_use";
+pub const TYPE_TOOL_RESULT: &str = "tool_result";
+pub const TYPE_ERROR: &str = "error";
+pub const TYPE_SYSTEM: &str = "system";
+
+/// A single transcript entry (matching Go format exactly)
+///
+/// Go format:
+/// ```go
+/// type Entry struct {
+///     Type      string         `json:"type"`
+///     Content   string         `json:"content,omitempty"`
+///     ToolName  string         `json:"tool_name,omitempty"`
+///     ToolArgs  map[string]any `json:"tool_args,omitempty"`
+///     ToolID    string         `json:"tool_id,omitempty"`
+///     Timestamp time.Time      `json:"timestamp"`
+///     Model     string         `json:"model,omitempty"`
+///     Error     string         `json:"error,omitempty"`
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscriptEntry {
-    pub timestamp: DateTime<Utc>,
-    pub role: String,
+pub struct Entry {
+    /// Entry type: user, assistant, tool_use, tool_result, error, system
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Content (optional for tool_use, required for others)
+    #[serde(skip_serializing_if = "String::is_empty", default)]
     pub content: String,
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
+    /// Tool name (for tool_use and tool_result)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_name: Option<String>,
+    /// Tool arguments (for tool_use)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_args: Option<HashMap<String, serde_json::Value>>,
+    /// Tool ID (for tool_use and tool_result)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_id: Option<String>,
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Model name (for assistant entries)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    /// Error message (for error entries)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-    pub result: Option<String>,
+impl Entry {
+    /// Create a user entry
+    pub fn user(content: String) -> Self {
+        Self {
+            type_: TYPE_USER.to_string(),
+            content,
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
+    /// Create an assistant entry
+    pub fn assistant(content: String, model: Option<String>) -> Self {
+        Self {
+            type_: TYPE_ASSISTANT.to_string(),
+            content,
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model,
+            error: None,
+        }
+    }
+
+    /// Create a tool_use entry
+    pub fn tool_use(tool_id: String, tool_name: String, tool_args: HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            type_: TYPE_TOOL_USE.to_string(),
+            content: String::new(),
+            tool_name: Some(tool_name),
+            tool_args: Some(tool_args),
+            tool_id: Some(tool_id),
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
+    /// Create a tool_result entry
+    pub fn tool_result(tool_id: String, tool_name: String, content: String) -> Self {
+        Self {
+            type_: TYPE_TOOL_RESULT.to_string(),
+            content,
+            tool_name: Some(tool_name),
+            tool_args: None,
+            tool_id: Some(tool_id),
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
+    /// Create a system entry
+    pub fn system(content: String) -> Self {
+        Self {
+            type_: TYPE_SYSTEM.to_string(),
+            content,
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
+    /// Create an error entry
+    pub fn error(error: String) -> Self {
+        Self {
+            type_: TYPE_ERROR.to_string(),
+            content: String::new(),
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model: None,
+            error: Some(error),
+        }
+    }
+
+    /// Check if this is a tool_use entry
+    pub fn is_tool_use(&self) -> bool {
+        self.type_ == TYPE_TOOL_USE
+    }
+
+    /// Check if this is a tool_result entry
+    pub fn is_tool_result(&self) -> bool {
+        self.type_ == TYPE_TOOL_RESULT
+    }
+
+    /// Check if this is a user entry
+    pub fn is_user(&self) -> bool {
+        self.type_ == TYPE_USER
+    }
+
+    /// Check if this is an assistant entry
+    pub fn is_assistant(&self) -> bool {
+        self.type_ == TYPE_ASSISTANT
+    }
 }
 
 /// Transcript - manages conversation logging
 pub struct Transcript {
     path: PathBuf,
-    entries: RwLock<Vec<TranscriptEntry>>,
+    entries: RwLock<Vec<Entry>>,
 }
 
 impl Transcript {
@@ -53,7 +193,7 @@ impl Transcript {
     }
 
     /// Write an entry to the transcript file
-    pub fn write_entry(&self, entry: &TranscriptEntry) -> std::io::Result<()> {
+    pub fn write_entry(&self, entry: &Entry) -> std::io::Result<()> {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -71,45 +211,36 @@ impl Transcript {
 
     /// Add a user message
     pub fn add_user(&self, content: String) -> std::io::Result<()> {
-        let entry = TranscriptEntry {
-            timestamp: Utc::now(),
-            role: "user".to_string(),
-            content,
-            tool_calls: Vec::new(),
-        };
-        self.write_entry(&entry)
+        self.write_entry(&Entry::user(content))
     }
 
     /// Add an assistant message
-    pub fn add_assistant(&self, content: String, tool_calls: Vec<ToolCall>) -> std::io::Result<()> {
-        let entry = TranscriptEntry {
-            timestamp: Utc::now(),
-            role: "assistant".to_string(),
-            content,
-            tool_calls,
-        };
-        self.write_entry(&entry)
+    pub fn add_assistant(&self, content: String, model: Option<String>) -> std::io::Result<()> {
+        self.write_entry(&Entry::assistant(content, model))
     }
 
-    /// Add a tool result
-    pub fn add_tool_result(&self, id: String, name: String, arguments: String, result: String) -> std::io::Result<()> {
-        let entry = TranscriptEntry {
-            timestamp: Utc::now(),
-            role: "tool".to_string(),
-            content: result,
-            tool_calls: vec![ToolCall {
-                id,
-                name,
-                arguments,
-                result: None,
-            }],
-        };
-        self.write_entry(&entry)
+    /// Add a tool_use entry
+    pub fn add_tool_use(&self, tool_id: String, tool_name: String, tool_arg: HashMap<String, serde_json::Value>) -> std::io::Result<()> {
+        self.write_entry(&Entry::tool_use(tool_id, tool_name, tool_arg))
+    }
+
+    /// Add a tool_result entry
+    pub fn add_tool_result(&self, tool_id: String, tool_name: String, result: String) -> std::io::Result<()> {
+        self.write_entry(&Entry::tool_result(tool_id, tool_name, result))
+    }
+
+    /// Add a system entry
+    pub fn add_system(&self, content: String) -> std::io::Result<()> {
+        self.write_entry(&Entry::system(content))
+    }
+
+    /// Add an error entry
+    pub fn add_error(&self, error: String) -> std::io::Result<()> {
+        self.write_entry(&Entry::error(error))
     }
 
     /// Read all entries from the transcript file
-    #[allow(dead_code)]
-    pub fn read_all(&self) -> std::io::Result<Vec<TranscriptEntry>> {
+    pub fn read_all(&self) -> std::io::Result<Vec<Entry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
@@ -120,7 +251,7 @@ impl Transcript {
 
         for line in reader.lines() {
             let line = line?;
-            if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(&line) {
+            if let Ok(entry) = serde_json::from_str::<Entry>(&line) {
                 entries.push(entry);
             }
         }
@@ -132,7 +263,7 @@ impl Transcript {
     #[allow(dead_code)]
     pub fn replay<F>(&self, mut f: F) -> std::io::Result<()>
     where
-        F: FnMut(&TranscriptEntry),
+        F: FnMut(&Entry),
     {
         let entries = self.read_all()?;
         for entry in entries {
@@ -150,3 +281,10 @@ impl Default for Transcript {
         }
     }
 }
+
+// ============================================================================
+// Type alias for API consistency
+// ============================================================================
+
+/// Type alias for Entry (used in function signatures)
+pub type TranscriptEntry = Entry;

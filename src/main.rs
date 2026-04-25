@@ -182,12 +182,13 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
 
     // Track Ctrl+C presses for double-press exit
     let last_ctrlc = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    // Use the agent's interrupted flag directly
+    let interrupted = agent.interrupted_flag();
 
     let last_ctrlc_clone = last_ctrlc.clone();
     let transcript_for_signal = transcript_file.clone();
-    let agent_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let interrupted_clone = interrupted.clone();
 
-    let agent_interrupted_clone = agent_interrupted.clone();
     ctrlc::set_handler(move || {
         let now = std::time::Instant::now();
         let mut last = last_ctrlc_clone.lock().unwrap();
@@ -202,9 +203,9 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
             }
         }
 
-        // First press - just interrupt
+        // First press - set interrupted flag
         *last = Some(now);
-        agent_interrupted_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        interrupted_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         println!("\n[Interrupted] Press Ctrl+C again within 2s to exit, or continue working.");
     }).expect("Failed to set Ctrl+C handler");
 

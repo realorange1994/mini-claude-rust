@@ -448,7 +448,13 @@ pub async fn process_sse_events(
     collect: &CollectHandler,
     term: &TerminalHandler,
     stall: &Arc<StallDetector>,
+    interrupted: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<ToolCallInfo>> {
+    // Check for interruption before starting
+    if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(anyhow!("Request cancelled by user"));
+    }
+
     // Build request payload
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), serde_json::json!(model));
@@ -485,6 +491,11 @@ pub async fn process_sse_events(
     let mut sse_detected = false;
 
     while let Some(result) = stream.next().await {
+        // Check for interruption during streaming
+        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("Request cancelled by user"));
+        }
+
         let bytes = match result {
             Ok(b) => b,
             Err(e) => return Err(anyhow!("stream error: {}", e)),

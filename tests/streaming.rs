@@ -783,6 +783,7 @@ async fn run_sse_stream(sse_body: &str) -> anyhow::Result<Vec<ToolCallInfo>> {
     let collect = CollectHandler::new();
     let term = TerminalHandler::new();
     let stall = std::sync::Arc::new(StallDetector::new());
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     miniclaudecode_rust::streaming::process_sse_events(
         &client,
@@ -796,6 +797,7 @@ async fn run_sse_stream(sse_body: &str) -> anyhow::Result<Vec<ToolCallInfo>> {
         &collect,
         &term,
         &stall,
+        interrupted,
     )
     .await
 }
@@ -955,6 +957,7 @@ async fn sse_stream_non_sse_json_response() {
     let collect = CollectHandler::new();
     let term = TerminalHandler::new();
     let stall = std::sync::Arc::new(StallDetector::new());
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let result = miniclaudecode_rust::streaming::process_sse_events(
         &client,
@@ -968,6 +971,7 @@ async fn sse_stream_non_sse_json_response() {
         &collect,
         &term,
         &stall,
+        interrupted,
     )
     .await
     .unwrap();
@@ -989,6 +993,7 @@ async fn sse_stream_api_error_returns_err() {
     let collect = CollectHandler::new();
     let term = TerminalHandler::new();
     let stall = std::sync::Arc::new(StallDetector::new());
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let result = miniclaudecode_rust::streaming::process_sse_events(
         &client,
@@ -1002,6 +1007,7 @@ async fn sse_stream_api_error_returns_err() {
         &collect,
         &term,
         &stall,
+        interrupted,
     )
     .await;
 
@@ -1064,6 +1070,7 @@ async fn sse_stream_non_sse_json_with_tool_calls() {
     let collect = CollectHandler::new();
     let term = TerminalHandler::new();
     let stall = std::sync::Arc::new(StallDetector::new());
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let result = miniclaudecode_rust::streaming::process_sse_events(
         &client,
@@ -1077,6 +1084,7 @@ async fn sse_stream_non_sse_json_with_tool_calls() {
         &collect,
         &term,
         &stall,
+        interrupted,
     )
     .await
     .unwrap();
