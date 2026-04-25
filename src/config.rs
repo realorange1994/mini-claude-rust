@@ -241,7 +241,7 @@ pub fn build_system_prompt(
 - OS: {} / {} / {}
 - Working Directory: {}
 - Shell: PowerShell on Windows, sh/bash on Unix
-- Current Date/Time: {}
+- Current Date/Time: {} ({})
 
 You have access to the following tools to help the user with software engineering tasks:
 "#,
@@ -249,7 +249,8 @@ You have access to the following tools to help the user with software engineerin
         rust_version,
         std::env::consts::ARCH,
         std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
-        Local::now().format("%Y-%m-%d %H:%M:%S")
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
+        Local::now().format("%z")
     );
 
     // Add tool list
