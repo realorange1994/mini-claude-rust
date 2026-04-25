@@ -1,6 +1,5 @@
 //! Skills loader - loads and parses skill definitions
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +11,9 @@ pub struct SkillMeta {
     pub name: String,
     pub description: String,
     pub always: bool,
+    #[allow(dead_code)]
     pub available: bool,
+    #[allow(dead_code)]
     pub commands: Vec<String>,
     pub tags: Vec<String>,
     pub version: String,
@@ -25,13 +26,17 @@ pub struct SkillMeta {
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
+    #[allow(dead_code)]
     pub path: PathBuf,
     pub source: String, // "builtin" or "workspace"
     pub available: bool,
     pub always: bool,
     pub description: String,
+    #[allow(dead_code)]
     pub commands: Vec<String>,
+    #[allow(dead_code)]
     pub tags: Vec<String>,
+    #[allow(dead_code)]
     pub version: String,
     pub missing_deps: Vec<String>,
 }

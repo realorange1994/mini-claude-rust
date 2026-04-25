@@ -103,6 +103,7 @@ impl Tool for FileOpsTool {
 }
 
 impl FileOpsTool {
+    #[allow(unused_variables)]
     fn op_mkdir(&self, path: &Path, params: HashMap<String, Value>) -> ToolResult {
         let mode = params
             .get("mode")
@@ -186,6 +187,7 @@ impl FileOpsTool {
         ))
     }
 
+    #[allow(unused_variables)]
     fn op_chmod(&self, path: &Path, params: HashMap<String, Value>) -> ToolResult {
         let mode_str = params.get("mode").and_then(|v| v.as_str());
         let mode = match mode_str.and_then(parse_mode) {
@@ -201,19 +203,21 @@ impl FileOpsTool {
             if let Err(e) = fs::set_permissions(path, PermissionsExt::from_mode(mode)) {
                 return ToolResult::error(format!("Error changing mode: {}", e));
             }
+
+            ToolResult::ok(format!(
+                "Changed mode of {} to {}",
+                path.display(),
+                mode_str.unwrap_or("0644")
+            ))
         }
 
         #[cfg(windows)]
         {
-            let _ = mode; // Suppress unused warning
-            return ToolResult::error("Error: chmod is not supported on Windows");
+            let _ = mode;
+            let _ = mode_str;
+            let _ = path;
+            ToolResult::error("Error: chmod is not supported on Windows")
         }
-
-        ToolResult::ok(format!(
-            "Changed mode of {} to {}",
-            path.display(),
-            mode_str.unwrap_or("0644")
-        ))
     }
 
     fn op_link(&self, path: &Path, params: HashMap<String, Value>) -> ToolResult {

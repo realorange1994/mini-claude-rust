@@ -3,8 +3,7 @@
 use crate::tools::{Tool, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024; // 10MB

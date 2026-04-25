@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub use crate::permissions::PermissionMode;
@@ -72,6 +72,7 @@ impl Default for Config {
 }
 
 impl Config {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -114,6 +115,7 @@ pub struct McpServerConfig {
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
+    #[allow(dead_code)]
     pub url: Option<String>,
 }
 

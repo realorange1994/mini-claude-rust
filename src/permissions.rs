@@ -1,4 +1,4 @@
-use crate::tools::{Tool, ToolResult};
+use crate::tools::ToolResult;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -275,11 +275,13 @@ impl PermissionGate {
     }
 
     /// Get current permission mode
+    #[allow(dead_code)]
     pub fn mode(&self) -> PermissionMode {
         self.config.permission_mode
     }
 
     /// Set permission mode
+    #[allow(dead_code)]
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.config.permission_mode = mode;
     }

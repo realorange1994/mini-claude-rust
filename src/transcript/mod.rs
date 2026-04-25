@@ -1,7 +1,7 @@
 //! Transcript module - JSONL format conversation logging
 
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -96,6 +96,7 @@ impl Transcript {
     }
 
     /// Read all entries from the transcript file
+    #[allow(dead_code)]
     pub fn read_all(&self) -> std::io::Result<Vec<TranscriptEntry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -116,6 +117,7 @@ impl Transcript {
     }
 
     /// Replay transcript for debugging
+    #[allow(dead_code)]
     pub fn replay<F>(&self, mut f: F) -> std::io::Result<()>
     where
         F: FnMut(&TranscriptEntry),

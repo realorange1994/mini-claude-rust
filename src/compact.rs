@@ -2,7 +2,6 @@
 //! Implements token estimation, round grouping, and progressive compaction.
 
 use crate::context::{ConversationContext, ConversationEntry, MessageContent};
-use serde_json;
 
 /// Compaction phase levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +20,9 @@ pub struct CompactStats {
     pub entries_before: usize,
     pub entries_after: usize,
     pub estimated_tokens_saved: usize,
+    #[allow(dead_code)]
     pub estimated_tokens_before: usize,
+    #[allow(dead_code)]
     pub estimated_tokens_after: usize,
 }
 
@@ -97,6 +98,7 @@ pub fn find_round_boundaries(entries: &[ConversationEntry]) -> Vec<(usize, usize
 
 /// Safe boundary detection - finds safe truncation points
 /// A safe boundary is between rounds (after tool result, before user message)
+#[allow(dead_code)]
 pub fn find_safe_boundaries(entries: &[ConversationEntry]) -> Vec<usize> {
     let mut boundaries = Vec::new();
 
@@ -242,17 +244,20 @@ impl Compactor {
     }
 
     /// Check if context needs compaction
+    #[allow(dead_code)]
     pub fn needs_compaction(&self, entry_count: usize) -> bool {
-        let tokens = estimate_total_tokens(&vec![]); // placeholder
+        let _tokens = estimate_total_tokens(&vec![]); // placeholder
         self.determine_phase(entry_count * 10) != CompactPhase::None
     }
 
     /// Get current phase
+    #[allow(dead_code)]
     pub fn phase(&self) -> CompactPhase {
         self.phase
     }
 
     /// Reset compaction state
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.phase = CompactPhase::None;
         self.round_count = 0;

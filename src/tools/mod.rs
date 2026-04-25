@@ -21,8 +21,6 @@ mod mcp_tools;
 mod skill_tools;
 
 use crate::config::Config;
-use crate::mcp::Manager as McpManager;
-use crate::skills::Loader as SkillLoader;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -102,11 +100,6 @@ impl Registry {
         let tools = self.tools.read().unwrap();
         tools.values().cloned().collect()
     }
-
-    pub fn tool_names(&self) -> Vec<String> {
-        let tools = self.tools.read().unwrap();
-        tools.keys().cloned().collect()
-    }
 }
 
 impl Default for Registry {
@@ -151,23 +144,3 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         registry.register(skill_tools::ListSkillsTool::new(arc_loader));
     }
 }
-
-pub use exec_tool::ExecTool;
-pub use file_read::FileReadTool;
-pub use file_write::FileWriteTool;
-pub use file_edit::FileEditTool;
-pub use multi_edit::MultiEditTool;
-pub use fileops::FileOpsTool;
-pub use glob_tool::GlobTool;
-pub use grep_tool::GrepTool;
-pub use list_dir::ListDirTool;
-pub use git_tool::GitTool;
-pub use system_tool::SystemTool;
-pub use process::ProcessTool;
-pub use runtime_info::RuntimeInfoTool;
-pub use terminal_tool::TerminalTool;
-pub use web_search::WebSearchTool;
-pub use web_fetch::WebFetchTool;
-pub use exa_search::ExaSearchTool;
-pub use mcp_tools::{ListMcpTools, McpToolCaller, McpServerStatus};
-pub use skill_tools::{ReadSkillTool, ListSkillsTool};

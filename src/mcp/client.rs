@@ -22,8 +22,9 @@ struct JsonRpcRequest {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
+    #[allow(dead_code)]
     jsonrpc: String,
-    #[serde(default)]
+    #[allow(dead_code)]
     id: Option<i64>,
     #[serde(default)]
     result: Option<serde_json::Value>,

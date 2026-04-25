@@ -74,7 +74,9 @@ impl Tool for ListMcpTools {
         let mut output = format!("MCP Tools ({} total)\n", filtered.len());
         for tool in filtered {
             let desc = if tool.description.len() > 60 {
-                format!("{}...", &tool.description[..60])
+                let mut end = 60;
+                while end > 0 && !tool.description.is_char_boundary(end) { end -= 1; }
+                format!("{}...", &tool.description[..end])
             } else {
                 tool.description.clone()
             };

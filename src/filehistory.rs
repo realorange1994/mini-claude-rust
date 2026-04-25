@@ -67,6 +67,7 @@ impl FileHistory {
     }
 
     /// Restore the previous version of a file
+    #[allow(dead_code)]
     pub fn restore(&self, path: &Path) -> std::io::Result<Option<String>> {
         let mut snapshots = self.snapshots.write().unwrap();
         
@@ -85,6 +86,7 @@ impl FileHistory {
     }
 
     /// Rewind to a specific number of versions back
+    #[allow(dead_code)]
     pub fn rewind(&self, path: &Path, steps: usize) -> std::io::Result<Option<String>> {
         let mut snapshots = self.snapshots.write().unwrap();
         
@@ -103,18 +105,21 @@ impl FileHistory {
     }
 
     /// Get the number of snapshots for a file
+    #[allow(dead_code)]
     pub fn count(&self, path: &Path) -> usize {
         let snapshots = self.snapshots.read().unwrap();
         snapshots.get(path).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Clear all snapshots for a file
+    #[allow(dead_code)]
     pub fn clear(&self, path: &Path) {
         let mut snapshots = self.snapshots.write().unwrap();
         snapshots.remove(path);
     }
 
     /// Clear all snapshots
+    #[allow(dead_code)]
     pub fn clear_all(&self) {
         let mut snapshots = self.snapshots.write().unwrap();
         snapshots.clear();

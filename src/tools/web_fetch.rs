@@ -3,8 +3,6 @@
 use crate::tools::{Tool, ToolResult};
 use crate::tools::web_search::strip_tags;
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -180,12 +178,17 @@ fn fetch_url(url: &str, extract_mode: &str) -> ToolResult {
     const MAX_BODY_SIZE: usize = 1 << 20; // 1MB
     if result.len() > MAX_BODY_SIZE {
         let half = MAX_BODY_SIZE / 2;
-        let truncated = result.len() - MAX_BODY_SIZE;
+        let mut first_end = half;
+        while first_end > 0 && !result.is_char_boundary(first_end) { first_end -= 1; }
+        let mid_start = result.len() - half;
+        let mut mid_end = mid_start;
+        while mid_end < result.len() && !result.is_char_boundary(mid_end) { mid_end += 1; }
+        let truncated = result.len() - (first_end + (result.len() - mid_end));
         result = format!(
             "{}\n\n... ({} chars truncated) ...\n\n{}",
-            &result[..half],
+            &result[..first_end],
             truncated,
-            &result[result.len() - half..]
+            &result[mid_end..]
         );
     }
 
@@ -225,7 +228,7 @@ fn extract_text_from_html(html: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        let c_lower = chars_lower[i];
+        let _c_lower = chars_lower[i];
 
         // Check for script/style tags
         if i + 7 < chars_lower.len() && chars_lower[i..i+7] == ['<', 's', 'c', 'r', 'i', 'p', 't'] {

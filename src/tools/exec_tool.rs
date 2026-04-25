@@ -6,7 +6,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
 
 pub struct ExecTool;
 
@@ -109,7 +108,7 @@ impl Tool for ExecTool {
             return ToolResult::error("Error: empty command");
         }
 
-        let timeout = params
+        let _timeout = params
             .get("timeout")
             .and_then(|v| v.as_i64())
             .unwrap_or(120)
@@ -165,12 +164,17 @@ impl Tool for ExecTool {
                 const MAX_OUTPUT: usize = 50000;
                 if result.len() > MAX_OUTPUT {
                     let half = MAX_OUTPUT / 2;
-                    let truncated = result.len() - MAX_OUTPUT;
+                    let mut first_end = half;
+                    while first_end > 0 && !result.is_char_boundary(first_end) { first_end -= 1; }
+                    let mid_start = result.len() - half;
+                    let mut mid_end = mid_start;
+                    while mid_end < result.len() && !result.is_char_boundary(mid_end) { mid_end += 1; }
+                    let truncated = result.len() - (first_end + (result.len() - mid_end));
                     result = format!(
                         "{}\n\n... ({} chars truncated) ...\n\n{}",
-                        &result[..half],
+                        &result[..first_end],
                         truncated,
-                        &result[result.len() - half..]
+                        &result[mid_end..]
                     );
                 }
 

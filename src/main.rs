@@ -5,7 +5,7 @@ mod transcript;
 
 use anyhow::Result;
 use clap::Parser;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 mod agent_loop;

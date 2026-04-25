@@ -95,8 +95,8 @@ impl Tool for FileEditTool {
 
         // Normalize CRLF
         let mut content = content.replace("\r\n", "\n");
-        let mut old_str = old_str.replace("\r\n", "\n");
-        let mut new_str = new_str.replace("\r\n", "\n");
+        let old_str = old_str.replace("\r\n", "\n");
+        let new_str = new_str.replace("\r\n", "\n");
         let has_crlf = content.contains('\r');
 
         let count = content.matches(&old_str).count();

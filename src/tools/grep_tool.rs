@@ -381,7 +381,11 @@ fn path_ext_lower(p: &Path) -> Option<String> {
 
 fn truncate_line(line: &str) -> String {
     if line.len() <= MAX_GREP_LINE_LEN { line.to_string() }
-    else { format!("{}...", &line[..MAX_GREP_LINE_LEN]) }
+    else {
+        let mut end = MAX_GREP_LINE_LEN;
+        while end > 0 && !line.is_char_boundary(end) { end -= 1; }
+        format!("{}...", &line[..end])
+    }
 }
 
 fn go_search_content(

@@ -5,7 +5,7 @@ pub mod client;
 use self::client::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,12 +28,6 @@ pub struct ToolResult {
 pub enum ToolResultContent {
     #[serde(rename = "text")]
     Text { text: String },
-}
-
-/// Tool annotated with source server
-pub struct ToolWithServer {
-    pub tool: Tool,
-    pub server: String,
 }
 
 /// MCP Manager - manages MCP server connections
@@ -134,7 +128,7 @@ impl Manager {
     pub fn call_tool(&self, name: &str, args: HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {
         let clients = self.clients.read().unwrap();
 
-        for (server_name, client) in clients.iter() {
+        for (_server_name, client) in clients.iter() {
             for tool in client.tools() {
                 if tool.name == name {
                     return client.call_tool(name, args);
@@ -152,21 +146,6 @@ impl Manager {
             .ok_or_else(|| format!("server not found: {}", server))?;
 
         client.call_tool(tool, args)
-    }
-
-    /// Get all tools annotated with their source server
-    pub fn all_tools_with_server(&self) -> Vec<ToolWithServer> {
-        let clients = self.clients.read().unwrap();
-        let mut all = Vec::new();
-        for (server_name, client) in clients.iter() {
-            for tool in client.tools() {
-                all.push(ToolWithServer {
-                    tool,
-                    server: server_name.clone(),
-                });
-            }
-        }
-        all
     }
 }
 

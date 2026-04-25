@@ -4,7 +4,7 @@ use crate::context::{ConversationContext, ConversationEntry, MessageContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
-use crate::tools::{Tool, ToolResult, Registry};
+use crate::tools::{ToolResult, Registry};
 use crate::transcript::Transcript;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -12,15 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time;
 
 /// Transition tracking for context management
 #[derive(Debug, Clone, PartialEq)]
 enum Transition {
     None,
     ToolsToText,
-    TextToTools,
-    ToolsToTools,
 }
 
 impl Default for Transition {
@@ -38,7 +35,6 @@ pub struct AgentLoop {
     client: reqwest::Client,
     use_stream: bool,
     max_tool_chars: usize,
-    tool_timeout: Duration,
     max_turns: usize,
     base_url: String,
     api_key: String,
@@ -64,7 +60,7 @@ impl AgentLoop {
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
         });
 
-        let mut client_builder = reqwest::Client::builder()
+        let client_builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .default_headers({
                 let mut headers = reqwest::header::HeaderMap::new();
@@ -103,7 +99,6 @@ impl AgentLoop {
             client,
             use_stream,
             max_tool_chars: 8192,
-            tool_timeout: Duration::from_secs(300),
             max_turns,
             base_url,
             api_key,
@@ -809,6 +804,7 @@ impl AgentLoop {
     }
 
     /// Execute a tool call with permission checking
+    #[allow(dead_code)]
     pub async fn execute_tool(&self, name: &str, params: HashMap<String, serde_json::Value>) -> Result<ToolResult> {
         let registry = self.registry.read().await;
 
@@ -853,6 +849,7 @@ impl AgentLoop {
     }
 
     /// Truncate context when it gets too long
+    #[allow(dead_code)]
     async fn truncate_context(&self) -> bool {
         // Use built-in truncation
         let mut ctx = self.context.write().await;
@@ -874,6 +871,7 @@ impl AgentLoop {
     }
 
     /// Truncate long tool output (keep first 80% and last 20%)
+    #[allow(dead_code)]
     fn truncate_output(&self, output: &str, limit: usize) -> String {
         let limit = if limit == 0 { 8192 } else { limit };
         if output.len() <= limit {

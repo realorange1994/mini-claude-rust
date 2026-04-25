@@ -116,7 +116,7 @@ impl Tool for MultiEditTool {
 
         // Normalize CRLF
         let mut content = content.replace("\r\n", "\n");
-        let mut has_crlf = content.contains('\r');
+        let has_crlf = content.contains('\r');
         
         for (old, new) in &mut edits {
             *old = old.replace("\r\n", "\n");
@@ -185,7 +185,9 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+        format!("{}...", &s[..end])
     }
 }
 

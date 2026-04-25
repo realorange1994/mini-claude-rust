@@ -2,13 +2,11 @@
 //! Full implementation of SSE parsing, stall detection, and chunk collection.
 
 use futures::StreamExt;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use reqwest::Client;
-use tokio::sync::mpsc;
 
 /// Streaming chunk types
 #[derive(Debug, Clone)]
@@ -18,6 +16,7 @@ pub enum ChunkType {
     ToolArgument,
     Thinking,
     Usage,
+    #[allow(dead_code)]
     Error,
     Done,
     BlockStop,
@@ -36,7 +35,9 @@ pub struct StreamChunk {
 /// Token usage information
 #[derive(Debug, Clone)]
 pub struct Usage {
+    #[allow(dead_code)]
     pub input_tokens: i64,
+    #[allow(dead_code)]
     pub output_tokens: i64,
 }
 
@@ -142,7 +143,8 @@ impl CollectHandler {
         self.tool_calls.read().unwrap().clone()
     }
 
-    /// Get usage
+    /// Get usage info
+    #[allow(dead_code)]
     pub fn usage(&self) -> Option<Usage> {
         self.usage.read().unwrap().clone()
     }
@@ -376,7 +378,9 @@ fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
 /// StallDetector monitors streaming for stalls
 pub struct StallDetector {
     last_event: RwLock<Instant>,
+    #[allow(dead_code)]
     stall_timeout: Duration,
+    #[allow(dead_code)]
     startup_timeout: Duration,
     stall_count: RwLock<usize>,
 }
@@ -400,6 +404,7 @@ impl StallDetector {
     }
 
     /// Check if stalled. Returns Some(duration) if stalled.
+    #[allow(dead_code)]
     pub fn check_stall(&self) -> Option<Duration> {
         let last = *self.last_event.read().unwrap();
         let elapsed = last.elapsed();
@@ -411,6 +416,7 @@ impl StallDetector {
     }
 
     /// Increment stall count and return count
+    #[allow(dead_code)]
     pub fn increment_stall(&self) -> usize {
         let mut count = self.stall_count.write().unwrap();
         *count += 1;
@@ -418,6 +424,7 @@ impl StallDetector {
     }
 
     /// Get stall timeout based on whether first event has been received
+    #[allow(dead_code)]
     pub fn timeout(&self) -> Duration {
         let last = *self.last_event.read().unwrap();
         if last.elapsed() < self.startup_timeout {

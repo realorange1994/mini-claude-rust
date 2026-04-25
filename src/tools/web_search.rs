@@ -1,13 +1,9 @@
 //! WebSearchTool - Web search using Bing/360
 
 use crate::tools::{Tool, ToolResult};
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use reqwest::blocking::Client;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Read;
 
 pub struct WebSearchTool;
 

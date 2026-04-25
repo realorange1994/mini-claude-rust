@@ -44,6 +44,7 @@ pub struct ConversationEntry {
 pub struct ConversationContext {
     config: Config,
     entries: Vec<ConversationEntry>,
+    #[allow(dead_code)]
     system_prompt: String,
 }
 
@@ -56,10 +57,12 @@ impl ConversationContext {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_system_prompt(&mut self, prompt: String) {
         self.system_prompt = prompt;
     }
 
+    #[allow(dead_code)]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
     }
@@ -110,11 +113,13 @@ impl ConversationContext {
     }
 
     /// Check if empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Clear all entries except system prompt
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -178,6 +183,7 @@ impl ConversationContext {
     }
 
     /// CompactContext performs intelligent compaction (placeholder - full implementation in compact.rs)
+    #[allow(dead_code)]
     pub fn compact_context(&mut self) -> bool {
         // TODO: Implement full compaction logic
         false
