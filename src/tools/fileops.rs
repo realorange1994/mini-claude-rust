@@ -262,11 +262,10 @@ impl FileOpsTool {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs as unix_fs;
             let result = if symbolic {
-                unix_fs::symlink(path, &dest)
+                std::os::unix::fs::symlink(path, &dest)
             } else {
-                unix_fs::hard_link(path, &dest)
+                fs::hard_link(path, &dest)
             };
 
             if let Err(e) = result {

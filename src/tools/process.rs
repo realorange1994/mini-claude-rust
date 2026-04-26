@@ -288,7 +288,7 @@ impl ProcessTool {
         let sig = if signal.parse::<i32>().is_ok() {
             format!("-{}", signal)
         } else {
-            format!("-{}", signal.trim_start_matches("SIG"));
+            format!("-{}", signal.trim_start_matches("SIG"))
         };
 
         let output = Command::new("kill").args([&sig, &pid.to_string()]).output();
@@ -317,7 +317,7 @@ impl ProcessTool {
         let sig = if signal.parse::<i32>().is_ok() {
             format!("-{}", signal)
         } else {
-            format!("-{}", signal.trim_start_matches("SIG"));
+            format!("-{}", signal.trim_start_matches("SIG"))
         };
 
         let output = Command::new("pkill").args([&sig, pattern]).output();
