@@ -20,6 +20,8 @@ pub struct SkillMeta {
     pub requires: Vec<String>,
     pub extended_requires_bins: Vec<String>,
     pub extended_requires_env: Vec<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub when_to_use: Option<String>,
 }
 
 /// Skill info for listing
@@ -39,6 +41,7 @@ pub struct SkillInfo {
     #[allow(dead_code)]
     pub version: String,
     pub missing_deps: Vec<String>,
+    pub when_to_use: Option<String>,
 }
 
 /// Skill Loader
@@ -48,6 +51,7 @@ pub struct Loader {
     builtin_dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, String>>,
     skill_index: RwLock<HashMap<String, SkillInfo>>,
+    file_modtimes: RwLock<HashMap<String, u64>>, // path -> mtime_secs
 }
 
 impl Loader {
@@ -57,6 +61,7 @@ impl Loader {
             builtin_dir: None,
             cache: RwLock::new(HashMap::new()),
             skill_index: RwLock::new(HashMap::new()),
+            file_modtimes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -69,20 +74,22 @@ impl Loader {
     pub fn refresh(&mut self) {
         let mut cache = self.cache.write().unwrap();
         let mut skill_index = self.skill_index.write().unwrap();
+        let mut file_modtimes = self.file_modtimes.write().unwrap();
 
         cache.clear();
         skill_index.clear();
+        file_modtimes.clear();
 
         // Scan builtin directory
         if let Some(ref builtin) = self.builtin_dir {
-            self.scan_dir(builtin, "builtin", &mut cache, &mut skill_index);
+            self.scan_dir(builtin, "builtin", &mut cache, &mut skill_index, &mut file_modtimes);
         }
 
         // Scan workspace
-        self.scan_dir(&self.workspace, "workspace", &mut cache, &mut skill_index);
+        self.scan_dir(&self.workspace, "workspace", &mut cache, &mut skill_index, &mut file_modtimes);
     }
 
-    fn scan_dir(&self, dir: &Path, source: &str, cache: &mut HashMap<String, String>, index: &mut HashMap<String, SkillInfo>) {
+    fn scan_dir(&self, dir: &Path, source: &str, cache: &mut HashMap<String, String>, index: &mut HashMap<String, SkillInfo>, modtimes: &mut HashMap<String, u64>) {
         if !dir.is_dir() {
             return;
         }
@@ -98,6 +105,14 @@ impl Loader {
 
                     let skill_md = path.join("SKILL.md");
                     if skill_md.exists() {
+                        // Record modification time
+                        if let Ok(meta) = fs::metadata(&skill_md) {
+                            if let Ok(mtime) = meta.modified() {
+                                let secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                modtimes.insert(skill_name.clone(), secs);
+                            }
+                        }
+
                         if let Ok(content) = fs::read_to_string(&skill_md) {
                             let meta = parse_frontmatter(&content);
 
@@ -120,6 +135,7 @@ impl Loader {
                                 tags: meta.tags.clone(),
                                 version: meta.version.clone(),
                                 missing_deps,
+                                when_to_use: meta.when_to_use.clone(),
                             };
 
                             cache.insert(skill_name.clone(), content);
@@ -152,55 +168,57 @@ impl Loader {
             .collect()
     }
 
-    /// Build system prompt for specific skills by name
+    /// Build system prompt for specific skills by name (compact format)
     pub fn build_system_prompt_for_skills(&self, skill_names: &[String]) -> String {
         if skill_names.is_empty() {
             return String::new();
         }
 
-        let cache = self.cache.read().unwrap();
         let skill_index = self.skill_index.read().unwrap();
 
-        let mut output = String::from("\n# Active Skills\n\n");
+        let mut output = String::from("\n## Active Skills\n\n");
         for name in skill_names {
             if let Some(info) = skill_index.get(name) {
                 if info.available {
-                    if let Some(content) = cache.get(name) {
-                        output.push_str(&format!("### Skill: {}\n\n", info.name));
-                        output.push_str(content);
-                        output.push_str("\n\n");
+                    output.push_str(&format!("- **{}** (always-on) — {}", info.name, info.description));
+                    if let Some(when) = &info.when_to_use {
+                        output.push_str(&format!(" {}", when));
                     }
+                    output.push('\n');
                 }
             }
         }
+        output.push_str("\nThese skills are already loaded. Do not call read_skill to load them.\n");
 
         output
     }
 
-    /// Build skills summary for system prompt
+    /// Build skills summary for system prompt (compact bullet list)
     pub fn build_skills_summary(&self) -> String {
         let skills = self.list_skills();
         if skills.is_empty() {
             return String::new();
         }
 
-        let mut output = String::from("<skills>\n");
+        let mut output = String::from("\n## Available Skills\n\n");
         for skill in skills {
-            let avail = if skill.available { "true" } else { "false" };
-            let always = if skill.always { "true" } else { "false" };
-            output.push_str(&format!(
-                "  <skill available=\"{}\" always=\"{}\">\n",
-                avail, always
-            ));
-            output.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
-            output.push_str(&format!("    <description>{}</description>\n", escape_xml(&skill.description)));
-            output.push_str(&format!("    <location>{}:{}</location>\n", skill.source, skill.name));
-            if !skill.available && !skill.missing_deps.is_empty() {
-                output.push_str(&format!("    <requires>{}</requires>\n", escape_xml(&skill.missing_deps.join(", "))));
+            if skill.always {
+                continue; // already listed in Active Skills
             }
-            output.push_str("  </skill>\n");
+            let status = if skill.available { "" } else { " (unavailable)" };
+            output.push_str(&format!("- **{}**{} — {}", skill.name, status, skill.description));
+            if let Some(when) = &skill.when_to_use {
+                output.push_str(&format!(" {}", when));
+            }
+            output.push('\n');
+            if !skill.available && !skill.missing_deps.is_empty() {
+                output.push_str(&format!("  Missing: {}\n", skill.missing_deps.join(", ")));
+            }
         }
-        output.push_str("</skills>");
+        if !output.ends_with("\n\n") {
+            output.push_str("\nUse the read_skill tool to load a skill's full instructions.\n");
+        }
+
         output
     }
 }
@@ -212,7 +230,79 @@ impl Clone for Loader {
             builtin_dir: self.builtin_dir.clone(),
             cache: RwLock::new(self.cache.read().unwrap().clone()),
             skill_index: RwLock::new(self.skill_index.read().unwrap().clone()),
+            file_modtimes: RwLock::new(self.file_modtimes.read().unwrap().clone()),
         }
+    }
+}
+
+/// Check if any skill files have changed and refresh if needed
+impl Loader {
+    pub fn refresh_if_changed(&mut self) -> bool {
+        let file_modtimes = self.file_modtimes.read().unwrap();
+        let mut changed = false;
+
+        // Check for modtime changes
+        for (skill_name, recorded_mtime) in file_modtimes.iter() {
+            // Find the SKILL.md path for this skill
+            let mut skill_path: Option<PathBuf> = None;
+            if let Some(ref builtin) = self.builtin_dir {
+                let p = builtin.join(skill_name).join("SKILL.md");
+                if p.exists() {
+                    skill_path = Some(p);
+                }
+            }
+            if skill_path.is_none() {
+                let p = self.workspace.join(skill_name).join("SKILL.md");
+                if p.exists() {
+                    skill_path = Some(p);
+                }
+            }
+
+            if let Some(path) = &skill_path {
+                if let Ok(meta) = fs::metadata(path) {
+                    if let Ok(mtime) = meta.modified() {
+                        let secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        if secs != *recorded_mtime {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check for new skill directories
+        if !changed {
+            let dirs: Vec<&Path> = if let Some(ref builtin) = self.builtin_dir {
+                vec![&self.workspace, builtin]
+            } else {
+                vec![&self.workspace]
+            };
+            for dir in dirs {
+                if dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                let skill_name = path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("");
+                                if !file_modtimes.contains_key(skill_name) {
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        drop(file_modtimes);
+        if changed {
+            self.refresh();
+        }
+        changed
     }
 }
 
@@ -304,6 +394,8 @@ pub fn parse_frontmatter(content: &str) -> SkillMeta {
         requires: Vec::new(),
         extended_requires_bins: Vec::new(),
         extended_requires_env: Vec::new(),
+        metadata: None,
+        when_to_use: None,
     };
 
     // Simple frontmatter parsing (YAML-like)
@@ -346,6 +438,13 @@ pub fn parse_frontmatter(content: &str) -> SkillMeta {
                     "description" => meta.description = value.to_string(),
                     "always" => meta.always = value == "true",
                     "version" => meta.version = value.to_string(),
+                    "when_to_use" => meta.when_to_use = Some(value.to_string()),
+                    "metadata" => {
+                        // Parse JSON value
+                        if let Ok(json) = serde_json::from_str(value) {
+                            meta.metadata = Some(json);
+                        }
+                    }
                     "requires" => {
                         if value.is_empty() {
                             in_list = true;
@@ -432,6 +531,12 @@ pub fn parse_frontmatter(content: &str) -> SkillMeta {
                     "description" => meta.description = value.to_string(),
                     "always" => meta.always = value == "true",
                     "version" => meta.version = value.to_string(),
+                    "when_to_use" => meta.when_to_use = Some(value.to_string()),
+                    "metadata" => {
+                        if let Ok(json) = serde_json::from_str(value) {
+                            meta.metadata = Some(json);
+                        }
+                    }
                     "requires" => meta.requires = value.split(',').map(|s| s.trim().to_string()).collect(),
                     "tags" => meta.tags = value.split(',').map(|s| s.trim().to_string()).collect(),
                     _ => {}
@@ -443,10 +548,3 @@ pub fn parse_frontmatter(content: &str) -> SkillMeta {
     meta
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}

@@ -323,9 +323,11 @@ fn loader_build_system_prompt() {
     loader.refresh();
 
     let prompt = loader.build_system_prompt_for_skills(&["helper".to_string()]);
-    assert!(prompt.contains("# Active Skills"));
-    assert!(prompt.contains("### Skill: helper"));
-    assert!(prompt.contains("Helper content."));
+    assert!(prompt.contains("## Active Skills"));
+    assert!(prompt.contains("**helper**"));
+    assert!(prompt.contains("Helper skill"));
+    // Should NOT contain full SKILL.md content (progressive disclosure)
+    assert!(!prompt.contains("Helper content."));
 }
 
 #[test]
@@ -361,9 +363,10 @@ fn loader_build_skills_summary() {
     loader.refresh();
 
     let summary = loader.build_skills_summary();
-    assert!(summary.contains("<skills>"));
-    assert!(summary.contains("summary-skill"));
-    assert!(summary.contains("</skills>"));
+    assert!(summary.contains("## Available Skills"));
+    assert!(summary.contains("**summary-skill**"));
+    assert!(summary.contains("For summary"));
+    assert!(summary.contains("read_skill"));
 }
 
 #[test]

@@ -107,11 +107,15 @@ impl Tool for ListSkillsTool {
                 String::new()
             };
             output.push_str(&format!(
-                "  {} [{}{}] — {}\n",
+                "  {} [{}{}] — {}",
                 skill.name, status, always, skill.description
             ));
+            if let Some(when) = &skill.when_to_use {
+                output.push_str(&format!(" ({})", when));
+            }
+            output.push('\n');
             if !skill.available && !skill.missing_deps.is_empty() {
-                output.push_str(&format!("    Missing: {}\n", skill.missing_deps[0]));
+                output.push_str(&format!("    Missing: {}\n", skill.missing_deps.join(", ")));
             }
         }
 
