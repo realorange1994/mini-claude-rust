@@ -1075,6 +1075,290 @@ fn git_tool_ls_files() {
 }
 
 // ============================================================
+// GitTool extended tests
+// ============================================================
+
+#[test]
+fn git_tool_commit_requires_message() {
+    let tool = GitTool;
+    let mut params = HashMap::new();
+    params.insert("operation".into(), serde_json::json!("commit"));
+    let result = tool.execute(params);
+    assert!(result.is_error);
+    assert!(result.output.to_lowercase().contains("message"));
+}
+
+#[test]
+fn git_tool_rm_requires_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("to_remove.txt"), "remove me").unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    // rm without files should error
+    let mut rm_params = HashMap::new();
+    rm_params.insert("operation".into(), serde_json::json!("rm"));
+    rm_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    let result = tool.execute(rm_params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_mv_requires_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a").unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    // mv without files should error
+    let mut mv_params = HashMap::new();
+    mv_params.insert("operation".into(), serde_json::json!("mv"));
+    mv_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    let result = tool.execute(mv_params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_mv_requires_two_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "a").unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    // mv with only 1 file should error
+    let mut mv_params = HashMap::new();
+    mv_params.insert("operation".into(), serde_json::json!("mv"));
+    mv_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    mv_params.insert("files".into(), serde_json::json!(["a.txt"]));
+    let result = tool.execute(mv_params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_clean_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("untracked.txt"), "untracked").unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    // clean with dry_run should not actually delete
+    let mut clean_params = HashMap::new();
+    clean_params.insert("operation".into(), serde_json::json!("clean"));
+    clean_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    clean_params.insert("dry_run".into(), serde_json::json!(true));
+    clean_params.insert("force".into(), serde_json::json!(true));
+    let result = tool.execute(clean_params);
+    assert!(dir.path().join("untracked.txt").exists()); // file still exists
+    assert!(!result.is_error);
+}
+
+#[test]
+fn git_tool_blame_requires_files() {
+    let tool = GitTool;
+    let mut params = HashMap::new();
+    params.insert("operation".into(), serde_json::json!("blame"));
+    let result = tool.execute(params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_restore_requires_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    // restore without files should error
+    let mut restore_params = HashMap::new();
+    restore_params.insert("operation".into(), serde_json::json!("restore"));
+    restore_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    let result = tool.execute(restore_params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_cherry_pick_requires_target() {
+    let tool = GitTool;
+    let mut params = HashMap::new();
+    params.insert("operation".into(), serde_json::json!("cherry-pick"));
+    let result = tool.execute(params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_revert_requires_target() {
+    let tool = GitTool;
+    let mut params = HashMap::new();
+    params.insert("operation".into(), serde_json::json!("revert"));
+    let result = tool.execute(params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_switch_requires_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = GitTool;
+
+    let mut init_params = HashMap::new();
+    init_params.insert("operation".into(), serde_json::json!("init"));
+    init_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    tool.execute(init_params);
+
+    let mut switch_params = HashMap::new();
+    switch_params.insert("operation".into(), serde_json::json!("switch"));
+    switch_params.insert("path".into(), serde_json::json!(dir.path().to_string_lossy().to_string()));
+    let result = tool.execute(switch_params);
+    assert!(result.is_error);
+}
+
+#[test]
+fn git_tool_full_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_str = dir.path().to_string_lossy().to_string();
+    let tool = GitTool;
+
+    // 1. Init
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("init"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    assert!(!tool.execute(p).is_error);
+
+    // 2. Create and add file
+    fs::write(dir.path().join("main.txt"), "first line").unwrap();
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("add"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("all".into(), serde_json::json!(true));
+    assert!(!tool.execute(p).is_error);
+
+    // 3. Commit
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("commit"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("message".into(), serde_json::json!("initial commit"));
+    assert!(!tool.execute(p).is_error);
+
+    // 4. Get commit hash via rev-parse
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("rev-parse"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("target".into(), serde_json::json!("HEAD"));
+    let result = tool.execute(p);
+    assert!(!result.is_error);
+    let head_hash = result.output.trim().to_string();
+    assert!(!head_hash.is_empty());
+
+    // 5. Create a new branch and switch to it
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("branch"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("branch".into(), serde_json::json!("feature"));
+    assert!(!tool.execute(p).is_error);
+
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("switch"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("branch".into(), serde_json::json!("feature"));
+    assert!(!tool.execute(p).is_error);
+
+    // 6. Modify file on feature branch
+    fs::write(dir.path().join("main.txt"), "modified line").unwrap();
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("add"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("all".into(), serde_json::json!(true));
+    tool.execute(p);
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("commit"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("message".into(), serde_json::json!("modify main.txt"));
+    assert!(!tool.execute(p).is_error);
+
+    // 7. Switch back to previous branch (master or main)
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("switch"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("branch".into(), serde_json::json!("master"));
+    let result = tool.execute(p.clone());
+    // Try main if master doesn't exist
+    if result.is_error {
+        p.insert("branch".into(), serde_json::json!("main"));
+        assert!(!tool.execute(p).is_error);
+    }
+
+    // 8. Restore file to HEAD
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("restore"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("files".into(), serde_json::json!(["main.txt"]));
+    assert!(!tool.execute(p).is_error);
+
+    // 9. Clean dry-run
+    fs::write(dir.path().join("untracked.txt"), "untracked").unwrap();
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("clean"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("dry_run".into(), serde_json::json!(true));
+    p.insert("force".into(), serde_json::json!(true));
+    assert!(!tool.execute(p).is_error);
+    assert!(dir.path().join("untracked.txt").exists());
+
+    // 10. Blame
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("blame"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("files".into(), serde_json::json!(["main.txt"]));
+    assert!(!tool.execute(p).is_error);
+
+    // 11. Reflog
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("reflog"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("max_count".into(), serde_json::json!(10));
+    assert!(!tool.execute(p).is_error);
+
+    // 12. Shortlog
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("shortlog"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    assert!(!tool.execute(p).is_error);
+
+    // 13. Revert
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("revert"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("target".into(), serde_json::json!("HEAD"));
+    p.insert("flags".into(), serde_json::json!(["--no-edit"]));
+    assert!(!tool.execute(p).is_error);
+
+    // 14. Tag
+    let mut p = HashMap::new();
+    p.insert("operation".into(), serde_json::json!("tag"));
+    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("branch".into(), serde_json::json!("v1.0"));
+    assert!(!tool.execute(p).is_error);
+}
+
+// ============================================================
 // RuntimeInfoTool tests
 // ============================================================
 

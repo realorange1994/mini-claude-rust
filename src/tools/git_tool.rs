@@ -32,7 +32,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Execute Git version control operations. Supports clone, init, add, commit, push, pull, fetch, branch, checkout, merge, rebase, stash, reset, tag, status, diff, log, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations."
+        "Execute Git version control operations. Supports clone, init, add, rm, mv, restore, switch, commit, push, pull, fetch, branch, checkout, merge, rebase, cherry-pick, revert, stash, clean, reset, tag, status, diff, log, shortlog, blame, reflog, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -42,10 +42,10 @@ impl Tool for GitTool {
                 "operation": {
                     "type": "string",
                     "description": "Git operation to perform",
-                    "enum": ["clone", "init", "add", "commit", "push", "pull", "fetch", 
-                             "branch", "checkout", "merge", "rebase", "stash", "reset",
-                             "tag", "status", "diff", "log", "remote", "show", "describe",
-                             "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree"]
+                    "enum": ["clone", "init", "add", "rm", "mv", "restore", "switch", "commit", "push", "pull", "fetch", 
+                             "branch", "checkout", "merge", "rebase", "cherry-pick", "revert", "stash", "clean",
+                             "reset", "tag", "status", "diff", "log", "shortlog", "blame", "reflog",
+                             "remote", "show", "describe", "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree"]
                 },
                 "repo": {
                     "type": "string",
@@ -66,7 +66,7 @@ impl Tool for GitTool {
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to stage (for add), show diff (for diff), or list (for ls-files)"
+                    "description": "Files to stage (for add), remove (for rm), move (for mv), restore (for restore), show diff (for diff), list (for ls-files), or blame (for blame)"
                 },
                 "remote": {
                     "type": "string",
@@ -84,6 +84,46 @@ impl Tool for GitTool {
                 "all": {
                     "type": "boolean",
                     "description": "Stage all changed files (for add, commit -a)"
+                },
+                "staged": {
+                    "type": "boolean",
+                    "description": "Restore the index only (for restore --staged)"
+                },
+                "worktree": {
+                    "type": "boolean",
+                    "description": "Restore the working tree (default for restore)"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Force operation (for switch -f, clean -f, cherry-pick --continue)"
+                },
+                "ours_theirs": {
+                    "type": "string",
+                    "description": "Checkout ours or theirs during merge conflict (for checkout --ours/--theirs)"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Show what would be done without actually doing it (for clean --dry-run)"
+                },
+                "mainline": {
+                    "type": "integer",
+                    "description": "Mainline parent number when reverting or cherry-picking a merge commit"
+                },
+                "author": {
+                    "type": "string",
+                    "description": "Author for commit (--author='Name <email>')"
+                },
+                "cached": {
+                    "type": "boolean",
+                    "description": "Remove from index only, not working tree (for rm --cached)"
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Allow recursive removal when a trailing slash is used (for rm -r)"
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Source commit/tree to restore from (for restore --source)"
                 },
                 "worktree_name": {
                     "type": "string",
@@ -182,6 +222,62 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
                 args.push(path.to_string());
             }
         }
+        "rm" => {
+            args.push("rm".to_string());
+            if params.get("cached").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("--cached".to_string());
+            }
+            if params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("-r".to_string());
+            }
+            if params.get("force").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("-f".to_string());
+            }
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                for f in files {
+                    if let Some(s) = f.as_str() {
+                        args.push(s.to_string());
+                    }
+                }
+            } else {
+                return Err("files is required for rm".to_string());
+            }
+        }
+        "mv" => {
+            args.push("mv".to_string());
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                if files.len() >= 2 {
+                    for f in files {
+                        if let Some(s) = f.as_str() {
+                            args.push(s.to_string());
+                        }
+                    }
+                } else {
+                    return Err("mv requires at least 2 files (source and destination)".to_string());
+                }
+            } else {
+                return Err("files is required for mv (source and destination paths)".to_string());
+            }
+        }
+        "restore" => {
+            args.push("restore".to_string());
+            if params.get("staged").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("--staged".to_string());
+            }
+            if params.get("source").and_then(|v| v.as_str()).is_some() {
+                args.push("--source".to_string());
+                args.push(params["source"].as_str().unwrap().to_string());
+            }
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                for f in files {
+                    if let Some(s) = f.as_str() {
+                        args.push(s.to_string());
+                    }
+                }
+            } else {
+                return Err("files is required for restore".to_string());
+            }
+        }
         "add" => {
             args.push("add".to_string());
             if params.get("all").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -238,8 +334,31 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "checkout" => {
             args.push("checkout".to_string());
+            if let Some(ours_theirs) = params.get("ours_theirs").and_then(|v| v.as_str()) {
+                if ours_theirs == "ours" {
+                    args.push("--ours".to_string());
+                } else if ours_theirs == "theirs" {
+                    args.push("--theirs".to_string());
+                }
+            }
             if let Some(branch) = params.get("branch").and_then(|v| v.as_str()) {
                 args.push(branch.to_string());
+            } else if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                for f in files {
+                    if let Some(s) = f.as_str() {
+                        args.push(s.to_string());
+                    }
+                }
+            } else if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
+                args.push(target.to_string());
+            }
+        }
+        "switch" => {
+            args.push("switch".to_string());
+            if let Some(branch) = params.get("branch").and_then(|v| v.as_str()) {
+                args.push(branch.to_string());
+            } else {
+                return Err("branch is required for switch".to_string());
             }
         }
         "merge" => {
@@ -254,8 +373,36 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
                 args.push(target.to_string());
             }
         }
+        "cherry-pick" => {
+            args.push("cherry-pick".to_string());
+            if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
+                args.push(target.to_string());
+            } else {
+                return Err("target is required for cherry-pick".to_string());
+            }
+        }
+        "revert" => {
+            args.push("revert".to_string());
+            if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
+                args.push(target.to_string());
+            } else {
+                return Err("target is required for revert".to_string());
+            }
+        }
         "stash" => {
             args.push("stash".to_string());
+        }
+        "clean" => {
+            args.push("clean".to_string());
+            if params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("-d".to_string());
+            }
+            if params.get("force").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("-f".to_string());
+            }
+            if params.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("--dry-run".to_string());
+            }
         }
         "reset" => {
             args.push("reset".to_string());
@@ -285,6 +432,29 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         "log" => {
             args.push("log".to_string());
             args.push("--oneline".to_string());
+            let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
+            args.push(format!("-{}", max_count));
+        }
+        "shortlog" => {
+            args.push("shortlog".to_string());
+            args.push("-sn".to_string());
+            let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
+            args.push(format!("-{}", max_count));
+        }
+        "blame" => {
+            args.push("blame".to_string());
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+                for f in files {
+                    if let Some(s) = f.as_str() {
+                        args.push(s.to_string());
+                    }
+                }
+            } else {
+                return Err("files is required for blame (file path)".to_string());
+            }
+        }
+        "reflog" => {
+            args.push("reflog".to_string());
             let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
             args.push(format!("-{}", max_count));
         }
