@@ -171,6 +171,7 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         registry.register(file_history_tools::FileHistoryTimelineTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryTagTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryAnnotateTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistoryBatchTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryCheckoutTool::new(arc_history.clone()));
     }
 }

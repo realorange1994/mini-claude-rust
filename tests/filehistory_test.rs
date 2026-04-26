@@ -597,3 +597,43 @@ fn filehistory_annotate() {
     // Empty message
     assert!(!fh.annotate_snapshot(&file, 1, ""));
 }
+
+#[test]
+fn filehistory_batch_pattern() {
+    let dir = TempDir::new().unwrap();
+
+    // Create multiple files with different extensions
+    let rs1 = dir.path().join("main.rs");
+    let rs2 = dir.path().join("lib.rs");
+    let py1 = dir.path().join("script.py");
+
+    fs::write(&rs1, "fn main() {}").unwrap();
+    fs::write(&rs2, "pub fn lib() {}").unwrap();
+    fs::write(&py1, "print('hello')").unwrap();
+
+    let fh = FileHistory::new();
+
+    // Snapshot all files
+    fh.snapshot(&rs1).unwrap();
+    fs::write(&rs1, "fn main() { println!(\"v2\"); }").unwrap();
+    fh.snapshot(&rs1).unwrap();
+
+    fh.snapshot(&rs2).unwrap();
+    fh.snapshot(&py1).unwrap();
+
+    // Verify listing
+    let all = fh.list_all_files();
+    assert_eq!(all.len(), 3);
+
+    // Pattern matching via glob
+    let glob_pattern = glob::Pattern::new("*.rs").unwrap();
+    let rs_files: Vec<_> = all.iter()
+        .filter(|p| glob_pattern.matches(&p.to_string_lossy()))
+        .collect();
+    assert_eq!(rs_files.len(), 2);
+
+    let py_files: Vec<_> = all.iter()
+        .filter(|p| glob_pattern.matches(&p.to_string_lossy()) == false)
+        .collect();
+    assert_eq!(py_files.len(), 1);
+}

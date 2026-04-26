@@ -1149,6 +1149,156 @@ impl Tool for FileHistoryAnnotateTool {
     }
 }
 
+// ─── Batch operations ───
+
+pub struct FileHistoryBatchTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryBatchTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryBatchTool {
+    fn name(&self) -> &str {
+        "file_history_batch"
+    }
+
+    fn description(&self) -> &str {
+        "Perform batch operations on multiple files matching a glob pattern. Parameters: 'pattern' (required, glob like '*.rs' or 'src/**/*.py'), 'action' (optional: 'list'=summary per file, 'read'=show current version content, 'diff'=show change stats; default 'list'), 'version' (optional, version to read/diff; default 'current'). Use file_history first to see which files have history."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match files (e.g., '*.rs', 'src/**/*.py')."
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: 'list' (summary), 'read' (content), 'diff' (change stats). Default: list.",
+                    "enum": ["list", "read", "diff"]
+                },
+                "version": {
+                    "type": "integer",
+                    "description": "Version number to read or diff (1 = oldest). Used with action=read or action=diff. Default: current version.",
+                    "minimum": 1
+                }
+            },
+            "required": ["pattern"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let pattern_str = match params.get("pattern").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: pattern is required"),
+        };
+        let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let version = params.get("version").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+        let glob_pattern = match glob::Pattern::new(pattern_str) {
+            Ok(p) => p,
+            Err(_) => return ToolResult::error(format!("Invalid glob pattern: {}", pattern_str)),
+        };
+
+        let all_files = self.history.list_all_files();
+        let matched: Vec<_> = all_files
+            .into_iter()
+            .filter(|p| glob_pattern.matches(&p.to_string_lossy()))
+            .collect();
+
+        if matched.is_empty() {
+            return ToolResult::ok(format!(
+                "No files with history match pattern '{}'.", pattern_str
+            ));
+        }
+
+        let mut output = format!(
+            "Batch results for pattern '{}' ({} files):\n\n",
+            pattern_str, matched.len()
+        );
+
+        let max_lines = 100; // Per-file line limit for action=read
+
+        for path in &matched {
+            let snapshots = self.history.get_snapshots(path);
+            let count = snapshots.len();
+            if count == 0 {
+                continue;
+            }
+
+            output.push_str(&format!("=== {} ({} versions) ===\n", path.display(), count));
+
+            match action {
+                "list" => {
+                    // Show last 2 versions summary
+                    for snap in snapshots.iter().rev().take(2).rev() {
+                        let desc = if snap.description.is_empty() {
+                            format!("{} bytes", snap.content.len())
+                        } else {
+                            format!("{} ({} bytes)", snap.description, snap.content.len())
+                        };
+                        output.push_str(&format!("  {}\n", desc));
+                    }
+                }
+                "read" => {
+                    let ver = version.unwrap_or(count);
+                    if ver == 0 || ver > count {
+                        output.push_str(&format!("  [invalid version {}]\n", ver));
+                        continue;
+                    }
+                    let snap = &snapshots[ver - 1];
+                    let lines: Vec<&str> = snap.content.lines().collect();
+                    let display_lines: Vec<_> = lines.iter().take(max_lines).collect();
+                    for (i, line) in display_lines.iter().enumerate() {
+                        output.push_str(&format!("  {:>4} {}\n", i + 1, line));
+                    }
+                    if lines.len() > max_lines {
+                        output.push_str(&format!("  ... ({} more lines, omitted)\n", lines.len() - max_lines));
+                    }
+                }
+                "diff" => {
+                    let ver = version.unwrap_or(count);
+                    if ver <= 1 || count < 2 {
+                        output.push_str("  [no diff available, need at least 2 versions]\n");
+                        continue;
+                    }
+                    if let Some(diff) = self.history.diff(path, 1, ver) {
+                        let mut added = 0;
+                        let mut removed = 0;
+                        for hunk in &diff.hunks {
+                            for line in &hunk.lines {
+                                if line.starts_with("+ ") { added += 1; }
+                                if line.starts_with("- ") { removed += 1; }
+                            }
+                        }
+                        output.push_str(&format!("  v1 -> v{}: +{} -{}\n", ver, added, removed));
+                    } else {
+                        output.push_str("  [diff failed]\n");
+                    }
+                }
+                _ => {
+                    output.push_str(&format!("  [unknown action: {}]\n", action));
+                }
+            }
+
+            output.push('\n');
+        }
+
+        output.push_str("Use file_history --path <file> for full version list of a single file.");
+        ToolResult::ok(output)
+    }
+}
+
 // ─── P3: unified file_history_checkout ───
 
 pub struct FileHistoryCheckoutTool {
