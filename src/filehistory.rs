@@ -905,7 +905,6 @@ fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(usize, u
 /// Compute diff hunks from the LCS
 fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)]) -> Vec<DiffHunk> {
     if lcs.is_empty() {
-        // Entire file changed
         let mut lines = Vec::new();
         for line in from_lines {
             lines.push(format!("- {}", line));
@@ -925,103 +924,110 @@ fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)])
         return Vec::new();
     }
 
+    enum DiffOp { Remove(String), Add(String), Context(String) }
+
+    // Phase 1: walk LCS producing a flat list of diff operations
+    let mut ops: Vec<DiffOp> = Vec::new();
+    let mut fi = 0; // index in from_lines
+    let mut ti = 0; // index in to_lines
+
+    for &(lf, lt) in lcs {
+        while fi < lf {
+            ops.push(DiffOp::Remove(from_lines[fi].to_string()));
+            fi += 1;
+        }
+        while ti < lt {
+            ops.push(DiffOp::Add(to_lines[ti].to_string()));
+            ti += 1;
+        }
+        ops.push(DiffOp::Context(from_lines[lf].to_string()));
+        fi = lf + 1;
+        ti = lt + 1;
+    }
+    // trailing
+    while fi < from_lines.len() {
+        ops.push(DiffOp::Remove(from_lines[fi].to_string()));
+        fi += 1;
+    }
+    while ti < to_lines.len() {
+        ops.push(DiffOp::Add(to_lines[ti].to_string()));
+        ti += 1;
+    }
+
+    // Phase 2: group changes into hunks, then generate each hunk once
+    let context: usize = 3;
     let mut hunks = Vec::new();
-    let mut hunk_lines = Vec::new();
-    let mut hunk_from_start: usize = 0;
-    let mut hunk_to_start: usize = 0;
-    let mut from_idx: usize = 0;
-    let mut to_idx: usize = 0;
-    let context = 3;
 
-    for &(lcs_from, lcs_to) in lcs {
-        // Lines before this LCS match
-        let removed_count = lcs_from.saturating_sub(from_idx);
-        let added_count = lcs_to.saturating_sub(to_idx);
+    let changes: Vec<usize> = ops.iter().enumerate()
+        .filter(|(_, op)| !matches!(op, DiffOp::Context(_)))
+        .map(|(i, _)| i)
+        .collect();
 
-        if removed_count > 0 || added_count > 0 {
-            if hunk_lines.is_empty() {
-                // Add context from before
-                let ctx_start = from_idx.saturating_sub(context);
-                for k in ctx_start..from_idx {
-                    hunk_lines.push(format!("  {}", from_lines[k]));
-                }
-                hunk_from_start = ctx_start;
-                hunk_to_start = to_idx.saturating_sub(from_idx.saturating_sub(ctx_start));
-                from_idx = ctx_start;
-            }
-
-            // Removed lines
-            for k in from_idx..lcs_from {
-                hunk_lines.push(format!("- {}", from_lines[k]));
-            }
-            // Added lines
-            for k in to_idx..lcs_to {
-                hunk_lines.push(format!("+ {}", to_lines[k]));
-            }
-
-            from_idx = lcs_from + 1;
-            to_idx = lcs_to + 1;
-        } else if !hunk_lines.is_empty() {
-            // Add context and close hunk
-            let ctx_end = std::cmp::min(lcs_from + context, from_lines.len().min(to_lines.len()));
-            for k in lcs_from..ctx_end {
-                if k < from_lines.len() && k < to_lines.len() && from_lines[k] == to_lines[k] {
-                    hunk_lines.push(format!("  {}", from_lines[k]));
-                }
-            }
-            if !hunk_lines.is_empty() {
-                let fc = hunk_lines.iter().filter(|l| l.starts_with('-') || l.starts_with(' ')).count();
-                let tc = hunk_lines.iter().filter(|l| l.starts_with('+') || l.starts_with(' ')).count();
-                hunks.push(DiffHunk {
-                    from_line: hunk_from_start.saturating_add(1),
-                    from_count: fc,
-                    to_line: hunk_to_start.saturating_add(1),
-                    to_count: tc,
-                    lines: std::mem::take(&mut hunk_lines),
-                });
-            }
-            from_idx = lcs_from + 1;
-            to_idx = lcs_to + 1;
-        } else {
-            from_idx = lcs_from + 1;
-            to_idx = lcs_to + 1;
-        }
+    if changes.is_empty() {
+        return Vec::new();
     }
 
-    // Trailing changes after last LCS match
-    if from_idx < from_lines.len() || to_idx < to_lines.len() {
-        // Record where actual changes start BEFORE adding context
-        let change_from = from_idx;
-        let change_to = to_idx;
+    let mut group_start: usize = 0;
 
-        if hunk_lines.is_empty() {
-            let ctx_start = from_idx.saturating_sub(context);
-            for k in ctx_start..from_idx {
-                hunk_lines.push(format!("  {}", from_lines[k]));
+    for i in 1..=changes.len() {
+        // End of group: either last element or gap to next is too large
+        let is_end = i == changes.len()
+            || changes[i].saturating_sub(changes[i - 1]).saturating_sub(1) >= 2 * context + 1;
+        if is_end {
+            let group = &changes[group_start..i];
+            let first_change = group[0];
+            let last_change = group[group.len() - 1];
+
+            // Build hunk ops: ctx_before → all changes with interleaving context → ctx_after
+            let ctx_before = context.min(first_change);
+            let ctx_after = context.min(ops.len().saturating_sub(last_change).saturating_sub(1));
+
+            let mut hunk_ops: Vec<&DiffOp> = Vec::new();
+            for k in (first_change - ctx_before)..first_change {
+                hunk_ops.push(&ops[k]);
             }
-            hunk_from_start = ctx_start;
-            hunk_to_start = to_idx.saturating_sub(from_idx.saturating_sub(ctx_start));
-        }
-        // Only mark lines that were NOT part of LCS as removals
-        for k in change_from..from_lines.len() {
-            hunk_lines.push(format!("- {}", from_lines[k]));
-        }
-        // Only mark lines that were NOT part of LCS as additions
-        for k in change_to..to_lines.len() {
-            hunk_lines.push(format!("+ {}", to_lines[k]));
-        }
-    }
+            // All ops from first change to last change (inclusive)
+            for k in first_change..=last_change {
+                hunk_ops.push(&ops[k]);
+            }
+            for k in (last_change + 1)..=(last_change + ctx_after) {
+                hunk_ops.push(&ops[k]);
+            }
 
-    if !hunk_lines.is_empty() {
-        let fc = hunk_lines.iter().filter(|l| l.starts_with('-') || l.starts_with(' ')).count();
-        let tc = hunk_lines.iter().filter(|l| l.starts_with('+') || l.starts_with(' ')).count();
-        hunks.push(DiffHunk {
-            from_line: hunk_from_start.saturating_add(1),
-            from_count: fc,
-            to_line: hunk_to_start.saturating_add(1),
-            to_count: tc,
-            lines: hunk_lines,
-        });
+            // Compute line numbers: walk ops before first_change
+            let mut fl: usize = 1;
+            let mut tl: usize = 1;
+            for k in 0..first_change {
+                match &ops[k] {
+                    DiffOp::Context(_) | DiffOp::Remove(_) => fl += 1,
+                    DiffOp::Add(_) => tl += 1,
+                }
+            }
+
+            let mut fc = 0;
+            let mut tc = 0;
+            for op in &hunk_ops {
+                match op {
+                    DiffOp::Context(_) => { fc += 1; tc += 1; }
+                    DiffOp::Remove(_) => fc += 1,
+                    DiffOp::Add(_) => tc += 1,
+                }
+            }
+
+            hunks.push(DiffHunk {
+                from_line: fl,
+                from_count: fc,
+                to_line: tl,
+                to_count: tc,
+                lines: hunk_ops.iter().map(|op| match op {
+                    DiffOp::Remove(l) => format!("- {}", l),
+                    DiffOp::Add(l) => format!("+ {}", l),
+                    DiffOp::Context(l) => format!("  {}", l),
+                }).collect(),
+            });
+
+            group_start = i;
+        }
     }
 
     hunks
