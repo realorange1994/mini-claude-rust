@@ -867,19 +867,18 @@ fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(usize, u
     let n = b.len();
 
     if m == 0 || n == 0 || m * n > 1_000_000 {
-        // For very large files, use a simpler approach
         return Vec::new();
     }
 
-    // Use a 2-row DP to save memory
-    let mut dp: Vec<Vec<usize>> = vec![vec![0; n + 1]; 2];
+    // Full DP table required for backtracking
+    let mut dp: Vec<Vec<usize>> = vec![vec![0; n + 1]; m + 1];
 
     for i in 1..=m {
         for j in 1..=n {
             if a[i - 1] == b[j - 1] {
-                dp[i % 2][j] = dp[(i - 1) % 2][j - 1] + 1;
+                dp[i][j] = dp[i - 1][j - 1] + 1;
             } else {
-                dp[i % 2][j] = std::cmp::max(dp[(i - 1) % 2][j], dp[i % 2][j - 1]);
+                dp[i][j] = std::cmp::max(dp[i - 1][j], dp[i][j - 1]);
             }
         }
     }
@@ -893,7 +892,7 @@ fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(usize, u
             result.push((i - 1, j - 1));
             i -= 1;
             j -= 1;
-        } else if dp[(i - 1) % 2][j] >= dp[i % 2][j - 1] {
+        } else if dp[i - 1][j] >= dp[i][j - 1] {
             i -= 1;
         } else {
             j -= 1;
@@ -960,8 +959,8 @@ fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)])
                 hunk_lines.push(format!("+ {}", to_lines[k]));
             }
 
-            from_idx = lcs_from;
-            to_idx = lcs_to;
+            from_idx = lcs_from + 1;
+            to_idx = lcs_to + 1;
         } else if !hunk_lines.is_empty() {
             // Add context and close hunk
             let ctx_end = std::cmp::min(lcs_from + context, from_lines.len().min(to_lines.len()));
