@@ -140,6 +140,10 @@ impl Tool for GitTool {
                 "max_count": {
                     "type": "integer",
                     "description": "Maximum number of entries to return (for log, rev-list, default: 20)"
+                },
+                "proxy": {
+                    "type": "string",
+                    "description": "HTTP/SOCKS proxy URL for git operations (e.g. 'http://127.0.0.1:7890', 'socks5://127.0.0.1:1080'). Sets https_proxy and http_proxy environment variables for the git command."
                 }
             },
             "required": ["operation"]
@@ -168,6 +172,13 @@ impl Tool for GitTool {
 
         let mut cmd = Command::new("git");
         cmd.args(&args.unwrap());
+
+        if let Some(proxy) = params.get("proxy").and_then(|v| v.as_str()) {
+            cmd.env("https_proxy", proxy);
+            cmd.env("http_proxy", proxy);
+            cmd.env("HTTPS_PROXY", proxy);
+            cmd.env("HTTP_PROXY", proxy);
+        }
 
         if let Some(ref dir) = work_dir {
             cmd.current_dir(dir);
@@ -211,10 +222,10 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             let repo = params.get("repo").and_then(|v| v.as_str())
                 .ok_or("repo is required for clone")?;
             args.push("clone".to_string());
+            args.push(repo.to_string());
             if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                 args.push(path.to_string());
             }
-            args.push(repo.to_string());
         }
         "init" => {
             args.push("init".to_string());
