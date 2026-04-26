@@ -1068,6 +1068,87 @@ impl Tool for FileHistoryTagTool {
     }
 }
 
+// ─── Annotate ───
+
+pub struct FileHistoryAnnotateTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryAnnotateTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryAnnotateTool {
+    fn name(&self) -> &str {
+        "file_history_annotate"
+    }
+
+    fn description(&self) -> &str {
+        "Add a user annotation/comment to a specific version of a file. Parameters: 'path' (required), 'version' (version specifier: v3, current, last2, or tag name), 'message' (required, annotation text). Annotations help document why changes were made. Use file_history first to see available versions."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file."
+                },
+                "version": {
+                    "type": "string",
+                    "description": "Version to annotate: v3, current, last2, or tag name."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Annotation text explaining the change."
+                }
+            },
+            "required": ["path", "version", "message"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: path is required"),
+        };
+        let full_path = expand_path(path);
+
+        let version_spec = match params.get("version").and_then(|v| v.as_str()) {
+            Some(v) => v,
+            None => return ToolResult::error("Error: version is required"),
+        };
+        let message = match params.get("message").and_then(|v| v.as_str()) {
+            Some(m) => m,
+            None => return ToolResult::error("Error: message is required"),
+        };
+
+        let version = self.history.resolve_version(&full_path, version_spec);
+        let version = match version {
+            Some(v) => v,
+            None => return ToolResult::error(format!(
+                "Cannot resolve version '{}' for {}. Use file_history to see available versions.",
+                version_spec, full_path.display()
+            )),
+        };
+
+        if self.history.annotate_snapshot(&full_path, version, message) {
+            ToolResult::ok(format!(
+                "Annotated v{} of {}: {}", version, full_path.display(), message
+            ))
+        } else {
+            ToolResult::error(format!("No history for: {}", full_path.display()))
+        }
+    }
+}
+
 // ─── P3: unified file_history_checkout ───
 
 pub struct FileHistoryCheckoutTool {

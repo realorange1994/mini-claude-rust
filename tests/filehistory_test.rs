@@ -563,3 +563,37 @@ fn filehistory_checkout_direct() {
     assert_eq!(content, "v3 content");
     assert_eq!(fs::read_to_string(&file).unwrap(), "v3 content");
 }
+
+#[test]
+fn filehistory_annotate() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot_with_desc(&file, "edit: fix login bug".to_string()).unwrap();
+
+    // Annotate v1
+    assert!(fh.annotate_snapshot(&file, 1, "initial version"));
+    let snapshots = fh.get_snapshots(&file);
+    assert!(snapshots[0].description.contains("initial version"));
+
+    // Annotate v2 (append to existing description)
+    assert!(fh.annotate_snapshot(&file, 2, "reviewed by team"));
+    let snapshots = fh.get_snapshots(&file);
+    assert!(snapshots[1].description.contains("edit: fix login bug"));
+    assert!(snapshots[1].description.contains("reviewed by team"));
+    assert!(snapshots[1].description.contains(" | "), "description was: '{}'", snapshots[1].description);
+
+    // Annotate nonexistent version
+    assert!(!fh.annotate_snapshot(&file, 99, "should fail"));
+
+    // Annotate nonexistent file
+    assert!(!fh.annotate_snapshot(std::path::Path::new("/nonexistent"), 1, "msg"));
+
+    // Empty message
+    assert!(!fh.annotate_snapshot(&file, 1, ""));
+}

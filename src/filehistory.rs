@@ -420,6 +420,47 @@ impl FileHistory {
         Ok(Some(target_content))
     }
 
+    // ─── Annotate ───
+
+    /// Add/update a user annotation on a specific version's description.
+    /// version is 1-indexed. If the version already has a description,
+    /// the annotation is appended with " | " separator.
+    pub fn annotate_snapshot(&self, path: &Path, version: usize, message: &str) -> bool {
+        if message.is_empty() {
+            return false;
+        }
+        let mut snapshots = self.snapshots.write().unwrap();
+        let file_snapshots = match snapshots.get_mut(path) {
+            Some(f) if !f.is_empty() => f,
+            _ => return false,
+        };
+
+        // Find the version by 1-indexed position among non-deleted snapshots
+        let mut ver = 0;
+        let target = file_snapshots.iter_mut().find(|s| {
+            if s.deleted { return false; }
+            ver += 1;
+            ver == version
+        });
+
+        let target = match target {
+            Some(s) => s,
+            None => return false,
+        };
+
+        if !target.description.is_empty() {
+            target.description = format!("{} | {}", target.description, message);
+        } else {
+            target.description = message.to_string();
+        }
+
+        let updated = target.clone();
+        drop(snapshots);
+
+        self.save_to_disk(&updated);
+        true
+    }
+
     // ─── Tags ───
 
     /// Add a tag to the current (latest non-deleted) snapshot of a file
