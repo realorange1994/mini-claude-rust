@@ -103,7 +103,7 @@ impl Tool for GitTool {
                 },
                 "ours_theirs": {
                     "type": "string",
-                    "description": "Checkout ours or theirs during merge conflict (for checkout --ours/--theirs)"
+                    "description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs)"
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -115,15 +115,15 @@ impl Tool for GitTool {
                 },
                 "author": {
                     "type": "string",
-                    "description": "Author for commit (--author='Name <email>')"
+                    "description": "Author string (e.g. 'Name <email>') (for commit)"
                 },
                 "cached": {
                     "type": "boolean",
-                    "description": "Remove from index only, not working tree (for rm --cached)"
+                    "description": "Show staged files instead of working tree (for diff)"
                 },
                 "recursive": {
                     "type": "boolean",
-                    "description": "Allow recursive removal when a trailing slash is used (for rm -r)"
+                    "description": "Recursive removal (for clean only)"
                 },
                 "source": {
                     "type": "string",
@@ -249,9 +249,6 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             if params.get("cached").and_then(|v| v.as_bool()).unwrap_or(false) {
                 args.push("--cached".to_string());
             }
-            if params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) {
-                args.push("-r".to_string());
-            }
             if params.get("force").and_then(|v| v.as_bool()).unwrap_or(false) {
                 args.push("-f".to_string());
             }
@@ -323,6 +320,10 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             }
             args.push("-m".to_string());
             args.push(message.to_string());
+            if let Some(author) = params.get("author").and_then(|v| v.as_str()) {
+                args.push("--author".to_string());
+                args.push(author.to_string());
+            }
         }
         "push" => {
             args.push("push".to_string());
@@ -443,6 +444,9 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "diff" => {
             args.push("diff".to_string());
+            if params.get("cached").and_then(|v| v.as_bool()).unwrap_or(false) {
+                args.push("--cached".to_string());
+            }
             if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 for f in files {
                     if let Some(s) = f.as_str() {
