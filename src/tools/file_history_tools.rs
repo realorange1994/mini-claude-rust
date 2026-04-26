@@ -1137,13 +1137,7 @@ impl Tool for FileHistoryCheckoutTool {
             return ToolResult::ok(format!("Already at v{} (current) for: {}", target_ver, full_path.display()));
         }
 
-        // Calculate steps back from current
-        let steps = total.saturating_sub(target_ver);
-        if steps == 0 {
-            return ToolResult::ok(format!("Already at v{} for: {}", target_ver, full_path.display()));
-        }
-
-        match self.history.rewind(&full_path, steps) {
+        match self.history.checkout(&full_path, target_ver) {
             Ok(Some(content)) => {
                 let preview = if content.len() > 200 {
                     format!("{}...", &content[..200])

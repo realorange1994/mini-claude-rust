@@ -504,3 +504,62 @@ fn filehistory_checkout() {
     // History should be preserved (with restore snapshot)
     assert!(fh.count(&file) >= 3);
 }
+
+#[test]
+fn filehistory_diff_simple_addition() {
+    // Bug: diff shows common lines as both removed and re-added
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+
+    // v1: 3 lines
+    fs::write(&file, "Hello World\n这是第一行\n这是第二行").unwrap();
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    // v2: 4 lines (added one line)
+    fs::write(&file, "Hello World\n这是第一行\n这是第二行\n这是第三行 - 新增内容").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let result = fh.diff(&file, 1, 2).unwrap();
+    assert_eq!(result.hunks.len(), 1);
+    let hunk = &result.hunks[0];
+    assert_eq!(hunk.from_count, 3);
+    assert_eq!(hunk.to_count, 4);
+
+    let adds: Vec<_> = hunk.lines.iter().filter(|l| l.starts_with("+ ")).collect();
+    let removes: Vec<_> = hunk.lines.iter().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(removes.len(), 0, "Should have no removals, got: {:?}", removes);
+    assert_eq!(adds.len(), 1, "Should have exactly 1 addition, got: {:?}", adds);
+}
+
+#[test]
+fn filehistory_checkout_direct() {
+    // Bug: checkout tool uses rewind() which skips same-checksum versions
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+
+    fs::write(&file, "v1 content").unwrap();
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v2 content").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v3 content").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Direct checkout to v1
+    let content = fh.checkout(&file, 1).unwrap().unwrap();
+    assert_eq!(content, "v1 content");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "v1 content");
+
+    // Direct checkout to v2
+    let content = fh.checkout(&file, 2).unwrap().unwrap();
+    assert_eq!(content, "v2 content");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "v2 content");
+
+    // Direct checkout to v3
+    let content = fh.checkout(&file, 3).unwrap().unwrap();
+    assert_eq!(content, "v3 content");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "v3 content");
+}

@@ -860,10 +860,11 @@ fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)])
     }
 
     // Trailing changes after last LCS match
-    let trailing_from = from_lines.len().saturating_sub(from_idx);
-    let trailing_to = to_lines.len().saturating_sub(to_idx);
-    if trailing_from > 0 || trailing_to > 0 {
-        // Add trailing context
+    if from_idx < from_lines.len() || to_idx < to_lines.len() {
+        // Record where actual changes start BEFORE adding context
+        let change_from = from_idx;
+        let change_to = to_idx;
+
         if hunk_lines.is_empty() {
             let ctx_start = from_idx.saturating_sub(context);
             for k in ctx_start..from_idx {
@@ -871,12 +872,13 @@ fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)])
             }
             hunk_from_start = ctx_start;
             hunk_to_start = to_idx.saturating_sub(from_idx.saturating_sub(ctx_start));
-            from_idx = ctx_start;
         }
-        for k in from_idx..from_lines.len() {
+        // Only mark lines that were NOT part of LCS as removals
+        for k in change_from..from_lines.len() {
             hunk_lines.push(format!("- {}", from_lines[k]));
         }
-        for k in to_idx..to_lines.len() {
+        // Only mark lines that were NOT part of LCS as additions
+        for k in change_to..to_lines.len() {
             hunk_lines.push(format!("+ {}", to_lines[k]));
         }
     }
