@@ -61,7 +61,7 @@ impl Tool for GitTool {
                 },
                 "branch": {
                     "type": "string",
-                    "description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation"
+                    "description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation. checkout does NOT support 'files' param - use 'restore' to unstage files"
                 },
                 "message": {
                     "type": "string",
@@ -70,7 +70,7 @@ impl Tool for GitTool {
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "File paths for add/rm/restore/diff/ls-files only. NOT for checkout or commit. For mv use 'source' instead"
+                    "description": "File paths for add/rm/restore/diff/ls-files ONLY. NOT for checkout, commit, or mv. checkout has NO files support. mv uses 'source' param"
                 },
                 "remote": {
                     "type": "string",
