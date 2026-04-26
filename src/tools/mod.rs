@@ -19,7 +19,7 @@ mod web_fetch;
 mod exa_search;
 mod mcp_tools;
 mod skill_tools;
-mod file_history_tools;
+pub mod file_history_tools;
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
