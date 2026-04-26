@@ -586,6 +586,7 @@ impl AgentLoop {
                             index: usize,
                             tc: ToolCallInfo,
                             params: HashMap<String, serde_json::Value>,
+                            timeout_secs: u64,
                             denied: bool,
                             err_text: String,
                         }
@@ -594,6 +595,12 @@ impl AgentLoop {
                         for (i, tc) in tool_calls.iter().enumerate() {
                             let params: HashMap<String, serde_json::Value> =
                                 serde_json::from_str(&tc.arguments).unwrap_or_default();
+
+                            // Agent-controlled timeout — default 30s
+                            let timeout_secs = params.get("timeout")
+                                .and_then(|v| v.as_i64())
+                                .map(|v| v.max(1).min(300) as u64)
+                                .unwrap_or(30);
 
                             let registry = self.registry.read().await;
                             let tool = registry.get(&tc.name);
@@ -611,6 +618,7 @@ impl AgentLoop {
                                 index: i,
                                 tc: tc.clone(),
                                 params,
+                                timeout_secs,
                                 denied,
                                 err_text,
                             });
@@ -650,6 +658,7 @@ impl AgentLoop {
                                 // Approved tools execute concurrently
                                 let tc = entry.tc.clone();
                                 let params = entry.params.clone();
+                                let timeout_secs = entry.timeout_secs;
                                 let max_tool_chars = self.max_tool_chars;
                                 let interrupted = self.interrupted.clone();
 
@@ -659,10 +668,7 @@ impl AgentLoop {
 
                                 handles.push(tokio::task::spawn(async move {
                                     let start = std::time::Instant::now();
-                                    // 30s timeout — long enough for legitimate tool calls,
-                                    // short enough to prevent hangs from blocking syscalls
-                                    // (e.g. rg scanning entire home directory).
-                                    const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+                                    let tool_timeout = Duration::from_secs(timeout_secs);
 
                                     let tool_name = tc.name.clone();
 
@@ -714,7 +720,7 @@ impl AgentLoop {
 
                                     // Execute tool on blocking thread pool — ensures synchronous
                                     // syscalls don't block the async runtime's core threads.
-                                    let tool_result = tokio::time::timeout(TOOL_TIMEOUT, tokio::task::spawn_blocking(move || {
+                                    let tool_result = tokio::time::timeout(tool_timeout, tokio::task::spawn_blocking(move || {
                                         let registry = registry_clone.blocking_read();
                                         let tool = registry.get(&tool_name);
                                         match tool {
@@ -772,7 +778,7 @@ impl AgentLoop {
                                             (output, true, elapsed)
                                         }
                                         Err(_) => {
-                                            let output = format!("Error: {} timed out after {:?}", tc.name, TOOL_TIMEOUT);
+                                            let output = format!("Error: {} timed out after {:?}", tc.name, tool_timeout);
                                             eprintln!("  [{}] timed out after {:.1}s", tc.name, elapsed.as_secs_f64());
                                             (output, true, elapsed)
                                         }
