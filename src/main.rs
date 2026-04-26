@@ -8,20 +8,6 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const BANNER: &str = r#"
-  ╔══════════════════════════════════════╗
-  ║       miniClaudeCode v0.1.0         ║
-  ║  Distilled Agent Loop Framework     ║
-  ╚══════════════════════════════════════╝
-
-  Type your message to start. Commands:
-    /tools   -- list available tools
-    /mode    -- show/change permission mode
-    /resume  -- resume from previous session
-    /help    -- show help
-    /quit    -- exit
-"#;
-
 #[derive(Parser, Debug)]
 #[command(name = "miniclaudecode")]
 #[command(about = "A lightweight AI coding assistant", long_about = None)]
@@ -184,8 +170,6 @@ fn main() -> Result<()> {
 }
 
 fn run_interactive(mut agent: agent_loop::AgentLoop) {
-    println!("{}", BANNER);
-
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
 
@@ -276,7 +260,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     continue;
                 }
                 "/help" => {
-                    println!("{}", BANNER);
+                    println!("Commands: /tools, /mode, /resume, /help, /quit");
                     continue;
                 }
                 "/resume" => {
