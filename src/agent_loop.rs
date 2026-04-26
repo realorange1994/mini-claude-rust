@@ -498,8 +498,10 @@ impl AgentLoop {
         let mut context_errors = 0;
         let mut continue_reason = ContinueReason::None;
         let mut max_output_tokens_retries = 0;
+        let mut consecutive_empty_responses = 0;
         const MAX_CONTEXT_RECOVERY: usize = 3;
         const MAX_OUTPUT_TOKENS_RETRIES: usize = 3;
+        const MAX_EMPTY_RESPONSES: usize = 3;
 
         loop {
             // Check for interruption (Ctrl+C)
@@ -572,6 +574,7 @@ impl AgentLoop {
                     consecutive_stalls = 0;
                     context_errors = 0;
                     max_output_tokens_retries = 0;
+                    consecutive_empty_responses = 0;
                     continue_reason = ContinueReason::NextTurn;
 
                     if !tool_calls.is_empty() {
@@ -864,8 +867,21 @@ impl AgentLoop {
                         // Final response
                         return Ok(text);
                     } else {
-                        // No output, try again
-                        eprintln!("[!] Empty response, continuing...");
+                        // No text and no tool calls — could be a thinking-only response
+                        // This happens when the model uses extended thinking but hasn't produced text yet.
+                        // Continue the loop to let the model produce more output.
+                        consecutive_empty_responses += 1;
+                        if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
+                            eprintln!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
+                            return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
+                        }
+                        eprintln!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
+                            consecutive_empty_responses, MAX_EMPTY_RESPONSES);
+                        // Inject hint to encourage actual output
+                        let mut ctx = self.context.write().await;
+                        ctx.add_user_message(
+                            "Please continue and provide your response in text or use a tool.".to_string(),
+                        );
                     }
                 }
                 Err(e) => {
@@ -1223,12 +1239,18 @@ impl AgentLoop {
 
         let body = body_result.map_err(|e| anyhow!("Failed to parse response: {}", e))?;
 
-        // Parse response
+        // Parse Anthropic format response: {"content": [{"type": "text"/"tool_use"/"thinking"}, ...]}
         let mut tool_calls = Vec::new();
         let mut text = String::new();
         let mut thinking = String::new();
 
         if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
+            if content.is_empty() {
+                eprintln!("[DEBUG] Response has empty content array. stop_reason={:?}, body={}",
+                    body.get("stop_reason"),
+                    serde_json::to_string(&body).unwrap_or_else(|_| "<failed to serialize>".to_string())
+                );
+            }
             for block in content {
                 if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
                     match block_type {
@@ -1244,7 +1266,6 @@ impl AgentLoop {
                             ) {
                                 let args = block.get("input").map(|i| i.to_string()).unwrap_or_default();
 
-                                // Print tool call with arguments (matching streaming behavior)
                                 let summary = tool_arg_summary(&name, &args);
                                 if !summary.is_empty() {
                                     eprintln!("  [{}]: {}", name, summary);
@@ -1264,16 +1285,42 @@ impl AgentLoop {
                                 thinking.push_str(th);
                             }
                         }
-                        _ => {}
+                        _ => {
+                            // Log unknown block types for debugging
+                            eprintln!("[DEBUG] Unknown content block type: {}", block_type);
+                        }
                     }
                 }
             }
+        } else {
+            // No "content" field at all
+            let body_preview = serde_json::to_string(&body)
+                .unwrap_or_else(|_| "<failed to serialize>".to_string());
+            eprintln!("[DEBUG] Missing 'content' field in response. stop_reason={:?}, body={}",
+                body.get("stop_reason"),
+                body_preview
+            );
         }
 
         // Display thinking if present
         if !thinking.is_empty() {
             let preview = truncate_at(thinking.lines().next().unwrap_or(""), 120);
             eprintln!("\n[THINK] {}", preview);
+        }
+
+        // Debug: log when parsed result has no actionable content
+        if tool_calls.is_empty() && text.is_empty() {
+            let content_types: Vec<String> = body.get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                    .collect())
+                .unwrap_or_default();
+            eprintln!("[DEBUG] Parsed response has no text/tool_use. content_types={}, stop_reason={:?}, thinking_len={}",
+                content_types.join(","),
+                body.get("stop_reason"),
+                thinking.len()
+            );
         }
 
         Ok((tool_calls, text))
