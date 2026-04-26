@@ -1,7 +1,7 @@
 //! Integration tests for SearchSkillTool
 
 use miniclaudecode_rust::skills::Loader;
-use miniclaudecode_rust::tools::search_skill::SearchSkillTool;
+use miniclaudecode_rust::tools::skill_tools::SearchSkillTool;
 use miniclaudecode_rust::tools::{Tool, ToolResult};
 use std::collections::HashMap;
 use std::sync::Arc;

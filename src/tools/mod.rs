@@ -19,7 +19,6 @@ mod web_fetch;
 mod exa_search;
 mod mcp_tools;
 mod skill_tools;
-pub mod search_skill;
 pub mod file_history_tools;
 
 // Re-export tool structs for integration tests
@@ -158,7 +157,7 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         let arc_loader = Arc::new(skill_loader.clone());
         registry.register(skill_tools::ReadSkillTool::new(arc_loader.clone()));
         registry.register(skill_tools::ListSkillsTool::new(arc_loader.clone()));
-        registry.register(search_skill::SearchSkillTool::new(arc_loader));
+        registry.register(skill_tools::SearchSkillTool::new(arc_loader));
     }
 
     if let Some(arc_history) = &cfg.file_history {
