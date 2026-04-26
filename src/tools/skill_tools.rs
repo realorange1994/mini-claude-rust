@@ -90,7 +90,7 @@ impl Tool for ListSkillsTool {
         let skills = self.loader.list_skills();
 
         if skills.is_empty() {
-            return ToolResult::ok("No skills found.".to_string());
+            return ToolResult::ok("No skills available.".to_string());
         }
 
         let mut output = format!("Skills ({} total)\n", skills.len());
@@ -118,6 +118,8 @@ impl Tool for ListSkillsTool {
                 output.push_str(&format!("    Missing: {}\n", skill.missing_deps.join(", ")));
             }
         }
+
+        output.push_str("\nUse search_skills to find skills by topic. Use read_skill to load full instructions.");
 
         ToolResult::ok(output.trim().to_string())
     }

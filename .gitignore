@@ -29,3 +29,6 @@ Thumbs.db
 # Session data
 .claude/
 **/*.jsonl
+
+# Test files
+test_history_file.txt

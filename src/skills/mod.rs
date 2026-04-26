@@ -1,9 +1,13 @@
 //! Skills loader - loads and parses skill definitions
 
+mod tracker;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+
+pub use tracker::SkillTracker;
 
 /// Skill metadata parsed from frontmatter
 #[derive(Debug, Clone)]

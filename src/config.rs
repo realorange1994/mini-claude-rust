@@ -7,6 +7,7 @@ pub use crate::permissions::PermissionMode;
 pub use crate::tools::Registry;
 pub use crate::mcp::Manager as McpManager;
 pub use crate::skills::Loader as SkillLoader;
+pub use crate::skills::SkillTracker;
 pub use crate::filehistory::FileHistory;
 
 #[derive(Debug, Clone)]
@@ -241,6 +242,7 @@ pub fn build_system_prompt(
     permission_mode: &PermissionMode,
     project_dir: &Path,
     skill_loader: Option<&SkillLoader>,
+    skill_tracker: Option<&SkillTracker>,
 ) -> String {
     // Get Rust compiler version (matching Go's runtime.Version())
     let rust_version = std::process::Command::new("rustc")
@@ -304,22 +306,86 @@ You have access to the following tools to help the user with software engineerin
         }
     }
 
+    // Skill System Guidance
+    if skill_loader.is_some() {
+        prompt.push_str("\n## Skill System Guidance\n\n");
+        prompt.push_str("BLOCKING REQUIREMENT: When a skill matches the user's request, you MUST invoke the relevant skill tool BEFORE generating any other response. Do NOT proceed with alternative approaches until you have checked for relevant skills.\n\n");
+        prompt.push_str("Your visible tool list is partial by design. The tool registry does not show all available capabilities. Before telling the user that a capability is unavailable, search for a skill using search_skills.\n\n");
+        prompt.push_str("When exploring a new task:\n");
+        prompt.push_str("1. Use search_skills to find relevant skills\n");
+        prompt.push_str("2. Use read_skill to load a skill's full instructions\n");
+        prompt.push_str("3. Follow the skill's instructions\n\n");
+    }
+
     // Skills section
     if let Some(loader) = skill_loader {
-        // Add always-on skills to system prompt
+        let mut tracker_ref = skill_tracker;
+        let mut temp_tracker;
+
+        // Create a mutable copy if we need to mark skills as shown
+        let unsent_names: Vec<String> = if let Some(tracker) = tracker_ref {
+            let all_skills = loader.list_skills();
+            all_skills
+                .iter()
+                .filter(|s| !s.always && tracker.is_new_skill(&s.name))
+                .map(|s| s.name.clone())
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // If we have unsent skills, mark them as shown
+        if !unsent_names.is_empty() {
+            temp_tracker = skill_tracker.map(|t| (*t).clone()).unwrap_or_default();
+            for name in &unsent_names {
+                temp_tracker.mark_shown(name);
+            }
+            tracker_ref = Some(&temp_tracker);
+        }
+
+        // Always-on skills
         let always_skills = loader.get_always_skills();
         if !always_skills.is_empty() {
             let skill_names: Vec<String> = always_skills.iter().map(|s| s.name.clone()).collect();
             prompt.push_str(&loader.build_system_prompt_for_skills(&skill_names));
         }
 
-        // Add skills summary for discovery
+        // Per-turn: newly available skills (not yet shown)
+        if let Some(tracker) = tracker_ref {
+            let unsent: Vec<crate::skills::SkillInfo> = loader.list_skills()
+                .into_iter()
+                .filter(|s| !s.always && tracker.is_new_skill(&s.name))
+                .collect();
+            if !unsent.is_empty() {
+                let mut section = String::from("\n## Available Skills (New This Turn)\n\n");
+                let mut char_count = section.len();
+                let budget = 4000;
+                for skill in unsent {
+                    let mut entry = format!("- **{}** — {}", skill.name, skill.description);
+                    if let Some(when) = &skill.when_to_use {
+                        entry.push_str(&format!(" ({})", when));
+                    }
+                    if !skill.available {
+                        entry.push_str(" (unavailable)");
+                    }
+                    entry.push('\n');
+                    if char_count + entry.len() > budget {
+                        break;
+                    }
+                    section.push_str(&entry);
+                    char_count += entry.len();
+                }
+                section.push_str("\nUse read_skill to load a skill's full instructions.\n");
+                prompt.push_str(&section);
+            }
+        }
+
+        // Skills summary for discovery (already-shown non-always skills)
         let summary = loader.build_skills_summary();
         if !summary.is_empty() {
             if !prompt.ends_with("\n\n") {
                 prompt.push_str("\n\n");
             }
-            prompt.push_str("## Available Skills\n\n");
             prompt.push_str(&summary);
         }
     }

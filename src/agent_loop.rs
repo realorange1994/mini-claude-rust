@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::context::{ConversationContext, ConversationEntry, MessageContent, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
+use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
@@ -52,6 +53,8 @@ pub struct AgentLoop {
     rt: tokio::runtime::Runtime,
     /// Shared interrupted flag (can be set from Ctrl+C handler)
     interrupted: Arc<std::sync::atomic::AtomicBool>,
+    /// Tracks which skills have been shown/read/used across turns
+    skill_tracker: Arc<RwLock<SkillTracker>>,
 }
 
 impl AgentLoop {
@@ -135,6 +138,7 @@ impl AgentLoop {
             file_history,
             rt,
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
         }
     }
 
@@ -229,6 +233,7 @@ impl AgentLoop {
             file_history,
             rt,
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
         })
     }
 
@@ -379,12 +384,20 @@ impl AgentLoop {
         // Log user message to transcript
         let _ = self.transcript.add_user(user_message.to_string());
 
+        // Refresh skills if files changed
+        // Note: skill_loader is behind &self, so we skip refresh_if_changed here
+        // (it requires &mut self on Loader). Skills are refreshed at startup.
+
+        // Build system prompt with skill tracker
+        let tracker = self.skill_tracker.blocking_read();
         let system_prompt = crate::config::build_system_prompt(
             &*self.registry.blocking_read(),
             &self.config.permission_mode,
             &self.config.project_dir,
             self.config.skill_loader.as_ref(),
+            Some(&tracker),
         );
+        drop(tracker);
 
         // Get messages and tools for API call
         let messages = self.entries_to_messages();
@@ -809,6 +822,19 @@ impl AgentLoop {
                                 input: params,
                             }
                         }).collect();
+
+                        // Track skill usage for discovery system
+                        for tc in &tool_calls {
+                            if tc.name == "read_skill" {
+                                let params: HashMap<String, serde_json::Value> =
+                                    serde_json::from_str(&tc.arguments).unwrap_or_default();
+                                if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                                    let mut tracker = self.skill_tracker.write().await;
+                                    tracker.mark_read(name);
+                                    tracker.mark_used(name);
+                                }
+                            }
+                        }
 
                         // 2. Store tool_result blocks
                         let tool_result_blocks: Vec<crate::context::ToolResultBlock> = tool_calls.iter().enumerate().map(|(i, tc)| {

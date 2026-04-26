@@ -319,6 +319,7 @@ fn build_system_prompt_contains_environment_info() {
         &PermissionMode::Ask,
         std::path::Path::new("."),
         None,
+        None,
     );
 
     assert!(prompt.contains("miniClaudeCode"));
@@ -335,6 +336,7 @@ fn build_system_prompt_contains_tools() {
         &registry,
         &PermissionMode::Ask,
         std::path::Path::new("."),
+        None,
         None,
     );
 
@@ -357,6 +359,7 @@ fn build_system_prompt_contains_permission_mode() {
             &mode,
             std::path::Path::new("."),
             None,
+            None,
         );
         assert!(prompt.contains(desc_keyword), "Should contain {} mode", desc_keyword);
     }
@@ -370,6 +373,7 @@ fn build_system_prompt_empty_registry() {
         &registry,
         &PermissionMode::Ask,
         std::path::Path::new("."),
+        None,
         None,
     );
 
@@ -388,6 +392,7 @@ fn build_system_prompt_with_claude_md() {
         &registry,
         &PermissionMode::Ask,
         dir.path(),
+        None,
         None,
     );
 
