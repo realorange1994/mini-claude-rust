@@ -433,13 +433,15 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             args.push("log".to_string());
             args.push("--oneline".to_string());
             let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
-            args.push(format!("-{}", max_count));
+            args.push("-n".to_string());
+            args.push(max_count.to_string());
         }
         "shortlog" => {
             args.push("shortlog".to_string());
             args.push("-sn".to_string());
             let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
-            args.push(format!("-{}", max_count));
+            args.push(format!("--max-count={}", max_count));
+            args.push("HEAD".to_string());
         }
         "blame" => {
             args.push("blame".to_string());
@@ -456,7 +458,8 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         "reflog" => {
             args.push("reflog".to_string());
             let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
-            args.push(format!("-{}", max_count));
+            args.push("-n".to_string());
+            args.push(max_count.to_string());
         }
         "remote" => {
             args.push("remote".to_string());
@@ -500,9 +503,10 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "rev-list" => {
             args.push("rev-list".to_string());
-            args.push("--count".to_string());
             let max_count = params.get("max_count").and_then(|v| v.as_i64()).unwrap_or(20);
-            args.push(format!("-{}", max_count));
+            args.push("--count".to_string());
+            args.push(format!("--max-count={}", max_count));
+            args.push("HEAD".to_string());
         }
         "worktree" => {
             args.push("worktree".to_string());
