@@ -122,71 +122,72 @@ impl TerminalTool {
         let new_name = params.get("new_name").and_then(|v| v.as_str());
         let command = params.get("command").and_then(|v| v.as_str());
 
-        let mut cmd = match operation {
+        let mut cmd = Command::new(match manager {
+            "screen" => "screen",
+            _ => "tmux",
+        });
+
+        match operation {
             "list" => {
                 if manager == "tmux" {
-                    Command::new("tmux").args(["list-sessions"])
+                    cmd.args(["list-sessions"]);
                 } else {
-                    Command::new("screen").args(["-ls"])
+                    cmd.args(["-ls"]);
                 }
             }
             "new" => {
                 let session_name = session.unwrap_or("main");
                 if manager == "tmux" {
-                    let mut c = Command::new("tmux");
-                    c.args(["new-session", "-s", session_name]);
+                    cmd.args(["new-session", "-s", session_name]);
                     if let Some(cwd) = cwd {
-                        c.arg("-c").arg(cwd);
+                        cmd.arg("-c").arg(cwd);
                     }
-                    c
                 } else {
-                    let mut c = Command::new("screen");
-                    c.arg("-S").arg(session_name);
+                    cmd.arg("-S").arg(session_name);
                     if let Some(cwd) = cwd {
-                        c.arg("-c").arg(cwd);
+                        cmd.arg("-c").arg(cwd);
                     }
-                    c
                 }
             }
             "attach" => {
                 let session = session.ok_or("session name is required for attach")?;
                 if manager == "tmux" {
-                    Command::new("tmux").args(["attach-session", "-t", session])
+                    cmd.args(["attach-session", "-t", session]);
                 } else {
-                    Command::new("screen").args(["-r", session])
+                    cmd.args(["-r", session]);
                 }
             }
             "detach" => {
                 if manager == "tmux" {
-                    Command::new("tmux").args(["detach-client"])
+                    cmd.args(["detach-client"]);
                 } else {
-                    Command::new("screen").args(["-d"])
+                    cmd.args(["-d"]);
                 }
             }
             "send" => {
                 let session = session.ok_or("session name is required for send")?;
                 let command = command.ok_or("command is required for send")?;
                 if manager == "tmux" {
-                    Command::new("tmux").args(["send-keys", "-t", session, command, "Enter"])
+                    cmd.args(["send-keys", "-t", session, command, "Enter"]);
                 } else {
-                    Command::new("screen").args(["-S", session, "-X", "stuff", &format!("{}\n", command)])
+                    cmd.args(["-S", session, "-X", "stuff", &format!("{}\n", command)]);
                 }
             }
             "kill" => {
                 let session = session.ok_or("session name is required for kill")?;
                 if manager == "tmux" {
-                    Command::new("tmux").args(["kill-session", "-t", session])
+                    cmd.args(["kill-session", "-t", session]);
                 } else {
-                    Command::new("screen").args(["-S", session, "-X", "quit"])
+                    cmd.args(["-S", session, "-X", "quit"]);
                 }
             }
             "rename" => {
                 let session = session.ok_or("session name is required for rename")?;
                 let new_name = new_name.ok_or("new_name is required for rename")?;
                 if manager == "tmux" {
-                    Command::new("tmux").args(["rename-session", "-t", session, new_name])
+                    cmd.args(["rename-session", "-t", session, new_name]);
                 } else {
-                    Command::new("screen").args(["-S", session, "-X", "sessionname", new_name])
+                    cmd.args(["-S", session, "-X", "sessionname", new_name]);
                 }
             }
             _ => return Err(format!("unknown operation: {}", operation)),
