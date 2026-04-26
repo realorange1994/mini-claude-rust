@@ -1032,41 +1032,41 @@ impl AgentLoop {
 
         let mut backoff_ms = INITIAL_BACKOFF_MS;
 
-        // Try streaming first if enabled
-        if self.use_stream {
-            for attempt in 0..MAX_RETRIES {
-                // Check for interruption before each attempt
-                if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Err(anyhow!("Request cancelled by user"));
-                }
+        // Always try streaming first — it's more reliable across different
+        // API/proxy configurations. Non-streaming can hang on some proxies
+        // that don't flush the response until the entire body is ready.
+        for attempt in 0..MAX_RETRIES {
+            // Check for interruption before each attempt
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(anyhow!("Request cancelled by user"));
+            }
 
-                match self.try_stream_once(system_prompt, messages, tools).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) => {
-                        let err_str = e.to_string();
+            match self.try_stream_once(system_prompt, messages, tools).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    let err_str = e.to_string();
 
-                        // Check if interrupted
-                        if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                            return Err(anyhow!("Request cancelled by user"));
-                        }
+                    // Check if interrupted
+                    if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(anyhow!("Request cancelled by user"));
+                    }
 
-                        // Check if it's a transient error
-                        if !is_transient_error(&err_str) {
-                            eprintln!("[!] Non-transient streaming error: {}", e);
-                            break;
-                        }
+                    // Check if it's a transient error
+                    if !is_transient_error(&err_str) {
+                        eprintln!("[!] Non-transient streaming error: {}", e);
+                        break;
+                    }
 
-                        if attempt < MAX_RETRIES - 1 {
-                            eprintln!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
-                                attempt + 1, backoff_ms, e);
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-                        }
+                    if attempt < MAX_RETRIES - 1 {
+                        eprintln!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
+                            attempt + 1, backoff_ms, e);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }
             }
-            eprintln!("[!] Streaming failed after {} attempts, falling back to non-streaming", MAX_RETRIES);
         }
+        eprintln!("[!] Streaming failed after {} attempts, falling back to non-streaming", MAX_RETRIES);
 
         // Fall back to non-streaming with retries
         self.call_with_non_streaming_fallback(system_prompt, messages, tools).await
@@ -1162,6 +1162,7 @@ impl AgentLoop {
     }
 
     /// Call non-streaming API
+    /// Returns (tool_calls, text)
     async fn call_api_non_streaming(
         &self,
         system_prompt: &str,
