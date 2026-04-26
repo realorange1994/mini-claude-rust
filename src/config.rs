@@ -287,6 +287,10 @@ You have access to the following tools to help the user with software engineerin
     prompt.push_str("6. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.\n");
     prompt.push_str("7. Use git directly for git operations -- it is available in the PATH.\n\n");
 
+    // Common tool parameter
+    prompt.push_str("## Tool Parameters\n\n");
+    prompt.push_str("All tools accept an optional **`timeout`** parameter (integer, seconds, range 1-300, default 30) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with `grep` or `glob`.\n\n");
+
     // Permission mode
     let mode_upper = permission_mode.to_string().to_uppercase();
     let mode_desc = match permission_mode {
