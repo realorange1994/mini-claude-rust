@@ -644,7 +644,7 @@ impl Tool for FileHistoryDiffTool {
     }
 
     fn description(&self) -> &str {
-        "Show diff between two versions of a file. Parameters: 'path' (required), 'from' (version: v3, last1, current, or tag name), 'to' (version specifier, default: current). Shows added/removed/changed lines in unified-diff format. Essential for understanding what changed between versions."
+        "Show diff between two versions of a file. Parameters: 'path' (required), 'from' (version: v3, last1, current, or tag name), 'to' (version specifier, default: current), 'mode' (output format: 'unified'=full diff (default), 'stat'=change summary +N -M, 'name-only'=file path only). Essential for understanding what changed between versions."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -662,6 +662,11 @@ impl Tool for FileHistoryDiffTool {
                 "to": {
                     "type": "string",
                     "description": "Ending version (v1, v3, current, last1, or tag name). Default: current version."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Output format: 'unified' (full diff), 'stat' (+N -M summary), 'name-only' (file path only). Default: unified.",
+                    "enum": ["unified", "stat", "name-only"]
                 }
             },
             "required": ["path"]
@@ -722,33 +727,61 @@ impl Tool for FileHistoryDiffTool {
             None => return ToolResult::error("Failed to compute diff."),
         };
 
-        let mut output = format!("Diff: {} (v{} → v{})\n\n", full_path.display(), from_ver, to_ver);
+        let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("unified");
 
-        if diff_result.hunks.is_empty() {
-            output.push_str("No differences found.\n");
-            return ToolResult::ok(output);
-        }
-
-        let mut total_added = 0usize;
-        let mut total_removed = 0usize;
-
-        for hunk in &diff_result.hunks {
-            output.push_str(&format!("@@ -{},{} +{},{} @@\n",
-                hunk.from_line, hunk.from_count,
-                hunk.to_line, hunk.to_count));
-            for line in &hunk.lines {
-                if line.starts_with('+') && !line.starts_with("++") {
-                    total_added += 1;
-                } else if line.starts_with('-') && !line.starts_with("--") {
-                    total_removed += 1;
+        match mode {
+            "name-only" => {
+                return ToolResult::ok(format!("{}\n", full_path.display()));
+            }
+            "stat" => {
+                let mut total_added = 0usize;
+                let mut total_removed = 0usize;
+                for hunk in &diff_result.hunks {
+                    for line in &hunk.lines {
+                        if line.starts_with("+ ") { total_added += 1; }
+                        if line.starts_with("- ") { total_removed += 1; }
+                    }
                 }
-                output.push_str(line);
-                output.push('\n');
+                return ToolResult::ok(format!(
+                    "{} | {} (v{} → v{})\n {} file changed, +{} -{}",
+                    full_path.display(),
+                    if total_added > 0 || total_removed > 0 { "modified" } else { "no changes" },
+                    from_ver, to_ver,
+                    1,
+                    total_added,
+                    total_removed
+                ));
+            }
+            "unified" | _ => {
+                let mut output = format!("Diff: {} (v{} → v{})\n\n", full_path.display(), from_ver, to_ver);
+
+                if diff_result.hunks.is_empty() {
+                    output.push_str("No differences found.\n");
+                    return ToolResult::ok(output);
+                }
+
+                let mut total_added = 0usize;
+                let mut total_removed = 0usize;
+
+                for hunk in &diff_result.hunks {
+                    output.push_str(&format!("@@ -{},{} +{},{} @@\n",
+                        hunk.from_line, hunk.from_count,
+                        hunk.to_line, hunk.to_count));
+                    for line in &hunk.lines {
+                        if line.starts_with('+') && !line.starts_with("++") {
+                            total_added += 1;
+                        } else if line.starts_with('-') && !line.starts_with("--") {
+                            total_removed += 1;
+                        }
+                        output.push_str(line);
+                        output.push('\n');
+                    }
+                }
+
+                output.push_str(&format!("\nSummary: +{} lines added, -{} lines removed", total_added, total_removed));
+                return ToolResult::ok(output);
             }
         }
-
-        output.push_str(&format!("\nSummary: +{} lines added, -{} lines removed", total_added, total_removed));
-        ToolResult::ok(output)
     }
 }
 
