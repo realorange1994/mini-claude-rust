@@ -70,7 +70,7 @@ impl Tool for GitTool {
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to stage (for add), remove (for rm), move (for mv), restore (for restore), show diff (for diff), list (for ls-files), or blame (for blame)"
+                    "description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files). For mv use source instead."
                 },
                 "remote": {
                     "type": "string",
@@ -127,7 +127,7 @@ impl Tool for GitTool {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source commit/tree to restore from (for restore --source)"
+                    "description": "Source file for mv, or source branch/commit for switch"
                 },
                 "worktree_name": {
                     "type": "string",
