@@ -659,7 +659,10 @@ impl AgentLoop {
 
                                 handles.push(tokio::task::spawn(async move {
                                     let start = std::time::Instant::now();
-                                    let timeout = std::time::Duration::from_secs(300);
+                                    // 30s timeout — long enough for legitimate tool calls,
+                                    // short enough to prevent hangs from blocking syscalls
+                                    // (e.g. rg scanning entire home directory).
+                                    const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
                                     let tool_name = tc.name.clone();
 
@@ -709,8 +712,10 @@ impl AgentLoop {
                                         }
                                     }
 
-                                    let tool_result = tokio::time::timeout(timeout, async {
-                                        let registry = registry_clone.read().await;
+                                    // Execute tool on blocking thread pool — ensures synchronous
+                                    // syscalls don't block the async runtime's core threads.
+                                    let tool_result = tokio::time::timeout(TOOL_TIMEOUT, tokio::task::spawn_blocking(move || {
+                                        let registry = registry_clone.blocking_read();
                                         let tool = registry.get(&tool_name);
                                         match tool {
                                             Some(t) => {
@@ -722,11 +727,11 @@ impl AgentLoop {
                                             }
                                             None => ToolResult::error(format!("Tool not found: {}", tool_name)),
                                         }
-                                    }).await;
+                                    })).await;
 
                                     let elapsed = start.elapsed();
                                     let output = match tool_result {
-                                        Ok(result) => {
+                                        Ok(Ok(result)) => {
                                             // Post-execution snapshot: captures new files and final state
                                             if !result.is_error {
                                                 if let Some(path) = snapshot_path.as_ref() {
@@ -761,9 +766,14 @@ impl AgentLoop {
                                             };
                                             (output, result.is_error, elapsed)
                                         }
+                                        Ok(Err(e)) => {
+                                            eprintln!("  [{}] panicked: {}", tc.name, e);
+                                            let output = format!("Error: tool execution panicked: {}", e);
+                                            (output, true, elapsed)
+                                        }
                                         Err(_) => {
-                                            let output = format!("Error: {} timed out after {:?}", tc.name, timeout);
-                                            eprintln!("  [{}] timed out", tc.name);
+                                            let output = format!("Error: {} timed out after {:?}", tc.name, TOOL_TIMEOUT);
+                                            eprintln!("  [{}] timed out after {:.1}s", tc.name, elapsed.as_secs_f64());
                                             (output, true, elapsed)
                                         }
                                     };
