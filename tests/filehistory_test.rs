@@ -112,7 +112,7 @@ fn filehistory_restore() {
     fs::write(&file, "v2").unwrap();
     fh.snapshot(&file).unwrap(); // Snapshots "v2"
 
-    // Restore to previous version
+    // Restore to previous version (content-aware: 1 step back = v1)
     let content = fh.restore(&file).unwrap();
     assert!(content.is_some());
     assert_eq!(content.unwrap(), "v1");
@@ -120,6 +120,21 @@ fn filehistory_restore() {
     // Verify file on disk
     let disk_content = fs::read_to_string(&file).unwrap();
     assert_eq!(disk_content, "v1");
+
+    // Verify history is preserved (restore snapshots current before restoring)
+    assert!(fh.count(&file) >= 3); // v1, v2, v2(restore)
+
+    // Content-aware restore: since disk is now v1 and restore snapshot has v2 checksum,
+    // another restore goes back 1 distinct content step from v2 → v1 again
+    // (v2(restore) is collapsed with v2 in content-aware logic)
+    // To redo back to v2, we need to change the file first
+    fs::write(&file, "v3").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Now restore should go back to v2 (1 distinct step from v3)
+    let content2 = fh.restore(&file).unwrap();
+    assert!(content2.is_some());
+    assert_eq!(content2.unwrap(), "v2");
 }
 
 #[test]
@@ -166,6 +181,13 @@ fn filehistory_rewind() {
     let content = fh.rewind(&file, 2).unwrap();
     assert!(content.is_some());
     assert_eq!(content.unwrap(), "v1");
+
+    // Verify history is preserved (rewind snapshots current before rewinding)
+    assert_eq!(fh.count(&file), 4); // v1, v2, v3, v3(restore)
+
+    // Verify redo is possible - can still read v3
+    let snapshots = fh.get_snapshots(&file);
+    assert_eq!(snapshots[2].content, "v3"); // Original v3 still accessible
 }
 
 #[test]
@@ -231,14 +253,14 @@ fn filehistory_max_snapshots_limit() {
 
     let fh = FileHistory::new();
 
-    // Create more than max_snapshots (10)
-    for i in 2..=15 {
+    // Create more than max_snapshots (50)
+    for i in 2..=55 {
         fs::write(&file, format!("v{}", i)).unwrap();
         fh.snapshot(&file).unwrap();
     }
 
     // Should be capped at max_snapshots
-    assert!(fh.count(&file) <= 10);
+    assert!(fh.count(&file) <= 50);
 }
 
 #[test]
@@ -264,4 +286,221 @@ fn filehistory_snapshot_checksum() {
     let snapshot = fh.snapshot(&file).unwrap().unwrap();
     assert!(!snapshot.checksum.is_empty());
     assert!(snapshot.timestamp.year() > 2020);
+}
+
+#[test]
+fn filehistory_snapshot_current_new_file() {
+    // Bug 6: new files should enter history after creation
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("new_file.txt");
+
+    let fh = FileHistory::new();
+
+    // File doesn't exist yet - snapshot() returns None
+    assert!(fh.snapshot(&file).unwrap().is_none());
+    assert_eq!(fh.count(&file), 0);
+
+    // Create the file
+    fs::write(&file, "initial content").unwrap();
+
+    // snapshot_current captures the file's current state
+    let result = fh.snapshot_current(&file).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().content, "initial content");
+    assert_eq!(fh.count(&file), 1);
+
+    // Edit and snapshot_current again
+    fs::write(&file, "edited content").unwrap();
+    let result = fh.snapshot_current(&file).unwrap();
+    assert!(result.is_some());
+    assert_eq!(fh.count(&file), 2);
+}
+
+#[test]
+fn filehistory_restore_preserves_history() {
+    // Bug 5: restore should not delete history
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v3").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    assert_eq!(fh.count(&file), 3);
+
+    // Restore should preserve history
+    fh.restore(&file).unwrap();
+    assert!(fh.count(&file) >= 3); // Should be 3 or more, not less
+
+    // Verify v3 content is still accessible in history
+    let snapshots = fh.get_snapshots(&file);
+    let has_v3 = snapshots.iter().any(|s| s.content == "v3");
+    assert!(has_v3, "v3 content should still be in history after restore");
+}
+
+#[test]
+fn filehistory_snapshot_with_description() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "line1\n").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot_with_desc(&file, "initial commit".to_string()).unwrap();
+
+    fs::write(&file, "line1\nline2\n").unwrap();
+    fh.snapshot_with_desc(&file, "edit: added line2".to_string()).unwrap();
+
+    let snapshots = fh.get_snapshots(&file);
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].description, "initial commit");
+    assert_eq!(snapshots[1].description, "edit: added line2");
+}
+
+#[test]
+fn filehistory_diff() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "line1\nline2\nline3\n").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "line1\nline2_modified\nline3\nline4\n").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Diff between v1 and v2
+    let result = fh.diff(&file, 1, 2);
+    assert!(result.is_some());
+    let diff = result.unwrap();
+    assert_eq!(diff.from_version, 1);
+    assert_eq!(diff.to_version, 2);
+    // Should have at least one hunk
+    assert!(!diff.hunks.is_empty());
+}
+
+#[test]
+fn filehistory_resolve_version() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v3").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Numeric
+    assert_eq!(fh.resolve_version(&file, "v1"), Some(1));
+    assert_eq!(fh.resolve_version(&file, "v3"), Some(3));
+    assert_eq!(fh.resolve_version(&file, "2"), Some(2));
+
+    // current/latest
+    assert_eq!(fh.resolve_version(&file, "current"), Some(3));
+    assert_eq!(fh.resolve_version(&file, "latest"), Some(3));
+
+    // lastN
+    assert_eq!(fh.resolve_version(&file, "last1"), Some(2));
+    assert_eq!(fh.resolve_version(&file, "last2"), Some(1));
+
+    // Invalid
+    assert_eq!(fh.resolve_version(&file, "v99"), None);
+}
+
+#[test]
+fn filehistory_tag() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    // Add tag
+    assert!(fh.add_tag(&file, "before-refactor"));
+
+    // Verify tag is in description
+    let snapshots = fh.get_snapshots(&file);
+    assert!(snapshots[0].description.contains("before-refactor"), "description was: '{}'", snapshots[0].description);
+
+    // List tags
+    let tags = fh.list_tags(&file);
+    assert!(!tags.is_empty(), "expected at least 1 tag, got {}", tags.len());
+    assert_eq!(tags[0].1, "before-refactor");
+}
+
+#[test]
+fn filehistory_search_added_removed() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "line1\nline2\n").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    // Remove line2, add line3
+    fs::write(&file, "line1\nline3\n").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Search for "line3" being added
+    let results = fh.search(&file, "line3", miniclaudecode_rust::filehistory::SearchMode::Added, false);
+    assert!(!results.is_empty());
+
+    // Search for "line2" being removed
+    let results = fh.search(&file, "line2", miniclaudecode_rust::filehistory::SearchMode::Removed, false);
+    assert!(!results.is_empty());
+}
+
+#[test]
+fn filehistory_summary_and_timeline() {
+    let dir = TempDir::new().unwrap();
+    let file1 = dir.path().join("file1.txt");
+    let file2 = dir.path().join("file2.txt");
+    fs::write(&file1, "content1").unwrap();
+    fs::write(&file2, "content2").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file1).unwrap();
+    fh.snapshot(&file2).unwrap();
+
+    let summary = fh.get_summary(None);
+    assert_eq!(summary.len(), 2);
+
+    let timeline = fh.get_timeline(None);
+    assert_eq!(timeline.len(), 2);
+}
+
+#[test]
+fn filehistory_checkout() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    fs::write(&file, "v3").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Checkout v1 via rewind
+    let result = fh.rewind(&file, 2).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), "v1");
+
+    // File on disk should be v1
+    let disk = fs::read_to_string(&file).unwrap();
+    assert_eq!(disk, "v1");
+
+    // History should be preserved (with restore snapshot)
+    assert!(fh.count(&file) >= 3);
 }

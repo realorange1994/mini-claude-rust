@@ -132,13 +132,14 @@ fn main() -> Result<()> {
     cfg.permission_mode = PermissionMode::from_str(&args.mode);
     cfg.max_turns = args.max_turns;
 
-    // Always initialize file history (with disk persistence)
+    // Always initialize file history (with disk persistence) — shared Arc between tools and agent_loop
     use miniclaudecode_rust::filehistory::FileHistory;
+    use std::sync::Arc;
     let snapshots_dir = std::env::current_dir()
         .unwrap_or_default()
         .join(".claude")
         .join("snapshots");
-    cfg.file_history = Some(FileHistory::new_with_dir(&snapshots_dir));
+    cfg.file_history = Some(Arc::new(FileHistory::new_with_dir(&snapshots_dir)));
 
     // Register all tools
     let registry = tools::Registry::new();

@@ -1,6 +1,7 @@
 use chrono::Local;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub use crate::permissions::PermissionMode;
 pub use crate::tools::Registry;
@@ -21,7 +22,7 @@ pub struct Config {
     pub project_dir: PathBuf,
     pub mcp_manager: Option<McpManager>,
     pub skill_loader: Option<SkillLoader>,
-    pub file_history: Option<FileHistory>,
+    pub file_history: Option<Arc<FileHistory>>,
 }
 
 impl Default for Config {
@@ -216,7 +217,7 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
 
     // Initialize file history for undo/rewind (with disk persistence)
     let snapshots_dir = project_dir.join(".claude").join("snapshots");
-    cfg.file_history = Some(FileHistory::new_with_dir(&snapshots_dir));
+    cfg.file_history = Some(Arc::new(FileHistory::new_with_dir(&snapshots_dir)));
 
     // Return found if any config was loaded
     if cfg.api_key.is_some() || cfg.model != Config::default().model || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {

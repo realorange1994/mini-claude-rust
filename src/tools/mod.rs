@@ -159,13 +159,18 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         registry.register(skill_tools::ListSkillsTool::new(arc_loader));
     }
 
-    if let Some(file_history) = &cfg.file_history {
-        let arc_history = Arc::new(file_history.clone());
+    if let Some(arc_history) = &cfg.file_history {
         registry.register(file_history_tools::FileHistoryTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryReadTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryGrepTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileRestoreTool::new(arc_history.clone()));
-        registry.register(file_history_tools::FileRewindTool::new(arc_history));
+        registry.register(file_history_tools::FileRewindTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistoryDiffTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistorySearchTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistorySummaryTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistoryTimelineTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistoryTagTool::new(arc_history.clone()));
+        registry.register(file_history_tools::FileHistoryCheckoutTool::new(arc_history.clone()));
     }
 }
 

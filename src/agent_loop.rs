@@ -36,7 +36,7 @@ pub struct AgentLoop {
     api_key: String,
     transcript: Transcript,
     compactor: RwLock<Compactor>,
-    file_history: FileHistory,
+    file_history: Arc<FileHistory>,
     rt: tokio::runtime::Runtime,
     /// Shared interrupted flag (can be set from Ctrl+C handler)
     interrupted: Arc<std::sync::atomic::AtomicBool>,
@@ -79,7 +79,7 @@ impl AgentLoop {
         let client = client_builder.build().unwrap_or_default();
 
         let max_turns = config.max_turns;
-        let file_history = config.file_history.clone().unwrap_or_else(FileHistory::new);
+        let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
         let context = ConversationContext::new(config.clone());
         let gate = PermissionGate::new(config);
 
@@ -160,7 +160,7 @@ impl AgentLoop {
         let client = client_builder.build().unwrap_or_default();
 
         let max_turns = config.max_turns;
-        let file_history = config.file_history.clone().unwrap_or_else(FileHistory::new);
+        let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
         let gate = PermissionGate::new(config.clone());
 
         // Read transcript and rebuild context
@@ -548,12 +548,49 @@ impl AgentLoop {
 
                                     let tool_name = tc.name.clone();
 
-                                    // Auto-snapshot before write/edit tools (matching Go's TakeSnapshot)
+                                    // Capture path for post-execution snapshot before params is moved
+                                    let snapshot_path = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
+                                        params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p))
+                                    } else {
+                                        None
+                                    };
+
+                                    // Build snapshot description from tool name and params
+                                    let snapshot_desc = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
+                                        let old_str_preview = params.get("old_string").and_then(|v| v.as_str()).map(|s| {
+                                            if s.len() > 50 { format!("{}...", &s[..50]) } else { s.to_string() }
+                                        });
+                                        let new_str_preview = params.get("new_string").and_then(|v| v.as_str()).map(|s| {
+                                            if s.len() > 50 { format!("{}...", &s[..50]) } else { s.to_string() }
+                                        });
+                                        match (&*tool_name, old_str_preview, new_str_preview) {
+                                            ("edit_file", Some(old), Some(new)) => format!("edit: '{}' → '{}'", old, new),
+                                            ("multi_edit", _, _) => "multi_edit".to_string(),
+                                            ("write_file", _, _) => "write_file".to_string(),
+                                            _ => tool_name.clone(),
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
+
+                                    // Capture fileops delete info before params is moved
+                                    let fileops_delete_info = if tool_name == "fileops" {
+                                        let op = params.get("operation").and_then(|v| v.as_str());
+                                        let path = params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p));
+                                        match (op, path) {
+                                            (Some("rm"), Some(p)) => Some(("rm", p)),
+                                            (Some("rmrf"), Some(p)) => Some(("rmrf", p)),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    // Auto-snapshot before write/edit tools (captures pre-modification state)
+                                    // No description prefix — the post-execution snapshot carries the operation description
                                     if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
-                                        if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                                            if !path.is_empty() {
-                                                let _ = file_history.snapshot(&expand_path(path));
-                                            }
+                                        if let Some(path) = snapshot_path.as_ref() {
+                                            let _ = file_history.snapshot(path);
                                         }
                                     }
 
@@ -575,6 +612,19 @@ impl AgentLoop {
                                     let elapsed = start.elapsed();
                                     let output = match tool_result {
                                         Ok(result) => {
+                                            // Post-execution snapshot: captures new files and final state
+                                            if !result.is_error {
+                                                if let Some(path) = snapshot_path.as_ref() {
+                                                    let _ = file_history.snapshot_current_with_desc(path, snapshot_desc.clone());
+                                                }
+                                                // Clear file history for deleted files (rm/rmrf)
+                                                if let Some((op, del_path)) = &fileops_delete_info {
+                                                    file_history.clear(del_path);
+                                                    if *op == "rmrf" {
+                                                        file_history.clear_under_dir(del_path);
+                                                    }
+                                                }
+                                            }
                                             let output = if result.output.len() > max_tool_chars {
                                                 let limit = max_tool_chars;
                                                 let first = limit * 4 / 5;

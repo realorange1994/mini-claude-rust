@@ -68,7 +68,7 @@ impl Tool for FileHistoryTool {
 
             if count == 0 {
                 return ToolResult::ok(format!(
-                    "No history for: {}\n(Snapshots are created automatically before write/edit operations)",
+                    "No history for: {}\nSnapshots are created automatically before and after write/edit/multi_edit operations.\nA file must be modified at least once to have history.",
                     full_path.display()
                 ));
             }
@@ -79,25 +79,67 @@ impl Tool for FileHistoryTool {
             let end = (start + limit).min(total);
 
             let mut output = format!(
-                "History for: {} ({} versions, showing {}-{})\n\n",
+                "History for: {} ({} versions, showing {}-{}){}\n\n",
                 full_path.display(),
                 total,
                 start + 1,
-                end
+                end,
+                if !full_path.exists() { " [FILE DELETED]" } else { "" }
             );
 
             for (i, snap) in snapshots.iter().skip(start).take(end - start).enumerate() {
                 let version_num = start + i + 1;
-                let version = if version_num == total {
-                    "current"
+                let label = if version_num == total {
+                    format!("v{} (current)", version_num)
                 } else {
-                    &format!("v{}", version_num)
+                    format!("v{}", version_num)
                 };
+
+                // Detect if this is a "before" snapshot (same content as next version)
+                // These are pre-execution snapshots that didn't change content — merge display with next
+                let is_before = i + start + 1 < total
+                    && snapshots[i + start].checksum == snapshots[i + start + 1].checksum;
+
+                // Detect if previous snapshot had same checksum (was merged "before")
+                let is_after_merge = i + start > 0
+                    && snapshots[i + start - 1].checksum == snap.checksum;
+
+                let desc = if snap.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {}", snap.description)
+                };
+
+                // For "before" snapshots, show a compact merged line with the next version
+                if is_before {
+                    let next_desc = &snapshots[i + start + 1].description;
+                    // Show only the "after" description (the meaningful one about what changed)
+                    let merged_desc = if next_desc.is_empty() {
+                        desc.clone()
+                    } else {
+                        format!(" - {}", next_desc)
+                    };
+                    output.push_str(&format!(
+                        "[{}] {} - {} bytes{} (merged)\n",
+                        label,
+                        snap.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                        snap.content.len(),
+                        merged_desc
+                    ));
+                    continue;
+                }
+
+                // For "after" snapshots that were already merged with previous, skip
+                if is_after_merge {
+                    continue;
+                }
+
                 output.push_str(&format!(
-                    "[{}] {} - {} bytes\n",
-                    version,
+                    "[{}] {} - {} bytes{}\n",
+                    label,
                     snap.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                    snap.content.len()
+                    snap.content.len(),
+                    desc
                 ));
             }
 
@@ -105,7 +147,7 @@ impl Tool for FileHistoryTool {
                 output.push_str(&format!("\n... {} more versions. Use offset={} to see more.\n", total - end, end));
             }
 
-            output.push_str("\nUse file_history_read to view a specific version, file_restore to undo last change.");
+            output.push_str("\nUse file_history_read to view a specific version, file_history_diff to see changes between versions, file_restore to undo last change.");
             ToolResult::ok(output)
         } else {
             // List all files with history, optionally filtered by glob pattern
@@ -221,7 +263,7 @@ impl Tool for FileHistoryReadTool {
         let version = params.get("version").and_then(|v| v.as_u64()).unwrap_or(snapshots.len() as u64) as usize;
         if version == 0 || version > snapshots.len() {
             return ToolResult::error(format!(
-                "Invalid version {}. Available versions: 1-{}",
+                "Invalid version {}. Available versions: 1-{} (omit 'version' to read current/latest)",
                 version,
                 snapshots.len()
             ));
@@ -582,4 +624,574 @@ impl Tool for FileRewindTool {
             Err(e) => ToolResult::error(format!("Error rewinding file: {}", e)),
         }
     }
+}
+
+// ─── P0: file_history_diff ───
+
+pub struct FileHistoryDiffTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryDiffTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryDiffTool {
+    fn name(&self) -> &str {
+        "file_history_diff"
+    }
+
+    fn description(&self) -> &str {
+        "Show diff between two versions of a file. Parameters: 'path' (required), 'from' (version: v3, last1, current, or tag name), 'to' (version specifier, default: current). Shows added/removed/changed lines in unified-diff format. Essential for understanding what changed between versions."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file."
+                },
+                "from": {
+                    "type": "string",
+                    "description": "Starting version (v1, v3, current, last1, or tag name). Default: previous version."
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Ending version (v1, v3, current, last1, or tag name). Default: current version."
+                }
+            },
+            "required": ["path"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: path is required"),
+        };
+
+        let full_path = expand_path(path);
+        let total = self.history.count(&full_path);
+        if total == 0 {
+            return ToolResult::error(format!("No history for: {}", full_path.display()));
+        }
+
+        // Resolve from version (default: previous = total - 1)
+        let from_spec = params.get("from").and_then(|v| v.as_str()).unwrap_or("last1");
+        let from_ver = if params.contains_key("from") {
+            self.history.resolve_version(&full_path, from_spec)
+        } else {
+            // Default: previous version
+            if total >= 2 { Some(total - 1) } else { Some(1) }
+        };
+
+        let to_spec = params.get("to").and_then(|v| v.as_str()).unwrap_or("current");
+        let to_ver = if params.contains_key("to") {
+            self.history.resolve_version(&full_path, to_spec)
+        } else {
+            Some(total)
+        };
+
+        let from_ver = match from_ver {
+            Some(v) => v,
+            None => return ToolResult::error(format!(
+                "Cannot resolve 'from' version '{}' for {}. Use file_history to see available versions.", from_spec, full_path.display()
+            )),
+        };
+        let to_ver = match to_ver {
+            Some(v) => v,
+            None => return ToolResult::error(format!(
+                "Cannot resolve 'to' version '{}' for {}. Use file_history to see available versions.", to_spec, full_path.display()
+            )),
+        };
+
+        if from_ver == to_ver {
+            return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", from_ver, to_ver));
+        }
+
+        let diff_result = match self.history.diff(&full_path, from_ver, to_ver) {
+            Some(d) => d,
+            None => return ToolResult::error("Failed to compute diff."),
+        };
+
+        let mut output = format!("Diff: {} (v{} → v{})\n\n", full_path.display(), from_ver, to_ver);
+
+        if diff_result.hunks.is_empty() {
+            output.push_str("No differences found.\n");
+            return ToolResult::ok(output);
+        }
+
+        let mut total_added = 0usize;
+        let mut total_removed = 0usize;
+
+        for hunk in &diff_result.hunks {
+            output.push_str(&format!("@@ -{},{} +{},{} @@\n",
+                hunk.from_line, hunk.from_count,
+                hunk.to_line, hunk.to_count));
+            for line in &hunk.lines {
+                if line.starts_with('+') && !line.starts_with("++") {
+                    total_added += 1;
+                } else if line.starts_with('-') && !line.starts_with("--") {
+                    total_removed += 1;
+                }
+                output.push_str(line);
+                output.push('\n');
+            }
+        }
+
+        output.push_str(&format!("\nSummary: +{} lines added, -{} lines removed", total_added, total_removed));
+        ToolResult::ok(output)
+    }
+}
+
+// ─── P1: file_history_search (added/removed/changed) ───
+
+pub struct FileHistorySearchTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistorySearchTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistorySearchTool {
+    fn name(&self) -> &str {
+        "file_history_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search for when text was added, removed, or changed across versions. Parameters: 'path' (required), 'query' (required, text to search for), 'mode' (optional: 'added', 'removed', or 'changed'. Default: 'changed'), 'ignore_case' (optional, default: false). Shows which versions introduced or removed the matching text."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to search."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Text to search for (literal string, not regex)."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Search mode: 'added' (text was added), 'removed' (text was removed), or 'changed' (either). Default: 'changed'.",
+                    "enum": ["added", "removed", "changed"]
+                },
+                "ignore_case": {
+                    "type": "boolean",
+                    "description": "Case insensitive search. Default: false."
+                }
+            },
+            "required": ["path", "query"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: path is required"),
+        };
+
+        let query = match params.get("query").and_then(|v| v.as_str()) {
+            Some(q) => q,
+            None => return ToolResult::error("Error: query is required"),
+        };
+
+        let mode_str = params.get("mode").and_then(|v| v.as_str()).unwrap_or("changed");
+        let mode = match mode_str {
+            "added" => crate::filehistory::SearchMode::Added,
+            "removed" => crate::filehistory::SearchMode::Removed,
+            _ => crate::filehistory::SearchMode::Changed,
+        };
+
+        let ignore_case = params.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let full_path = expand_path(path);
+        if self.history.count(&full_path) == 0 {
+            return ToolResult::error(format!("No history for: {}", full_path.display()));
+        }
+
+        let results = self.history.search(&full_path, query, mode, ignore_case);
+
+        if results.is_empty() {
+            return ToolResult::ok(format!(
+                "No versions where '{}' was {} in: {}",
+                query, mode_str, full_path.display()
+            ));
+        }
+
+        let mut output = format!("Versions where '{}' was {} in {}:\n\n", query, mode_str, full_path.display());
+        for (ver, details) in &results {
+            output.push_str(&format!("v{}:\n{}\n\n", ver, details));
+        }
+
+        ToolResult::ok(output)
+    }
+}
+
+// ─── P1: file_history_summary ───
+
+pub struct FileHistorySummaryTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistorySummaryTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistorySummaryTool {
+    fn name(&self) -> &str {
+        "file_history_summary"
+    }
+
+    fn description(&self) -> &str {
+        "Show a summary of all files with history and their change counts. Parameters: 'since' (optional, time filter like '1h', '30m', '1d' for last 1 hour/30 minutes/1 day). Shows each file's version count and latest change description. Useful for getting an overview of what changed in the session."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "Time filter: show changes since this time ago. Examples: '1h' (1 hour), '30m' (30 minutes), '1d' (1 day). Default: show all."
+                }
+            },
+            "required": []
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let since = params.get("since").and_then(|v| v.as_str())
+            .and_then(|s| parse_duration(s));
+
+        let summary = self.history.get_summary(since);
+
+        if summary.is_empty() {
+            let since_msg = since.map(|s| format!(" since {}", s.format("%Y-%m-%d %H:%M"))).unwrap_or_default();
+            return ToolResult::ok(format!("No files with history found{}.", since_msg));
+        }
+
+        let mut output = format!("Files with history ({} files):\n\n", summary.len());
+
+        for (path, snaps) in &summary {
+            let deleted = if !path.exists() { " [DELETED]" } else { "" };
+            let last = snaps.last();
+            let latest_desc = last.map(|s| {
+                if s.description.is_empty() {
+                    format!("{} bytes", s.content.len())
+                } else {
+                    s.description.clone()
+                }
+            }).unwrap_or_default();
+            let latest_time = last.map(|s| s.timestamp.format("%H:%M:%S").to_string()).unwrap_or_default();
+
+            output.push_str(&format!(
+                "{} ({} versions, latest: {} at {}){}\n",
+                path.display(),
+                snaps.len(),
+                latest_desc,
+                latest_time,
+                deleted
+            ));
+        }
+
+        ToolResult::ok(output)
+    }
+}
+
+// ─── P1: file_history_timeline ───
+
+pub struct FileHistoryTimelineTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryTimelineTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryTimelineTool {
+    fn name(&self) -> &str {
+        "file_history_timeline"
+    }
+
+    fn description(&self) -> &str {
+        "Show a chronological timeline of all file changes across all files. Parameters: 'since' (optional, time filter like '1h', '30m', '1d'), 'limit' (optional, max entries, default 20). Useful for understanding the order of changes across multiple files."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "Time filter: show changes since this time ago. Examples: '1h', '30m', '1d'. Default: show all."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of timeline entries. Default: 20.",
+                    "minimum": 1
+                }
+            },
+            "required": []
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let since = params.get("since").and_then(|v| v.as_str())
+            .and_then(|s| parse_duration(s));
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        let timeline = self.history.get_timeline(since);
+
+        if timeline.is_empty() {
+            return ToolResult::ok("No changes found in timeline.");
+        }
+
+        let mut output = format!("Timeline ({} entries):\n\n", timeline.len().min(limit));
+
+        for (ts, path, _ver, desc) in timeline.iter().take(limit) {
+            let deleted = if !path.exists() { " [DELETED]" } else { "" };
+            output.push_str(&format!(
+                "{} {} {}{}\n",
+                ts.format("%H:%M:%S"),
+                path.display(),
+                desc,
+                deleted
+            ));
+        }
+
+        if timeline.len() > limit {
+            output.push_str(&format!("\n... {} more entries. Use limit={} to see more.", timeline.len() - limit, limit + 20));
+        }
+
+        ToolResult::ok(output)
+    }
+}
+
+// ─── P2: file_history_tag ───
+
+pub struct FileHistoryTagTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryTagTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryTagTool {
+    fn name(&self) -> &str {
+        "file_history_tag"
+    }
+
+    fn description(&self) -> &str {
+        "Add a named tag to the current version of a file, or list existing tags. Parameters: 'path' (required), 'tag' (optional, tag name to add. If omitted, lists existing tags). Tags can be used with file_history_diff (from/to) and file_restore for easy reference. Use before risky operations."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file."
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Tag name to add to current version. If omitted, lists existing tags."
+                }
+            },
+            "required": ["path"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: path is required"),
+        };
+
+        let full_path = expand_path(path);
+
+        if let Some(tag) = params.get("tag").and_then(|v| v.as_str()) {
+            if self.history.add_tag(&full_path, tag) {
+                ToolResult::ok(format!("Tagged current version of {} as [{}]", full_path.display(), tag))
+            } else {
+                ToolResult::error(format!("No history for: {}", full_path.display()))
+            }
+        } else {
+            let tags = self.history.list_tags(&full_path);
+            if tags.is_empty() {
+                return ToolResult::ok(format!("No tags for: {}", full_path.display()));
+            }
+            let mut output = format!("Tags for {}:\n", full_path.display());
+            for (ver, tag) in &tags {
+                output.push_str(&format!("  v{}: [{}]\n", ver, tag));
+            }
+            ToolResult::ok(output)
+        }
+    }
+}
+
+// ─── P3: unified file_history_checkout ───
+
+pub struct FileHistoryCheckoutTool {
+    history: Arc<FileHistory>,
+}
+
+impl FileHistoryCheckoutTool {
+    pub fn new(history: Arc<FileHistory>) -> Self {
+        Self { history }
+    }
+}
+
+impl Tool for FileHistoryCheckoutTool {
+    fn name(&self) -> &str {
+        "file_history_checkout"
+    }
+
+    fn description(&self) -> &str {
+        "Checkout a specific version of a file (unified restore/rewind). Parameters: 'path' (required), 'version' (version specifier: v3, current, last2, or tag name). Restores the file to the specified version and records the checkout as a new version (so redo is possible). Use file_history first to see available versions."
+    }
+
+    fn input_schema(&self) -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file."
+                },
+                "version": {
+                    "type": "string",
+                    "description": "Version to checkout: v3, current, last2, or tag name. Default: previous version."
+                }
+            },
+            "required": ["path"]
+        }).as_object().unwrap().clone()
+    }
+
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+        None
+    }
+
+    fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        let path = match params.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error("Error: path is required"),
+        };
+
+        let full_path = expand_path(path);
+        let total = self.history.count(&full_path);
+        if total == 0 {
+            return ToolResult::error(format!("No history for: {}", full_path.display()));
+        }
+
+        let version_spec = params.get("version").and_then(|v| v.as_str()).unwrap_or("last1");
+        let target_ver = self.history.resolve_version(&full_path, version_spec);
+
+        let target_ver = match target_ver {
+            Some(v) => v,
+            None => return ToolResult::error(format!(
+                "Cannot resolve version '{}' for {}. Use file_history to see available versions.",
+                version_spec, full_path.display()
+            )),
+        };
+
+        if target_ver == total {
+            return ToolResult::ok(format!("Already at v{} (current) for: {}", target_ver, full_path.display()));
+        }
+
+        // Calculate steps back from current
+        let steps = total.saturating_sub(target_ver);
+        if steps == 0 {
+            return ToolResult::ok(format!("Already at v{} for: {}", target_ver, full_path.display()));
+        }
+
+        match self.history.rewind(&full_path, steps) {
+            Ok(Some(content)) => {
+                let preview = if content.len() > 200 {
+                    format!("{}...", &content[..200])
+                } else {
+                    content.clone()
+                };
+                ToolResult::ok(format!(
+                    "Checked out v{} of {}\nContent preview:\n{}",
+                    target_ver,
+                    full_path.display(),
+                    preview
+                ))
+            }
+            Ok(None) => ToolResult::error(format!(
+                "Cannot checkout v{} for: {}. Not enough history.",
+                target_ver, full_path.display()
+            )),
+            Err(e) => ToolResult::error(format!("Error checking out file: {}", e)),
+        }
+    }
+}
+
+// ─── Helper: parse time duration strings ───
+
+fn parse_duration(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    let s = s.trim();
+
+    // Try "Nd" for N days
+    if let Some(num) = s.strip_suffix('d') {
+        if let Ok(n) = num.parse::<i64>() {
+            return Some(now - chrono::Duration::days(n));
+        }
+    }
+
+    // Try "Nh" for N hours
+    if let Some(num) = s.strip_suffix('h') {
+        if let Ok(n) = num.parse::<i64>() {
+            return Some(now - chrono::Duration::hours(n));
+        }
+    }
+
+    // Try "Nm" for N minutes
+    if let Some(num) = s.strip_suffix('m') {
+        if let Ok(n) = num.parse::<i64>() {
+            return Some(now - chrono::Duration::minutes(n));
+        }
+    }
+
+    None
 }
