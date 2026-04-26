@@ -53,11 +53,11 @@ impl Tool for GitTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Destination path for clone, or target path for init/worktree"
+                    "description": "Destination path for clone, target path for init/worktree, destination for mv, or file for blame"
                 },
                 "directory": {
                     "type": "string",
-                    "description": "Working directory to run the git command in (for all operations except clone)"
+                    "description": "Working directory to run the git command in. For clone, this is the directory where the clone command runs (path is the destination)"
                 },
                 "branch": {
                     "type": "string",
@@ -91,7 +91,7 @@ impl Tool for GitTool {
                 },
                 "staged": {
                     "type": "boolean",
-                    "description": "Restore the index only (for restore --staged)"
+                    "description": "For restore: restore from staging area. For rm: remove from index only (--cached)"
                 },
                 "worktree": {
                     "type": "boolean",
@@ -99,7 +99,7 @@ impl Tool for GitTool {
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "Force operation (for switch -f, clean -f, cherry-pick --continue)"
+                    "description": "Force the operation (for switch, clean, rm, restore, mv)"
                 },
                 "ours_theirs": {
                     "type": "string",
