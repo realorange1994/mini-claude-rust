@@ -91,11 +91,7 @@ impl Tool for GitTool {
                 },
                 "staged": {
                     "type": "boolean",
-                    "description": "For restore: restore from staging area. For rm: remove from index only (--cached)"
-                },
-                "worktree": {
-                    "type": "boolean",
-                    "description": "Restore the working tree (default for restore)"
+                    "description": "For restore: restore from staging area (--staged). For rm: remove from index only (--cached). NOTE: there is NO separate 'cached' param for rm - use 'staged' instead"
                 },
                 "force": {
                     "type": "boolean",
@@ -103,7 +99,7 @@ impl Tool for GitTool {
                 },
                 "ours_theirs": {
                     "type": "string",
-                    "description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs)"
+                    "description": "Checkout ours or theirs during conflict (for checkout --ours/--theirs). checkout does NOT support 'files' param"
                 },
                 "dry_run": {
                     "type": "boolean",
@@ -119,7 +115,7 @@ impl Tool for GitTool {
                 },
                 "cached": {
                     "type": "boolean",
-                    "description": "Show staged files instead of working tree (for diff)"
+                    "description": "Show staged changes instead of working tree (only for diff). NOT for rm - use 'staged' param for rm --cached"
                 },
                 "recursive": {
                     "type": "boolean",
@@ -127,7 +123,7 @@ impl Tool for GitTool {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source file for mv, or source branch/commit for switch"
+                    "description": "Source file for mv, or source branch/commit for switch. NOT for restore (restore uses 'files' param)"
                 },
                 "worktree_name": {
                     "type": "string",
@@ -282,10 +278,6 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             args.push("restore".to_string());
             if params.get("staged").and_then(|v| v.as_bool()).unwrap_or(false) {
                 args.push("--staged".to_string());
-            }
-            if params.get("source").and_then(|v| v.as_str()).is_some() {
-                args.push("--source".to_string());
-                args.push(params["source"].as_str().unwrap().to_string());
             }
             if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 for f in files {
