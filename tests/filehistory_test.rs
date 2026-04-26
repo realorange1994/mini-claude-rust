@@ -437,6 +437,63 @@ fn filehistory_tag() {
 }
 
 #[test]
+fn filehistory_remove_tag() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("test.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file).unwrap();
+    fh.add_tag(&file, "stable");
+    fh.add_tag(&file, "release");
+
+    // Verify both tags exist
+    let tags = fh.list_tags(&file);
+    assert_eq!(tags.len(), 1); // Both tags on same version
+    assert!(tags[0].1.contains("stable") || tags[0].1.contains("release"));
+
+    // Remove "stable" tag
+    assert!(fh.remove_tag(&file, 1, "stable"));
+
+    // Verify tag was removed
+    let snapshots = fh.get_snapshots(&file);
+    assert!(!snapshots[0].description.contains("[stable]"), "tag should be removed: '{}'", snapshots[0].description);
+    assert!(snapshots[0].description.contains("[release]"), "other tag should remain: '{}'", snapshots[0].description);
+
+    // Remove non-existent tag
+    assert!(!fh.remove_tag(&file, 1, "nonexistent"));
+}
+
+#[test]
+fn filehistory_search_tag() {
+    let dir = TempDir::new().unwrap();
+    let file1 = dir.path().join("file1.txt");
+    let file2 = dir.path().join("file2.txt");
+
+    fs::write(&file1, "v1").unwrap();
+    fs::write(&file2, "v1").unwrap();
+
+    let fh = FileHistory::new();
+    fh.snapshot(&file1).unwrap();
+    fh.snapshot(&file2).unwrap();
+    fh.add_tag(&file1, "important");
+    fh.add_tag(&file2, "review");
+
+    // Search across all files
+    let results = fh.search_tag_all("important");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0.ends_with("file1.txt"));
+
+    let results = fh.search_tag_all("review");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0.ends_with("file2.txt"));
+
+    // Non-existent tag
+    let results = fh.search_tag_all("nonexistent");
+    assert!(results.is_empty());
+}
+
+#[test]
 fn filehistory_search_added_removed() {
     let dir = TempDir::new().unwrap();
     let file = dir.path().join("test.txt");

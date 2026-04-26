@@ -486,6 +486,92 @@ impl FileHistory {
 
     /// List all tags across all non-deleted snapshots for a file
     pub fn list_tags(&self, path: &Path) -> Vec<(usize, String)> {
+        self.list_tags_internal(path, None)
+    }
+
+    /// Search for a tag across all non-deleted snapshots for a file.
+    /// Returns (version, description, content_size) for each match.
+    pub fn search_tag(&self, path: &Path, tag: &str) -> Vec<(usize, String, usize)> {
+        let snapshots = self.snapshots.read().unwrap();
+        let file_snapshots = match snapshots.get(path) {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+        let mut results = Vec::new();
+        let mut ver = 0;
+        for snap in file_snapshots.iter() {
+            if snap.deleted { continue; }
+            ver += 1;
+            if snap.description.contains(tag) {
+                results.push((ver, snap.description.clone(), snap.content.len()));
+            }
+        }
+        results
+    }
+
+    /// Remove a tag from a specific version.
+    /// version is 1-indexed (among non-deleted). Returns true if tag was found and removed.
+    pub fn remove_tag(&self, path: &Path, version: usize, tag: &str) -> bool {
+        let tag_pattern = format!("[{}]", tag);
+        let mut snapshots = self.snapshots.write().unwrap();
+        let file_snapshots = match snapshots.get_mut(path) {
+            Some(f) if !f.is_empty() => f,
+            _ => return false,
+        };
+
+        // Find the version
+        let mut ver = 0;
+        let target = file_snapshots.iter_mut().find(|s| {
+            if s.deleted { return false; }
+            ver += 1;
+            ver == version
+        });
+
+        let target = match target {
+            Some(s) => s,
+            None => return false,
+        };
+
+        // Check if tag exists
+        if !target.description.contains(&tag_pattern) {
+            return false;
+        }
+
+        // Remove the tag and clean up extra whitespace
+        target.description = target.description.replace(&tag_pattern, "").trim().to_string();
+        // Clean up trailing spaces before punctuation
+        while target.description.ends_with(" |") {
+            target.description = target.description.trim_end_matches(" |").to_string();
+        }
+        // Clean up leading " |"
+        while target.description.starts_with("| ") || target.description.starts_with("|") {
+            target.description = target.description.trim_start_matches(|c| c == '|' || c == ' ').to_string();
+        }
+        // Clean up duplicate spaces
+        target.description = target.description.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        true
+    }
+
+    /// Search for versions by tag name across all tracked files.
+    /// Returns (file_path, version, description) for each match.
+    pub fn search_tag_all(&self, tag: &str) -> Vec<(PathBuf, usize, String)> {
+        let snapshots = self.snapshots.read().unwrap();
+        let mut results = Vec::new();
+        for (path, file_snapshots) in snapshots.iter() {
+            let mut ver = 0;
+            for snap in file_snapshots.iter() {
+                if snap.deleted { continue; }
+                ver += 1;
+                if snap.description.contains(tag) {
+                    results.push((path.clone(), ver, snap.description.clone()));
+                }
+            }
+        }
+        results
+    }
+
+    pub fn list_tags_internal(&self, path: &Path, tag_filter: Option<&str>) -> Vec<(usize, String)> {
         let snapshots = self.snapshots.read().unwrap();
         let file_snapshots = match snapshots.get(path) {
             Some(f) => f,
@@ -499,7 +585,10 @@ impl FileHistory {
             // Extract tags from description: text in square brackets
             if let Some(start) = snap.description.find('[') {
                 if let Some(end) = snap.description[start..].find(']') {
-                    tags.push((ver, snap.description[start + 1..start + end].to_string()));
+                    let tag_name = snap.description[start + 1..start + end].to_string();
+                    if tag_filter.map_or(true, |f| tag_name.contains(f)) {
+                        tags.push((ver, tag_name));
+                    }
                 }
             }
         }

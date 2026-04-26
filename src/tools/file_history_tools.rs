@@ -784,14 +784,14 @@ impl Tool for FileHistoryDiffTool {
             return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", from_ver, to_ver));
         }
 
-        let (a_added, a_removed, a_lines, a_output) = diff_stats(from_ver, to_ver);
+        let (a_added, a_removed, _a_lines, a_output) = diff_stats(from_ver, to_ver);
 
         match to2_ver {
             Some(v2) => {
                 if to_ver == v2 {
                     return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", to_ver, v2));
                 }
-                let (b_added, b_removed, b_lines, b_output) = diff_stats(to_ver, v2);
+                let (b_added, b_removed, _b_lines, b_output) = diff_stats(to_ver, v2);
 
                 match mode {
                     "stat" => {
@@ -1120,7 +1120,7 @@ impl Tool for FileHistoryTagTool {
     }
 
     fn description(&self) -> &str {
-        "Add a named tag to the current version of a file, or list existing tags. Parameters: 'path' (required), 'tag' (optional, tag name to add. If omitted, lists existing tags). Tags can be used with file_history_diff (from/to) and file_restore for easy reference. Use before risky operations."
+        "Manage tags on file versions. Actions: 'add' (add tag to current version), 'list' (show all tags), 'delete' (remove tag from specific version), 'search' (find versions by tag name across all files). Parameters: 'path' (required for add/list/delete), 'tag' (tag name), 'version' (version number for delete, 1-indexed), 'action' (add|list|delete|search, default: add if tag provided, list otherwise)."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -1129,14 +1129,24 @@ impl Tool for FileHistoryTagTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file."
+                    "description": "Path to the file. Required for add/list/delete."
                 },
                 "tag": {
                     "type": "string",
-                    "description": "Tag name to add to current version. If omitted, lists existing tags."
+                    "description": "Tag name. Required for add, optional for list/delete/search."
+                },
+                "version": {
+                    "type": "integer",
+                    "description": "Version number to remove tag from (1-indexed). Required for delete action.",
+                    "minimum": 1
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action: 'add' (default if tag given), 'list', 'delete', 'search'.",
+                    "enum": ["add", "list", "delete", "search"]
                 }
             },
-            "required": ["path"]
+            "required": []
         }).as_object().unwrap().clone()
     }
 
@@ -1145,29 +1155,100 @@ impl Tool for FileHistoryTagTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return ToolResult::error("Error: path is required"),
-        };
+        let action = params.get("action").and_then(|v| v.as_str());
+        let tag = params.get("tag").and_then(|v| v.as_str());
 
-        let full_path = expand_path(path);
+        // Determine default action
+        let action = action.unwrap_or(if tag.is_some() { "add" } else { "list" });
 
-        if let Some(tag) = params.get("tag").and_then(|v| v.as_str()) {
-            if self.history.add_tag(&full_path, tag) {
-                ToolResult::ok(format!("Tagged current version of {} as [{}]", full_path.display(), tag))
-            } else {
-                ToolResult::error(format!("No history for: {}", full_path.display()))
+        match action {
+            "add" => {
+                let path = match params.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return ToolResult::error("Error: path is required for add action"),
+                };
+                let tag = match tag {
+                    Some(t) => t,
+                    None => return ToolResult::error("Error: tag is required for add action"),
+                };
+                let full_path = expand_path(path);
+                if self.history.add_tag(&full_path, tag) {
+                    ToolResult::ok(format!("Tagged current version of {} as [{}]", full_path.display(), tag))
+                } else {
+                    ToolResult::error(format!("No history for: {}", full_path.display()))
+                }
             }
-        } else {
-            let tags = self.history.list_tags(&full_path);
-            if tags.is_empty() {
-                return ToolResult::ok(format!("No tags for: {}", full_path.display()));
+            "list" => {
+                let path = match params.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return ToolResult::error("Error: path is required for list action"),
+                };
+                let full_path = expand_path(path);
+                let tags = if let Some(t) = tag {
+                    self.history.list_tags_internal(&full_path, Some(t))
+                } else {
+                    self.history.list_tags(&full_path)
+                };
+                if tags.is_empty() {
+                    return ToolResult::ok(format!("No tags for: {}", full_path.display()));
+                }
+                let mut output = format!("Tags for {}:\n", full_path.display());
+                for (ver, tag_name) in &tags {
+                    let snap = self.history.get_snapshots(&full_path);
+                    let desc = if *ver <= snap.len() {
+                        let s = &snap[ver - 1];
+                        // Show description without the tag bracket
+                        let desc_no_tag = s.description.replace(&format!("[{}]", tag_name), "").trim().to_string();
+                        if desc_no_tag.is_empty() {
+                            format!(" ({} bytes)", s.content.len())
+                        } else {
+                            format!(" - {} ({} bytes)", desc_no_tag, s.content.len())
+                        }
+                    } else {
+                        String::new()
+                    };
+                    output.push_str(&format!("  v{}: [{}]{}\n", ver, tag_name, desc));
+                }
+                ToolResult::ok(output)
             }
-            let mut output = format!("Tags for {}:\n", full_path.display());
-            for (ver, tag) in &tags {
-                output.push_str(&format!("  v{}: [{}]\n", ver, tag));
+            "delete" => {
+                let path = match params.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => p,
+                    None => return ToolResult::error("Error: path is required for delete action"),
+                };
+                let tag = match tag {
+                    Some(t) => t,
+                    None => return ToolResult::error("Error: tag is required for delete action"),
+                };
+                let version = match params.get("version").and_then(|v| v.as_u64()) {
+                    Some(v) => v as usize,
+                    None => return ToolResult::error("Error: version is required for delete action"),
+                };
+                let full_path = expand_path(path);
+                if self.history.remove_tag(&full_path, version, tag) {
+                    ToolResult::ok(format!("Removed tag [{}] from v{} of {}", tag, version, full_path.display()))
+                } else {
+                    ToolResult::error(format!("Tag [{}] not found on v{} of {}", tag, version, full_path.display()))
+                }
             }
-            ToolResult::ok(output)
+            "search" => {
+                let tag = match tag {
+                    Some(t) => t,
+                    None => return ToolResult::error("Error: tag is required for search action"),
+                };
+                let results = self.history.search_tag_all(tag);
+                if results.is_empty() {
+                    return ToolResult::ok(format!("No versions found with tag [{}].", tag));
+                }
+                let mut output = format!("Versions with tag [{}] ({} matches):\n\n", tag, results.len());
+                for (path, ver, desc) in results {
+                    output.push_str(&format!("  {} v{}: {}\n", path.display(), ver, desc));
+                }
+                ToolResult::ok(output)
+            }
+            _ => {
+                ToolResult::error(format!("Unknown action: {}. Use add, list, delete, or search.", action))
+            }
         }
     }
 }
