@@ -2,7 +2,7 @@
 
 use miniclaudecode_rust::config::Config;
 use miniclaudecode_rust::context::{
-    ConversationContext, ConversationEntry, MessageContent,
+    ConversationContext, ConversationEntry, Message, MessageContent, MessageRole,
     ToolUseBlock, ToolResultBlock, ToolResultContent,
 };
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ fn context_add_assistant_text() {
     ctx.add_assistant_text("Hi there!".to_string());
     assert_eq!(ctx.len(), 2);
     let entries = ctx.entries();
-    assert_eq!(entries[1].role, "assistant");
+    assert_eq!(entries[1].role, MessageRole::Assistant);
 }
 
 #[test]
@@ -265,16 +265,10 @@ fn context_replace_entries() {
     ctx.add_user_message("Original".to_string());
 
     let new_entries = vec![
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("New start".to_string()),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text("New response".to_string()),
-        },
+        Message::new(MessageRole::User, MessageContent::Text("New start".to_string())),
+        Message::new(MessageRole::Assistant, MessageContent::Text("New response".to_string())),
     ];
-    ctx.replace_entries(new_entries);
+    ctx.replace_messages(new_entries);
 
     assert_eq!(ctx.len(), 2);
     // Verify content via match (MessageContent doesn't impl PartialEq across crates)

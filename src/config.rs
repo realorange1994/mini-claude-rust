@@ -23,6 +23,11 @@ pub struct Config {
     pub mcp_manager: Option<McpManager>,
     pub skill_loader: Option<SkillLoader>,
     pub file_history: Option<Arc<FileHistory>>,
+    // Compaction config
+    pub auto_compact_enabled: bool,
+    pub auto_compact_threshold: f64,
+    pub auto_compact_buffer: usize,
+    pub max_compact_output_tokens: usize,
 }
 
 impl Default for Config {
@@ -72,6 +77,10 @@ impl Default for Config {
             mcp_manager: None,
             skill_loader: None,
             file_history: None,
+            auto_compact_enabled: true,
+            auto_compact_threshold: 0.75,
+            auto_compact_buffer: 13_000,
+            max_compact_output_tokens: 20_000,
         }
     }
 }

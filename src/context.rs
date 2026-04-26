@@ -2,14 +2,54 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Represents a single entry in the conversation history
-#[derive(Debug, Clone)]
-pub enum MessageContent {
-    Text(String),
-    ToolUseBlocks(Vec<ToolUseBlock>),
-    ToolResultBlocks(Vec<ToolResultBlock>),
+/// Unique ID for messages (used for transcript tracking and compact boundary relinking)
+fn generate_uuid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("msg-{}-{:x}", duration.as_secs(), duration.subsec_nanos())
 }
 
+fn generate_timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
+}
+
+/// Role of a message in the conversation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+}
+
+impl MessageRole {
+    pub fn as_str(&self) -> &str {
+        match self {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+        }
+    }
+}
+
+/// What triggered a compaction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompactTrigger {
+    Auto,
+    Manual,
+}
+
+impl std::fmt::Display for CompactTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompactTrigger::Auto => write!(f, "auto"),
+            CompactTrigger::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+/// Tool use block (matches Anthropic API format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolUseBlock {
     pub id: String,
@@ -18,6 +58,15 @@ pub struct ToolUseBlock {
     pub input: HashMap<String, serde_json::Value>,
 }
 
+/// Content within a tool result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ToolResultContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+}
+
+/// Tool result block (matches Anthropic API format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultBlock {
     pub tool_use_id: String,
@@ -26,24 +75,74 @@ pub struct ToolResultBlock {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ToolResultContent {
-    #[serde(rename = "text")]
-    Text { text: String },
+/// Content variants for a message
+#[derive(Debug, Clone)]
+pub enum MessageContent {
+    /// Plain text content
+    Text(String),
+    /// Assistant tool use blocks (role: assistant)
+    ToolUseBlocks(Vec<ToolUseBlock>),
+    /// Tool result blocks (role: user)
+    ToolResultBlocks(Vec<ToolResultBlock>),
+    /// Compact boundary marker (role: system) — signals that messages before this point
+    /// have been summarized and should not be sent to the API
+    CompactBoundary {
+        trigger: CompactTrigger,
+        pre_compact_tokens: usize,
+    },
+    /// Summary of compressed conversation history (role: user)
+    /// This is injected after compaction to preserve semantic continuity
+    Summary(String),
 }
 
+/// A single message in the conversation history.
+/// Replaces the old ConversationEntry with richer type information.
 #[derive(Debug, Clone)]
-pub struct ConversationEntry {
-    pub role: String,
+pub struct Message {
+    pub role: MessageRole,
     pub content: MessageContent,
+    pub uuid: String,
+    pub timestamp: String,
 }
+
+impl Message {
+    pub fn new(role: MessageRole, content: MessageContent) -> Self {
+        Self {
+            role,
+            content,
+            uuid: generate_uuid(),
+            timestamp: generate_timestamp(),
+        }
+    }
+
+    /// Check if this message is a compact boundary
+    pub fn is_compact_boundary(&self) -> bool {
+        matches!(self.content, MessageContent::CompactBoundary { .. })
+    }
+
+    /// Check if this message is a summary
+    pub fn is_summary(&self) -> bool {
+        matches!(self.content, MessageContent::Summary(_))
+    }
+
+    /// Get text content if this is a text or summary message
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.content {
+            MessageContent::Text(t) => Some(t),
+            MessageContent::Summary(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+// Backwards compatibility alias
+pub type ConversationEntry = Message;
 
 /// Manages conversation message history and system prompt
 #[derive(Debug)]
 pub struct ConversationContext {
     config: Config,
-    entries: Vec<ConversationEntry>,
+    messages: Vec<Message>,
     #[allow(dead_code)]
     system_prompt: String,
 }
@@ -52,7 +151,7 @@ impl ConversationContext {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            entries: Vec::new(),
+            messages: Vec::new(),
             system_prompt: String::new(),
         }
     }
@@ -67,78 +166,145 @@ impl ConversationContext {
         &self.system_prompt
     }
 
+    /// Add a user text message
     pub fn add_user_message(&mut self, content: String) {
-        self.entries.push(ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text(content),
-        });
+        self.messages.push(Message::new(
+            MessageRole::User,
+            MessageContent::Text(content),
+        ));
         self.truncate_if_needed();
     }
 
+    /// Add an assistant text message
     pub fn add_assistant_text(&mut self, text: String) {
         if text.is_empty() {
             return;
         }
-        self.entries.push(ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text(text),
-        });
+        self.messages.push(Message::new(
+            MessageRole::Assistant,
+            MessageContent::Text(text),
+        ));
         self.truncate_if_needed();
     }
 
+    /// Add assistant tool use blocks
     pub fn add_assistant_tool_calls(&mut self, tool_calls: Vec<ToolUseBlock>) {
-        self.entries.push(ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::ToolUseBlocks(tool_calls),
-        });
+        self.messages.push(Message::new(
+            MessageRole::Assistant,
+            MessageContent::ToolUseBlocks(tool_calls),
+        ));
         self.truncate_if_needed();
     }
 
+    /// Add tool result blocks
     pub fn add_tool_results(&mut self, results: Vec<ToolResultBlock>) {
-        self.entries.push(ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::ToolResultBlocks(results),
-        });
+        self.messages.push(Message::new(
+            MessageRole::User,
+            MessageContent::ToolResultBlocks(results),
+        ));
         self.truncate_if_needed();
     }
 
-    /// Get all entries
-    pub fn entries(&self) -> &[ConversationEntry] {
-        &self.entries
+    /// Add a compact boundary marker
+    pub fn add_compact_boundary(&mut self, trigger: CompactTrigger, pre_compact_tokens: usize) {
+        self.messages.push(Message::new(
+            MessageRole::System,
+            MessageContent::CompactBoundary {
+                trigger,
+                pre_compact_tokens,
+            },
+        ));
     }
 
-    /// Get entry count
+    /// Add a summary message (from compaction)
+    pub fn add_summary(&mut self, content: String) {
+        self.messages.push(Message::new(
+            MessageRole::User,
+            MessageContent::Summary(content),
+        ));
+    }
+
+    /// Add a generic system message
+    #[allow(dead_code)]
+    pub fn add_system_message(&mut self, content: String) {
+        self.messages.push(Message::new(
+            MessageRole::System,
+            MessageContent::Text(content),
+        ));
+    }
+
+    /// Add a raw message (for transcript replay)
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
+        self.truncate_if_needed();
+    }
+
+    /// Get all messages
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Get all messages (alias for backwards compat)
+    pub fn entries(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Get message count
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.messages.len()
     }
 
     /// Check if empty
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.messages.is_empty()
     }
 
-    /// Clear all entries except system prompt
+    /// Clear all messages
     #[allow(dead_code)]
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.messages.clear();
     }
 
-    /// Replace all entries (used by compactor)
-    pub fn replace_entries(&mut self, entries: Vec<ConversationEntry>) {
-        self.entries = entries;
+    /// Replace all messages (used by compactor)
+    pub fn replace_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
+    /// Replace all messages (alias for backwards compat)
+    pub fn replace_entries(&mut self, messages: Vec<Message>) {
+        self.replace_messages(messages);
+    }
+
+    /// Get messages after the last compact boundary.
+    /// Similar to Claude Code's getMessagesAfterCompactBoundary().
+    /// If no compact boundary exists, returns all messages.
+    pub fn messages_after_compact_boundary(&self) -> &[Message] {
+        let last_boundary_idx = self.messages.iter().rposition(|m| m.is_compact_boundary());
+        match last_boundary_idx {
+            Some(idx) => {
+                // Return from the boundary onwards (boundary + summary + subsequent messages)
+                &self.messages[idx..]
+            }
+            None => &self.messages,
+        }
+    }
+
+    /// Find the index of the last compact boundary message
+    pub fn last_compact_boundary_index(&self) -> Option<usize> {
+        self.messages.iter().rposition(|m| m.is_compact_boundary())
     }
 
     fn truncate_if_needed(&mut self) {
         let max_msgs = self.config.max_context_msgs;
-        if self.entries.len() > max_msgs {
+        if self.messages.len() > max_msgs {
             let keep = max_msgs.saturating_sub(1);
             if keep > 0 {
-                let first = self.entries[..1].to_vec();
-                let recent = self.entries[self.entries.len() - keep..].to_vec();
+                let first = self.messages[..1].to_vec();
+                let recent = self.messages[self.messages.len() - keep..].to_vec();
 
                 // Merge and ensure role alternation — remove consecutive same-role entries
-                let mut merged: Vec<ConversationEntry> = Vec::with_capacity(first.len() + recent.len());
+                let mut merged: Vec<Message> = Vec::with_capacity(first.len() + recent.len());
                 for entry in first.into_iter().chain(recent) {
                     if merged.last().is_none_or(|last| last.role != entry.role) {
                         merged.push(entry);
@@ -146,9 +312,9 @@ impl ConversationContext {
                     // Skip entries with same role as last kept entry
                 }
 
-                self.entries = merged;
+                self.messages = merged;
             } else {
-                self.entries = vec![self.entries[0].clone()];
+                self.messages = vec![self.messages[0].clone()];
             }
         }
     }
@@ -156,41 +322,34 @@ impl ConversationContext {
     /// TruncateHistory drops older messages to recover from context overflow.
     /// Keeps the first entry (initial user message) and the last 10 entries.
     pub fn truncate_history(&mut self) {
-        if self.entries.len() <= 12 {
+        if self.messages.len() <= 12 {
             return;
         }
         let keep = 10;
-        let first = self.entries[0..1].to_vec();
-        let recent = self.entries[self.entries.len() - keep..].to_vec();
-        self.entries = [first, recent].concat();
+        let first = self.messages[0..1].to_vec();
+        let recent = self.messages[self.messages.len() - keep..].to_vec();
+        self.messages = [first, recent].concat();
     }
 
     /// AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
     pub fn aggressive_truncate_history(&mut self) {
-        if self.entries.len() <= 6 {
+        if self.messages.len() <= 6 {
             return;
         }
         let keep = 5;
-        let first = self.entries[0..1].to_vec();
-        let recent = self.entries[self.entries.len() - keep..].to_vec();
-        self.entries = [first, recent].concat();
+        let first = self.messages[0..1].to_vec();
+        let recent = self.messages[self.messages.len() - keep..].to_vec();
+        self.messages = [first, recent].concat();
     }
 
     /// MinimumHistory drops to bare minimum - only first user message and last 2 entries.
     pub fn minimum_history(&mut self) {
-        if self.entries.len() <= 3 {
+        if self.messages.len() <= 3 {
             return;
         }
-        let first = self.entries[0..1].to_vec();
-        let recent = self.entries[self.entries.len() - 2..].to_vec();
-        self.entries = [first, recent].concat();
-    }
-
-    /// CompactContext performs intelligent compaction (placeholder - full implementation in compact.rs)
-    #[allow(dead_code)]
-    pub fn compact_context(&mut self) -> bool {
-        // TODO: Implement full compaction logic
-        false
+        let first = self.messages[0..1].to_vec();
+        let recent = self.messages[self.messages.len() - 2..].to_vec();
+        self.messages = [first, recent].concat();
     }
 }
 
@@ -220,11 +379,11 @@ mod tests {
             ..Config::default()
         };
         let mut ctx = ConversationContext::new(config);
-        
+
         for i in 0..10 {
             ctx.add_user_message(format!("Message {}", i));
         }
-        
+
         // Should be truncated
         assert!(ctx.len() <= 6);
     }
@@ -236,5 +395,47 @@ mod tests {
         ctx.add_user_message("Hello".to_string());
         ctx.clear();
         assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_compact_boundary() {
+        let config = test_config();
+        let mut ctx = ConversationContext::new(config);
+        ctx.add_user_message("Hello".to_string());
+        ctx.add_assistant_text("Hi!".to_string());
+        ctx.add_compact_boundary(CompactTrigger::Auto, 50000);
+
+        assert_eq!(ctx.len(), 3);
+        assert!(ctx.messages()[2].is_compact_boundary());
+
+        // messages_after_compact_boundary should return from boundary onwards
+        let after = ctx.messages_after_compact_boundary();
+        assert_eq!(after.len(), 1);
+        assert!(after[0].is_compact_boundary());
+    }
+
+    #[test]
+    fn test_summary() {
+        let config = test_config();
+        let mut ctx = ConversationContext::new(config);
+        ctx.add_user_message("Hello".to_string());
+        ctx.add_summary("User said hello, assistant responded with greeting.".to_string());
+
+        assert_eq!(ctx.len(), 2);
+        assert!(ctx.messages()[1].is_summary());
+        assert_eq!(ctx.messages()[1].text_content(),
+            Some("User said hello, assistant responded with greeting."));
+    }
+
+    #[test]
+    fn test_messages_after_boundary_without_boundary() {
+        let config = test_config();
+        let mut ctx = ConversationContext::new(config);
+        ctx.add_user_message("Hello".to_string());
+        ctx.add_assistant_text("Hi!".to_string());
+
+        // No boundary, should return all messages
+        let all = ctx.messages_after_compact_boundary();
+        assert_eq!(all.len(), 2);
     }
 }

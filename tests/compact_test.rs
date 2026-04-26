@@ -1,12 +1,12 @@
 //! Integration tests for compact module
 
 use miniclaudecode_rust::compact::{
-    estimate_tokens, estimate_entry_tokens, estimate_total_tokens,
-    find_round_boundaries, find_safe_boundaries,
-    Compactor, CompactPhase, CompactStats,
+    estimate_tokens, estimate_message_tokens, estimate_total_tokens,
+    find_round_boundaries,
+    Compactor, CompactPhase,
 };
 use miniclaudecode_rust::config::Config;
-use miniclaudecode_rust::context::{ConversationContext, ConversationEntry, MessageContent, ToolUseBlock, ToolResultBlock, ToolResultContent};
+use miniclaudecode_rust::context::{ConversationContext, Message, MessageContent, MessageRole, CompactTrigger, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use std::collections::HashMap;
 
 // ─── estimate_tokens ───
@@ -39,93 +39,103 @@ fn estimate_tokens_unicode() {
     assert_eq!(estimate_tokens(s), 2); // 6 / 4 = 1.5, ceil = 2
 }
 
-// ─── estimate_entry_tokens ───
+// ─── estimate_message_tokens ───
 
 #[test]
-fn estimate_entry_text_tokens() {
-    let entry = ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::Text("Hello world".to_string()),
-    };
-    let tokens = estimate_entry_tokens(&entry);
-    // 4 (role overhead) + estimate_tokens("Hello world") = 4 + 3 = 7
-    assert_eq!(tokens, 7);
+fn estimate_text_message_tokens() {
+    let msg = Message::new(MessageRole::User, MessageContent::Text("Hello world".to_string()));
+    let tokens = estimate_message_tokens(&msg);
+    // 3 (role overhead) + estimate_tokens("Hello world") = 3 + 3 = 6
+    assert_eq!(tokens, 6);
 }
 
 #[test]
-fn estimate_entry_empty_text() {
-    let entry = ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::Text(String::new()),
-    };
-    let tokens = estimate_entry_tokens(&entry);
-    assert_eq!(tokens, 4); // just role overhead
+fn estimate_empty_text_message_tokens() {
+    let msg = Message::new(MessageRole::User, MessageContent::Text(String::new()));
+    let tokens = estimate_message_tokens(&msg);
+    assert_eq!(tokens, 3); // just role overhead
 }
 
 #[test]
-fn estimate_entry_tool_use_tokens() {
-    let mut input = HashMap::new();
+fn estimate_tool_use_message_tokens() {
+    let mut input: HashMap<String, serde_json::Value> = HashMap::new();
     input.insert("path".to_string(), serde_json::json!("test.txt"));
 
-    let entry = ConversationEntry {
-        role: "assistant".to_string(),
-        content: MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+    let msg = Message::new(
+        MessageRole::Assistant,
+        MessageContent::ToolUseBlocks(vec![ToolUseBlock {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
             input,
         }]),
-    };
-    let tokens = estimate_entry_tokens(&entry);
-    // 4 (role) + 8 (block overhead) + estimate_tokens("read_file") + estimate_tokens(json_input)
-    assert!(tokens > 4);
+    );
+    let tokens = estimate_message_tokens(&msg);
+    assert!(tokens > 3);
 }
 
 #[test]
-fn estimate_entry_tool_result_tokens() {
-    let entry = ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+fn estimate_tool_result_message_tokens() {
+    let msg = Message::new(
+        MessageRole::User,
+        MessageContent::ToolResultBlocks(vec![ToolResultBlock {
             tool_use_id: "call_1".to_string(),
             content: vec![ToolResultContent::Text { text: "Result".to_string() }],
             is_error: false,
         }]),
-    };
-    let tokens = estimate_entry_tokens(&entry);
+    );
+    let tokens = estimate_message_tokens(&msg);
     assert!(tokens > 0);
+}
+
+#[test]
+fn estimate_summary_message_tokens() {
+    let msg = Message::new(
+        MessageRole::User,
+        MessageContent::Summary("A brief summary of the conversation.".to_string()),
+    );
+    let tokens = estimate_message_tokens(&msg);
+    assert!(tokens > 3);
+}
+
+#[test]
+fn estimate_compact_boundary_message_tokens() {
+    let msg = Message::new(
+        MessageRole::System,
+        MessageContent::CompactBoundary {
+            trigger: CompactTrigger::Auto,
+            pre_compact_tokens: 50000,
+        },
+    );
+    let tokens = estimate_message_tokens(&msg);
+    assert_eq!(tokens, 15); // fixed overhead
 }
 
 // ─── estimate_total_tokens ───
 
 #[test]
 fn estimate_total_empty() {
-    let entries: Vec<ConversationEntry> = vec![];
-    assert_eq!(estimate_total_tokens(&entries), 0);
+    let messages: Vec<Message> = vec![];
+    assert_eq!(estimate_total_tokens(&messages), 0);
 }
 
 #[test]
-fn estimate_total_single_entry() {
-    let entries = vec![ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::Text("test".to_string()),
-    }];
-    let total = estimate_total_tokens(&entries);
+fn estimate_total_single_message() {
+    let messages = vec![Message::new(
+        MessageRole::User,
+        MessageContent::Text("test".to_string()),
+    )];
+    let total = estimate_total_tokens(&messages);
     assert!(total > 0);
 }
 
 #[test]
-fn estimate_total_multiple_entries() {
-    let entries = vec![
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("Hello".to_string()),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text("Hi there".to_string()),
-        },
+fn estimate_total_multiple_messages() {
+    let messages = vec![
+        Message::new(MessageRole::User, MessageContent::Text("Hello".to_string())),
+        Message::new(MessageRole::Assistant, MessageContent::Text("Hi there".to_string())),
     ];
-    let total = estimate_total_tokens(&entries);
-    let individual = estimate_entry_tokens(&entries[0]) + estimate_entry_tokens(&entries[1]);
+    let total = estimate_total_tokens(&messages);
+    let individual = estimate_message_tokens(&messages[0]) + estimate_message_tokens(&messages[1]);
     assert_eq!(total, individual);
 }
 
@@ -133,66 +143,54 @@ fn estimate_total_multiple_entries() {
 
 #[test]
 fn find_round_boundaries_empty() {
-    let entries: Vec<ConversationEntry> = vec![];
-    let rounds = find_round_boundaries(&entries);
+    let messages: Vec<Message> = vec![];
+    let rounds = find_round_boundaries(&messages);
     assert!(rounds.is_empty());
 }
 
 #[test]
 fn find_round_boundaries_single_user() {
-    let entries = vec![ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::Text("Hello".to_string()),
-    }];
-    let rounds = find_round_boundaries(&entries);
+    let messages = vec![Message::new(
+        MessageRole::User,
+        MessageContent::Text("Hello".to_string()),
+    )];
+    let rounds = find_round_boundaries(&messages);
     assert_eq!(rounds, vec![(0, 0)]);
 }
 
 #[test]
 fn find_round_boundaries_user_assistant() {
-    let entries = vec![
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("Hello".to_string()),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text("Hi".to_string()),
-        },
+    let messages = vec![
+        Message::new(MessageRole::User, MessageContent::Text("Hello".to_string())),
+        Message::new(MessageRole::Assistant, MessageContent::Text("Hi".to_string())),
     ];
-    let rounds = find_round_boundaries(&entries);
+    let rounds = find_round_boundaries(&messages);
     assert_eq!(rounds, vec![(0, 1)]);
 }
 
 #[test]
 fn find_round_boundaries_with_tool_result() {
-    let entries = vec![
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("Run command".to_string()),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+    let messages = vec![
+        Message::new(MessageRole::User, MessageContent::Text("Run command".to_string())),
+        Message::new(
+            MessageRole::Assistant,
+            MessageContent::ToolUseBlocks(vec![ToolUseBlock {
                 id: "call_1".to_string(),
                 name: "exec".to_string(),
                 input: HashMap::new(),
             }]),
-        },
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+        ),
+        Message::new(
+            MessageRole::User,
+            MessageContent::ToolResultBlocks(vec![ToolResultBlock {
                 tool_use_id: "call_1".to_string(),
                 content: vec![ToolResultContent::Text { text: "output".to_string() }],
                 is_error: false,
             }]),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text("Done".to_string()),
-        },
+        ),
+        Message::new(MessageRole::Assistant, MessageContent::Text("Done".to_string())),
     ];
-    let rounds = find_round_boundaries(&entries);
+    let rounds = find_round_boundaries(&messages);
     // Tool result at index 2 should mark end of first round (0, 2)
     // Remaining entries form second round (3, 3)
     assert_eq!(rounds, vec![(0, 2), (3, 3)]);
@@ -200,121 +198,34 @@ fn find_round_boundaries_with_tool_result() {
 
 #[test]
 fn find_round_boundaries_multiple_tool_results() {
-    let entries = vec![
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("A".to_string()),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::ToolUseBlocks(vec![]),
-        },
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+    let messages = vec![
+        Message::new(MessageRole::User, MessageContent::Text("A".to_string())),
+        Message::new(MessageRole::Assistant, MessageContent::ToolUseBlocks(vec![])),
+        Message::new(
+            MessageRole::User,
+            MessageContent::ToolResultBlocks(vec![ToolResultBlock {
                 tool_use_id: "c1".to_string(),
                 content: vec![ToolResultContent::Text { text: "R1".to_string() }],
                 is_error: false,
             }]),
-        },
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::ToolUseBlocks(vec![]),
-        },
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+        ),
+        Message::new(MessageRole::Assistant, MessageContent::ToolUseBlocks(vec![])),
+        Message::new(
+            MessageRole::User,
+            MessageContent::ToolResultBlocks(vec![ToolResultBlock {
                 tool_use_id: "c2".to_string(),
                 content: vec![ToolResultContent::Text { text: "R2".to_string() }],
                 is_error: false,
             }]),
-        },
+        ),
     ];
-    let rounds = find_round_boundaries(&entries);
+    let rounds = find_round_boundaries(&messages);
     assert_eq!(rounds.len(), 2);
     assert_eq!(rounds[0], (0, 2));
     assert_eq!(rounds[1], (3, 4));
 }
 
-// ─── find_safe_boundaries ───
-
-#[test]
-fn find_safe_boundaries_empty() {
-    let entries: Vec<ConversationEntry> = vec![];
-    assert!(find_safe_boundaries(&entries).is_empty());
-}
-
-#[test]
-fn find_safe_boundaries_first_user() {
-    let entries = vec![ConversationEntry {
-        role: "user".to_string(),
-        content: MessageContent::Text("Hello".to_string()),
-    }];
-    // First user message has i == 0, so no boundary
-    assert!(find_safe_boundaries(&entries).is_empty());
-}
-
-#[test]
-fn find_safe_boundaries_user_after_assistant() {
-    let entries = vec![
-        ConversationEntry {
-            role: "assistant".to_string(),
-            content: MessageContent::Text("Hi".to_string()),
-        },
-        ConversationEntry {
-            role: "user".to_string(),
-            content: MessageContent::Text("Hello".to_string()),
-        },
-    ];
-    let boundaries = find_safe_boundaries(&entries);
-    assert_eq!(boundaries, vec![1]);
-}
-
-// ─── Compactor ───
-
-#[test]
-fn compactor_new() {
-    let c = Compactor::new();
-    assert_eq!(c.determine_phase(50_000), CompactPhase::None);
-}
-
-#[test]
-fn compactor_default() {
-    let c = Compactor::default();
-    assert_eq!(c.determine_phase(0), CompactPhase::None);
-}
-
-#[test]
-fn compactor_phase_none() {
-    let c = Compactor::new();
-    assert_eq!(c.determine_phase(0), CompactPhase::None);
-    assert_eq!(c.determine_phase(50_000), CompactPhase::None);
-}
-
-#[test]
-fn compactor_phase_round_based() {
-    let c = Compactor::new();
-    // 75% of 100k = 75k threshold
-    assert_eq!(c.determine_phase(80_000), CompactPhase::RoundBased);
-}
-
-#[test]
-fn compactor_phase_turn_based() {
-    let c = Compactor::new();
-    assert_eq!(c.determine_phase(90_000), CompactPhase::TurnBased);
-}
-
-#[test]
-fn compactor_phase_selective_clear() {
-    let c = Compactor::new();
-    assert_eq!(c.determine_phase(95_000), CompactPhase::SelectiveClear);
-}
-
-#[test]
-fn compactor_phase_aggressive() {
-    let c = Compactor::new();
-    assert_eq!(c.determine_phase(99_000), CompactPhase::Aggressive);
-}
+// ─── Compactor (legacy truncation tests, LLM compaction requires async + API) ───
 
 #[test]
 fn compactor_compact_no_op() {
@@ -323,66 +234,80 @@ fn compactor_compact_no_op() {
     ctx.add_user_message("Hello".to_string());
 
     let mut compactor = Compactor::new();
-    let stats = compactor.compact(&mut ctx);
+    // Won't trigger compaction with only 1 message
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let stats = rt.block_on(compactor.compact(&mut ctx, &reqwest::Client::new(), "claude-sonnet-4-20250514", "sk-fake", "https://api.example.com"));
     assert_eq!(stats.phase, CompactPhase::None);
     assert_eq!(stats.entries_before, 1);
     assert_eq!(stats.entries_after, 1);
 }
 
 #[test]
-fn compactor_round_based_compact() {
+fn compactor_legacy_phase() {
     let config = Config::default();
     let mut ctx = ConversationContext::new(config);
     ctx.add_user_message("Start".to_string());
 
-    // Create 4 rounds (each with tool result) to trigger keeping last 3
-    for i in 0..4 {
-        ctx.add_assistant_tool_calls(vec![ToolUseBlock {
-            id: format!("call_{}", i),
-            name: "exec".to_string(),
-            input: HashMap::new(),
-        }]);
-        ctx.add_tool_results(vec![ToolResultBlock {
-            tool_use_id: format!("call_{}", i),
-            content: vec![ToolResultContent::Text { text: format!("Result {}", i) }],
-            is_error: false,
-        }]);
+    // Create many entries to exceed threshold
+    for i in 0..20 {
+        ctx.add_assistant_text(format!("Response {}", i));
+        ctx.add_user_message(format!("Follow-up {}", i));
     }
 
     let mut compactor = Compactor::new();
-    let stats = compactor.compact(&mut ctx);
-    // Should have applied some compaction
-    assert!(stats.entries_before == stats.entries_after || stats.entries_after < stats.entries_before);
-}
-
-#[test]
-fn compactor_clone() {
-    let c = Compactor::new();
-    let cloned = c.clone();
-    assert_eq!(c.determine_phase(50_000), cloned.determine_phase(50_000));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let stats = rt.block_on(compactor.compact(&mut ctx, &reqwest::Client::new(), "claude-sonnet-4-20250514", "sk-fake", "https://api.example.com"));
+    // LLM compaction will fail (fake key), so fallback to legacy truncation
+    assert!(stats.entries_after <= stats.entries_before);
 }
 
 #[test]
 fn compactor_reset() {
     let mut c = Compactor::new();
-    // Force a phase change
-    c.determine_phase(99_000);
     c.reset();
     assert_eq!(c.phase(), CompactPhase::None);
 }
 
-// ─── CompactStats ───
+// ─── ContextWindowTracker ───
 
 #[test]
-fn compact_stats_fields() {
-    let stats = CompactStats {
-        phase: CompactPhase::TurnBased,
-        entries_before: 100,
-        entries_after: 50,
-        estimated_tokens_saved: 500,
-        estimated_tokens_before: 10000,
-        estimated_tokens_after: 9500,
-    };
-    assert_eq!(stats.entries_before, 100);
-    assert_eq!(stats.entries_after, 50);
+fn context_window_tracker_threshold() {
+    let tracker = miniclaudecode_rust::compact::ContextWindowTracker::new(
+        "claude-sonnet-4-20250514", 0.75, 13_000,
+    );
+    assert_eq!(tracker.effective_window(), 180_000); // 200K - 20K
+    // threshold = min(180K * 0.75, 180K - 13K) = min(135K, 167K) = 135K
+    assert_eq!(tracker.compact_threshold(), 135_000);
+}
+
+#[test]
+fn context_window_tracker_should_compact() {
+    let tracker = miniclaudecode_rust::compact::ContextWindowTracker::new(
+        "claude-sonnet-4-20250514", 0.75, 13_000,
+    );
+
+    // Create enough messages to trigger compaction
+    let mut messages = Vec::new();
+    for i in 0..5000 {
+        messages.push(Message::new(
+            MessageRole::User,
+            MessageContent::Text("A".repeat(100)), // ~25 tokens each
+        ));
+    }
+
+    assert!(tracker.should_compact(&messages));
+}
+
+#[test]
+fn context_window_tracker_should_not_compact() {
+    let tracker = miniclaudecode_rust::compact::ContextWindowTracker::new(
+        "claude-sonnet-4-20250514", 0.75, 13_000,
+    );
+
+    let messages = vec![Message::new(
+        MessageRole::User,
+        MessageContent::Text("Hello".to_string()),
+    )];
+
+    assert!(!tracker.should_compact(&messages));
 }

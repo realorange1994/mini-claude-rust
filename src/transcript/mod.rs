@@ -16,6 +16,8 @@ pub const TYPE_TOOL_USE: &str = "tool_use";
 pub const TYPE_TOOL_RESULT: &str = "tool_result";
 pub const TYPE_ERROR: &str = "error";
 pub const TYPE_SYSTEM: &str = "system";
+pub const TYPE_COMPACT: &str = "compact";
+pub const TYPE_SUMMARY: &str = "summary";
 
 /// A single transcript entry (matching Go format exactly)
 ///
@@ -144,6 +146,34 @@ impl Entry {
         }
     }
 
+    /// Create a compact entry (compact boundary marker)
+    pub fn compact(trigger: String, pre_compact_tokens: usize) -> Self {
+        Self {
+            type_: TYPE_COMPACT.to_string(),
+            content: format!("Compacted conversation (trigger: {}, {} tokens compressed)", trigger, pre_compact_tokens),
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
+    /// Create a summary entry (from LLM-driven compaction)
+    pub fn summary(content: String) -> Self {
+        Self {
+            type_: TYPE_SUMMARY.to_string(),
+            content,
+            tool_name: None,
+            tool_args: None,
+            tool_id: None,
+            timestamp: Utc::now(),
+            model: None,
+            error: None,
+        }
+    }
+
     /// Check if this is a tool_use entry
     pub fn is_tool_use(&self) -> bool {
         self.type_ == TYPE_TOOL_USE
@@ -162,6 +192,16 @@ impl Entry {
     /// Check if this is an assistant entry
     pub fn is_assistant(&self) -> bool {
         self.type_ == TYPE_ASSISTANT
+    }
+
+    /// Check if this is a compact entry
+    pub fn is_compact(&self) -> bool {
+        self.type_ == TYPE_COMPACT
+    }
+
+    /// Check if this is a summary entry
+    pub fn is_summary(&self) -> bool {
+        self.type_ == TYPE_SUMMARY
     }
 }
 
@@ -237,6 +277,16 @@ impl Transcript {
     /// Add an error entry
     pub fn add_error(&self, error: String) -> std::io::Result<()> {
         self.write_entry(&Entry::error(error))
+    }
+
+    /// Add a compact entry
+    pub fn add_compact(&self, trigger: String, pre_compact_tokens: usize) -> std::io::Result<()> {
+        self.write_entry(&Entry::compact(trigger, pre_compact_tokens))
+    }
+
+    /// Add a summary entry
+    pub fn add_summary(&self, content: String) -> std::io::Result<()> {
+        self.write_entry(&Entry::summary(content))
     }
 
     /// Read all entries from the transcript file

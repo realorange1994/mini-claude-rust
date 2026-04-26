@@ -18,6 +18,9 @@ fn config_default() {
     assert_eq!(cfg.permission_mode, PermissionMode::Ask);
     assert!(cfg.mcp_manager.is_none());
     assert!(cfg.skill_loader.is_none());
+    assert!(cfg.auto_compact_enabled);
+    assert_eq!(cfg.auto_compact_threshold, 0.75);
+    assert_eq!(cfg.auto_compact_buffer, 13_000);
 }
 
 #[test]
@@ -64,6 +67,10 @@ fn config_custom_values() {
         mcp_manager: None,
         skill_loader: None,
         file_history: None,
+        auto_compact_enabled: true,
+        auto_compact_threshold: 0.8,
+        auto_compact_buffer: 10_000,
+        max_compact_output_tokens: 15_000,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));

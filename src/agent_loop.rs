@@ -5,7 +5,7 @@ use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
-use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR};
+use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,19 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-/// Transition tracking for context management
+/// Continue reason tracks why the agent loop is continuing (inspired by Claude Code's 7 continue reasons)
+#[derive(Debug, Clone, PartialEq, Default)]
+enum ContinueReason {
+    #[default]
+    None,
+    NextTurn,
+    PromptTooLong,
+    MaxOutputTokens,
+    ModelConfused,
+    ContextOverflow,
+}
+
+/// Transition tracking for context management (kept for tool->text transition tracking)
 #[derive(Debug, Clone, PartialEq, Default)]
 enum Transition {
     #[default]
@@ -81,7 +93,7 @@ impl AgentLoop {
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
         let context = ConversationContext::new(config.clone());
-        let gate = PermissionGate::new(config);
+        let gate = PermissionGate::new(config.clone());
 
         // Initialize transcript writer (matching Go's behavior)
         let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -92,8 +104,13 @@ impl AgentLoop {
         // Write system entry with model/mode info (matching Go format)
         let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode));
 
-        // Initialize compactor
-        let compactor = RwLock::new(Compactor::new());
+        // Initialize compactor with config values
+        let compactor = RwLock::new(
+            Compactor::new()
+                .with_threshold(config.auto_compact_threshold)
+                .with_buffer(config.auto_compact_buffer)
+                .with_max_tokens(crate::compact::model_context_window(&gate.config.model))
+        );
 
         // Create multi-thread tokio runtime for this agent
         // This properly handles spawn_blocking calls from reqwest
@@ -184,7 +201,12 @@ impl AgentLoop {
             entries.len()
         ));
 
-        let compactor = RwLock::new(Compactor::new());
+        let compactor = RwLock::new(
+            Compactor::new()
+                .with_threshold(config.auto_compact_threshold)
+                .with_buffer(config.auto_compact_buffer)
+                .with_max_tokens(crate::compact::model_context_window(&config.model))
+        );
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -295,6 +317,37 @@ impl AgentLoop {
                     }
                     // Skip system and error entries
                 }
+                TYPE_COMPACT => {
+                    // Flush pending items before compact boundary
+                    if !pending_tool_results.is_empty() {
+                        context.add_tool_results(pending_tool_results.clone());
+                        pending_tool_results.clear();
+                    }
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
+                    // Re-add compact boundary marker
+                    let pre_tokens = entry.content
+                        .split_whitespace()
+                        .find(|s| s.chars().all(|c| c.is_ascii_digit()))
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    context.add_compact_boundary(crate::context::CompactTrigger::Auto, pre_tokens);
+                }
+                TYPE_SUMMARY => {
+                    // Flush pending items before summary
+                    if !pending_tool_results.is_empty() {
+                        context.add_tool_results(pending_tool_results.clone());
+                        pending_tool_results.clear();
+                    }
+                    if !pending_tool_uses.is_empty() {
+                        context.add_assistant_tool_calls(pending_tool_uses.clone());
+                        pending_tool_uses.clear();
+                    }
+                    // Re-add summary
+                    context.add_summary(entry.content.clone());
+                }
                 _ => {
                     // Skip unknown types
                 }
@@ -371,13 +424,14 @@ impl AgentLoop {
     fn entries_to_messages_from_ctx(entries: &[ConversationEntry]) -> Vec<serde_json::Value> {
         entries
             .iter()
-            .map(|entry| {
-                let content: Vec<serde_json::Value> = match &entry.content {
+            .filter_map(|entry| {
+                let (role, content): (String, Vec<serde_json::Value>) = match &entry.content {
                     MessageContent::Text(text) => {
-                        // Anthropic requires content to be an array
-                        vec![serde_json::json!({"type": "text", "text": text})]
+                        (entry.role.as_str().to_string(),
+                        vec![serde_json::json!({"type": "text", "text": text})])
                     }
                     MessageContent::ToolUseBlocks(blocks) => {
+                        ("assistant".to_string(),
                         blocks.iter().map(|b| {
                             serde_json::json!({
                                 "type": "tool_use",
@@ -385,9 +439,10 @@ impl AgentLoop {
                                 "name": b.name,
                                 "input": b.input
                             })
-                        }).collect()
+                        }).collect())
                     }
                     MessageContent::ToolResultBlocks(blocks) => {
+                        ("user".to_string(),
                         blocks.iter().map(|b| {
                             let content_values: Vec<serde_json::Value> = b.content.iter()
                                 .filter_map(|c| serde_json::to_value(c).ok())
@@ -398,13 +453,21 @@ impl AgentLoop {
                                 "is_error": b.is_error,
                                 "content": content_values
                             })
-                        }).collect()
+                        }).collect())
+                    }
+                    MessageContent::Summary(text) => {
+                        ("user".to_string(),
+                        vec![serde_json::json!({"type": "text", "text": text})])
+                    }
+                    MessageContent::CompactBoundary { .. } => {
+                        // Skip compact boundaries in API messages — they're metadata only
+                        return None;
                     }
                 };
-                serde_json::json!({
-                    "role": entry.role,
+                Some(serde_json::json!({
+                    "role": role,
                     "content": content
-                })
+                }))
             })
             .collect()
     }
@@ -420,7 +483,10 @@ impl AgentLoop {
         let mut last_transition = Transition::None;
         let mut consecutive_stalls = 0;
         let mut context_errors = 0;
+        let mut continue_reason = ContinueReason::None;
+        let mut max_output_tokens_retries = 0;
         const MAX_CONTEXT_RECOVERY: usize = 3;
+        const MAX_OUTPUT_TOKENS_RETRIES: usize = 3;
 
         loop {
             // Check for interruption (Ctrl+C)
@@ -434,13 +500,43 @@ impl AgentLoop {
             }
 
             // Run compaction before API call (matching Go's CompactContext)
-            {
-                let mut ctx = self.context.write().await;
-                let mut compactor = self.compactor.write().await;
-                let stats = compactor.compact(&mut ctx);
-                if stats.phase != crate::compact::CompactPhase::None {
-                    eprintln!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
-                        stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
+            // Uses async LLM-driven compaction when threshold is reached
+            if self.config.auto_compact_enabled {
+                {
+                    let mut ctx = self.context.write().await;
+                    let mut compactor = self.compactor.write().await;
+                    let stats = compactor.compact(
+                        &mut ctx,
+                        &self.client,
+                        &self.config.model,
+                        &self.api_key,
+                        &self.base_url,
+                    ).await;
+                    if stats.phase != crate::compact::CompactPhase::None {
+                        eprintln!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
+                            stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
+                        // Log compaction event to transcript
+                        let _ = self.transcript.add_compact(
+                            format!("{:?}", stats.phase),
+                            stats.estimated_tokens_saved,
+                        );
+                    }
+                }
+
+                // Log summary to transcript if one was added
+                {
+                    let ctx = self.context.read().await;
+                    if let Some(idx) = ctx.last_compact_boundary_index() {
+                        // Check if a summary follows the compact boundary
+                        if idx + 1 < ctx.len() {
+                            let summary_msg = &ctx.messages()[idx + 1];
+                            if summary_msg.is_summary() {
+                                if let Some(text) = summary_msg.text_content() {
+                                    let _ = self.transcript.add_summary(text.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -455,12 +551,15 @@ impl AgentLoop {
                 &messages,
                 tools,
                 &last_transition,
+                &continue_reason,
             ).await;
 
             match result {
                 Ok((tool_calls, text)) => {
                     consecutive_stalls = 0;
                     context_errors = 0;
+                    max_output_tokens_retries = 0;
+                    continue_reason = ContinueReason::NextTurn;
 
                     if !tool_calls.is_empty() {
                         // Execute tools
@@ -746,9 +845,34 @@ impl AgentLoop {
                 Err(e) => {
                     let err_str = e.to_string();
 
+                    // Max output tokens hit — resume directly without truncation
+                    if err_str.contains("maximum output length")
+                        || err_str.contains("max_tokens")
+                        || (err_str.contains("400") && err_str.contains("output")) {
+                        max_output_tokens_retries += 1;
+                        continue_reason = ContinueReason::MaxOutputTokens;
+
+                        if max_output_tokens_retries <= MAX_OUTPUT_TOKENS_RETRIES {
+                            eprintln!(
+                                "[!] Output token limit hit (retry {}/{}), resuming directly...",
+                                max_output_tokens_retries, MAX_OUTPUT_TOKENS_RETRIES
+                            );
+                            let mut ctx = self.context.write().await;
+                            ctx.add_user_message(
+                                "Output token limit reached. Resume directly — no apology, no recap. \
+                                Pick up mid-thought and break remaining work into smaller pieces.".to_string(),
+                            );
+                            continue;
+                        } else {
+                            eprintln!("[!] Max output tokens recovery exhausted, falling back to truncation");
+                            // Fall through to context recovery
+                        }
+                    }
+
                     // Model confusion - inject corrective message and retry
                     if err_str.contains("model confused") {
                         eprintln!("[!] Model confused, injecting corrective message...");
+                        continue_reason = ContinueReason::ModelConfused;
                         let mut ctx = self.context.write().await;
                         ctx.add_user_message(
                             "ERROR: Your previous response was malformed. \
@@ -761,27 +885,37 @@ impl AgentLoop {
                     eprintln!("[!] Turn failed: {}", e);
 
                     // Detect context length error
-                    if err_str.contains("context_length") || err_str.contains("400") ||
-                       err_str.contains("stream stalled") || err_str.contains("context canceled") {
+                    if err_str.contains("context_length") || err_str.contains("prompt is too long") ||
+                       err_str.contains("400") || err_str.contains("stream stalled") || err_str.contains("context canceled") {
                         context_errors += 1;
+                        continue_reason = ContinueReason::PromptTooLong;
+
                         if context_errors > MAX_CONTEXT_RECOVERY {
                             eprintln!("[!] Context recovery exhausted after {} attempts, giving up", MAX_CONTEXT_RECOVERY);
                             return Ok("Error: Context overflow - unable to recover".to_string());
                         }
 
-                        // 3-phase progressive recovery
-                        if context_errors <= 1 {
-                            eprintln!("[!] Context overflow, truncating history (phase 1/3)...");
+                        // Progressive recovery: try LLM compact first, then truncation
+                        if context_errors == 1 && self.config.auto_compact_enabled {
+                            // First attempt: try LLM-driven compaction
+                            eprintln!("[!] Context overflow, attempting LLM compaction...");
+                            let mut ctx = self.context.write().await;
+                            let mut compactor = self.compactor.write().await;
+                            let _ = compactor.compact(
+                                &mut ctx,
+                                &self.client,
+                                &self.config.model,
+                                &self.api_key,
+                                &self.base_url,
+                            ).await;
+                        } else if context_errors <= 2 {
+                            eprintln!("[!] Context overflow, truncating history (phase 1/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.truncate_history();
-                        } else if context_errors <= 2 {
-                            eprintln!("[!] Context still full, aggressive truncation (phase 2/3)...");
+                        } else {
+                            eprintln!("[!] Context still full, aggressive truncation (phase 2/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.aggressive_truncate_history();
-                        } else {
-                            eprintln!("[!] Context still full, dropping to minimum (phase 3/3)...");
-                            let mut ctx = self.context.write().await;
-                            ctx.minimum_history();
                         }
                         continue;
                     }
@@ -848,6 +982,7 @@ impl AgentLoop {
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
         _last_transition: &Transition,
+        _continue_reason: &ContinueReason,
     ) -> Result<(Vec<ToolCallInfo>, String)> {
         const MAX_RETRIES: usize = 10;
         const INITIAL_BACKOFF_MS: u64 = 2000;
