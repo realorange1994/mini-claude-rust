@@ -12,9 +12,10 @@ miniClaudeCode-rust is a minimal AI agent framework that implements the core age
 - **Streaming Support**: Real-time streaming output with thinking block handling for various LLM providers
 - **Intelligent Context Compaction**: 4-phase automatic context degradation keeps conversations productive in limited context windows
 - **Tool System**: 17 built-in tools including exec, file operations, git, web search, system info, and more
+- **File History**: Automatic snapshot, diff, rewind, restore, and tag-based file version management
 - **Permission Modes**: Three permission modes for different use cases (auto, ask, plan)
 - **MCP Support**: Model Context Protocol client for external tool integration
-- **Skills System**: Extensible skill loader for custom agent behaviors
+- **Skills System**: Extensible skill loader with read_skill, list_skills, and search_skills, plus a skill tracker for progressive disclosure across turns
 
 ## Installation
 
@@ -75,9 +76,10 @@ miniClaudeCode-rust/
 │   ├── compact.rs        # 4-phase intelligent context compaction
 │   ├── permissions.rs    # Permission gate implementation
 │   ├── config.rs        # Configuration loading
+│   ├── filehistory.rs    # File version history and snapshots
 │   ├── tools/           # Built-in tool implementations
 │   ├── mcp/             # MCP client support
-│   ├── skills/          # Skill loading system
+│   ├── skills/          # Skill loading and tracking system
 │   └── transcript/      # Conversation logging
 └── Cargo.toml
 ```
