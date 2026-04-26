@@ -78,7 +78,7 @@ impl Tool for GitTool {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Target branch or commit (for merge, rebase, describe)"
+                    "description": "Target branch or commit (for merge, rebase, describe, show, cherry-pick, revert)"
                 },
                 "flags": {
                     "type": "array",
