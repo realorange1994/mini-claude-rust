@@ -609,7 +609,13 @@ impl FileHistory {
     pub fn resolve_version(&self, path: &Path, spec: &str) -> Option<usize> {
         let snapshots = self.snapshots.read().unwrap();
         let file_snapshots = snapshots.get(path)?;
-        let total = file_snapshots.len();
+
+        // Build non-deleted view — this is what users see as "v1, v2, v3..."
+        let active: Vec<&FileSnapshot> = file_snapshots.iter().filter(|s| !s.deleted).collect();
+        let total = active.len();
+        if total == 0 {
+            return None;
+        }
 
         if spec == "current" || spec == "latest" {
             return Some(total);
@@ -618,8 +624,8 @@ impl FileHistory {
         // "lastN" pattern
         if let Some(rest) = spec.strip_prefix("last") {
             if let Ok(n) = rest.parse::<usize>() {
-                if n > 0 && n <= total {
-                    return Some(total.saturating_sub(n).max(1));
+                if n > 0 && n < total {
+                    return Some(total - n);
                 }
             }
         }
@@ -632,8 +638,8 @@ impl FileHistory {
             }
         }
 
-        // Try to match tag in description
-        for (i, snap) in file_snapshots.iter().enumerate() {
+        // Try to match tag in description (only non-deleted)
+        for (i, snap) in active.iter().enumerate() {
             if snap.description.contains(spec) {
                 return Some(i + 1);
             }
@@ -646,12 +652,14 @@ impl FileHistory {
 
     pub fn count(&self, path: &Path) -> usize {
         let snapshots = self.snapshots.read().unwrap();
-        snapshots.get(path).map(|s| s.len()).unwrap_or(0)
+        snapshots.get(path).map(|s| s.iter().filter(|s| !s.deleted).count()).unwrap_or(0)
     }
 
     pub fn get_snapshots(&self, path: &Path) -> Vec<FileSnapshot> {
         let snapshots = self.snapshots.read().unwrap();
-        snapshots.get(path).cloned().unwrap_or_default()
+        snapshots.get(path)
+            .map(|s| s.iter().filter(|s| !s.deleted).cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn list_all_files(&self) -> Vec<PathBuf> {
