@@ -1316,3 +1316,401 @@ fn tool_checkout_no_history() {
     assert!(result.is_error);
     assert!(result.output.contains("No history"));
 }
+
+// ═══════════════════════════════════════════════════════════
+// Part 3: Additional edge cases (supplementary)
+// ═══════════════════════════════════════════════════════════
+
+#[test]
+fn tool_read_pagination_shows_hint() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("read_page.txt");
+    let content = (1..=20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    fs::write(&file, content).unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryReadTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("limit", json!(5)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("1-5 of 20"));
+    assert!(result.output.contains("more lines"));
+}
+
+#[test]
+fn tool_history_grep_specific_version() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("grep_ver.txt");
+    fs::write(&file, "hello v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "world v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryGrepTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("v1")),
+        ("path", json!(file.to_str().unwrap())),
+        ("version", json!(1)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("v1"));
+}
+
+#[test]
+fn tool_history_grep_context_lines() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("grep_ctx.txt");
+    fs::write(&file, "before\nTARGET\nafter").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryGrepTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("TARGET")),
+        ("path", json!(file.to_str().unwrap())),
+        ("context", json!(1)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("before"));
+    assert!(result.output.contains("after"));
+}
+
+#[test]
+fn tool_history_grep_ignore_case() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("grep_case.txt");
+    fs::write(&file, "HeLLo WoRLd").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryGrepTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("hello")),
+        ("path", json!(file.to_str().unwrap())),
+        ("ignore_case", json!(true)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("HeLLo"));
+}
+
+#[test]
+fn tool_diff_name_only_mode() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("diff_name.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v2 changed").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryDiffTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("from", json!("v1")),
+        ("to", json!("v2")),
+        ("mode", json!("name-only")),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("diff_name.txt"));
+}
+
+#[test]
+fn tool_diff_chain_stat_mode() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("diff_chain_stat.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    for i in 1..=3 {
+        if i > 1 {
+            fs::write(&file, format!("v{} changed", i)).unwrap();
+        }
+        fh.snapshot(&file).unwrap();
+    }
+
+    let tool = FileHistoryDiffTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("from", json!("v1")),
+        ("to", json!("v2")),
+        ("to2", json!("v3")),
+        ("mode", json!("stat")),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("Chain diff"));
+    assert!(result.output.contains("Total:"));
+}
+
+#[test]
+fn tool_diff_version_specifiers() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("diff_spec.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    for i in 1..=3 {
+        if i > 1 {
+            fs::write(&file, format!("v{}", i)).unwrap();
+        }
+        fh.snapshot(&file).unwrap();
+    }
+
+    let tool = FileHistoryDiffTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("from", json!("last1")),
+        ("to", json!("current")),
+    ]));
+    assert!(!result.is_error);
+}
+
+#[test]
+fn tool_search_no_history() {
+    let fh = Arc::new(FileHistory::new());
+    let tool = FileHistorySearchTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!("/no/history.txt")),
+        ("query", json!("test")),
+    ]));
+    assert!(result.is_error);
+    assert!(result.output.contains("No history"));
+}
+
+#[test]
+fn tool_summary_no_files() {
+    let fh = Arc::new(FileHistory::new());
+    let tool = FileHistorySummaryTool::new(fh);
+    let result = tool.execute(HashMap::new());
+    assert!(!result.is_error);
+    assert!(result.output.contains("No files"));
+}
+
+#[test]
+fn tool_tag_list_filter_by_tag() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("tag_filter.txt");
+    fs::write(&file, "content").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fh.add_tag(&file, "alpha");
+    fh.add_tag(&file, "beta");
+
+    let tool = FileHistoryTagTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("action", json!("list")),
+        ("tag", json!("alpha")),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("alpha"));
+}
+
+#[test]
+fn tool_batch_read_specific_version() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("batch_ver.rs");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryBatchTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("*.rs")),
+        ("action", json!("read")),
+        ("version", json!(1)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("v1"));
+}
+
+#[test]
+fn tool_checkout_default_is_last1() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("co_default.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryCheckoutTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+    ]));
+    assert!(!result.is_error);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "v1");
+}
+
+#[test]
+fn tool_checkout_already_at_current() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("co_already.txt");
+    fs::write(&file, "only").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryCheckoutTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("version", json!("v1")),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("Already"));
+}
+
+#[test]
+fn edge_empty_file_diff() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("edge_empty.txt");
+    fs::write(&file, "").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "now has content").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    let diff = fh.diff(&file, 1, 2).unwrap();
+    assert!(!diff.hunks.is_empty());
+    let hunk = &diff.hunks[0];
+    assert!(hunk.lines.iter().any(|l| l.starts_with("+ ")));
+}
+
+#[test]
+fn edge_unicode_content() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("edge_unicode.txt");
+    fs::write(&file, "你好世界\n🎉 emoji test\n日本語").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryReadTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("你好世界"));
+    assert!(result.output.contains("🎉"));
+}
+
+#[test]
+fn edge_large_file_read_with_limit() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("edge_large.txt");
+    let content = (1..=500).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    fs::write(&file, content).unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryReadTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("limit", json!(10)),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("10 of 500"));
+    assert!(result.output.contains("more lines"));
+}
+
+#[test]
+fn edge_multiple_tools_same_arc() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("edge_arc.txt");
+    fs::write(&file, "v1").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fs::write(&file, "v2").unwrap();
+    fh.snapshot(&file).unwrap();
+
+    // Three tools sharing the same Arc<FileHistory>
+    let list_tool = FileHistoryTool::new(fh.clone());
+    let read_tool = FileHistoryReadTool::new(fh.clone());
+    let diff_tool = FileHistoryDiffTool::new(fh.clone());
+
+    let r1 = list_tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+    ]));
+    assert!(!r1.is_error);
+
+    let r2 = read_tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("version", json!(1)),
+    ]));
+    assert!(!r2.is_error);
+
+    let r3 = diff_tool.execute(params(vec![
+        ("path", json!(file.to_str().unwrap())),
+        ("from", json!("v1")),
+        ("to", json!("v2")),
+    ]));
+    assert!(!r3.is_error);
+}
+
+#[test]
+fn edge_glob_pattern_double_star() {
+    let dir = TempDir::new().unwrap();
+    let sub = dir.path().join("src");
+    fs::create_dir(&sub).unwrap();
+    let file = sub.join("main.rs");
+    fs::write(&file, "fn main() {}").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+
+    let tool = FileHistoryBatchTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("**/*.rs")),
+    ]));
+    assert!(!result.is_error);
+    assert!(result.output.contains("main.rs"));
+}
+
+#[test]
+fn edge_batch_invalid_glob() {
+    let fh = Arc::new(FileHistory::new());
+    let tool = FileHistoryBatchTool::new(fh);
+    let result = tool.execute(params(vec![
+        ("pattern", json!("***/invalid[")),
+    ]));
+    assert!(result.is_error);
+}
+
+#[test]
+fn edge_diff_v1_v3_single_hunk_merge() {
+    // Regression: v1→v3 should produce a single hunk when changes are nearby
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("edge_merge.txt");
+    fs::write(&file, "Hello World\n这是第一行\n这是第二行").unwrap();
+
+    let fh = Arc::new(FileHistory::new());
+    fh.snapshot(&file).unwrap();
+    fh.snapshot(&file).unwrap(); // v2: same content
+
+    fs::write(&file, "Hello Universe\n这是第一行\n这是第二行\n这是第五行").unwrap();
+    fh.snapshot(&file).unwrap(); // v3
+
+    let count = fh.count(&file);
+    assert!(count >= 2);
+    let diff = fh.diff(&file, 1, count).unwrap();
+    assert_eq!(diff.hunks.len(), 1, "Expected 1 hunk for nearby changes, got {}", diff.hunks.len());
+    let hunk = &diff.hunks[0];
+    assert_eq!(hunk.from_count, 3);
+    assert_eq!(hunk.to_count, 4);
+}
