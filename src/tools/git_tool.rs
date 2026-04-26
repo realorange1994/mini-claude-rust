@@ -53,7 +53,11 @@ impl Tool for GitTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Local path (clone destination, or target for init/worktree)"
+                    "description": "Destination path for clone, or target path for init/worktree"
+                },
+                "directory": {
+                    "type": "string",
+                    "description": "Working directory to run the git command in (for all operations except clone)"
                 },
                 "branch": {
                     "type": "string",
@@ -160,10 +164,17 @@ impl Tool for GitTool {
             None => return ToolResult::error("Error: operation is required"),
         };
 
-        let work_dir = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from);
+        // Determine working directory:
+        // - For clone: use directory param (path is the clone destination, not workdir)
+        // - For other operations: use directory param if set, otherwise path param
+        let work_dir = if operation == "clone" {
+            params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
+        } else {
+            params.get("directory")
+                .and_then(|v| v.as_str())
+                .or_else(|| params.get("path").and_then(|v| v.as_str()))
+                .map(PathBuf::from)
+        };
 
         let args = build_git_args(&params, operation);
         if args.is_err() {
