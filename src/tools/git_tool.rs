@@ -53,15 +53,15 @@ impl Tool for GitTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Destination path for clone, target path for init/worktree, destination for mv, or file for blame"
+                    "description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path. NOT used as working directory (use 'directory' for that)"
                 },
                 "directory": {
                     "type": "string",
-                    "description": "Working directory to run the git command in. For clone, this is the directory where the clone command runs (path is the destination)"
+                    "description": "Working directory to run the git command in. For clone, this is where git clone runs (path is the clone destination). For other ops, this is the repo directory"
                 },
                 "branch": {
                     "type": "string",
-                    "description": "Branch name (for checkout, branch, push, pull, worktree)"
+                    "description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation"
                 },
                 "message": {
                     "type": "string",
@@ -70,11 +70,11 @@ impl Tool for GitTool {
                 "files": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Files to stage (for add), remove (for rm), restore (for restore), show diff (for diff), or list (for ls-files). For mv use source instead."
+                    "description": "File paths for add/rm/restore/diff/ls-files only. NOT for checkout or commit. For mv use 'source' instead"
                 },
                 "remote": {
                     "type": "string",
-                    "description": "Remote name (default: origin)"
+                    "description": "Remote name for push/pull/fetch only (default: origin). NOT for 'remote' operation itself"
                 },
                 "target": {
                     "type": "string",
