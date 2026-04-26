@@ -644,7 +644,7 @@ impl Tool for FileHistoryDiffTool {
     }
 
     fn description(&self) -> &str {
-        "Show diff between two versions of a file. Parameters: 'path' (required), 'from' (version: v3, last1, current, or tag name), 'to' (version specifier, default: current), 'mode' (output format: 'unified'=full diff (default), 'stat'=change summary +N -M, 'name-only'=file path only). Essential for understanding what changed between versions."
+        "Show diff between two versions of a file. Parameters: 'path' (required), 'from' (version: v3, last1, current, or tag name), 'to' (version specifier, default: current), 'to2' (optional chain endpoint for multi-step diff: from→to→to2), 'mode' (output format: 'unified'=full diff (default), 'stat'=change summary +N -M, 'name-only'=file path only). Essential for understanding what changed between versions."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -662,6 +662,10 @@ impl Tool for FileHistoryDiffTool {
                 "to": {
                     "type": "string",
                     "description": "Ending version (v1, v3, current, last1, or tag name). Default: current version."
+                },
+                "to2": {
+                    "type": "string",
+                    "description": "Optional second endpoint for chain diff (from → to → to2)."
                 },
                 "mode": {
                     "type": "string",
@@ -689,97 +693,164 @@ impl Tool for FileHistoryDiffTool {
             return ToolResult::error(format!("No history for: {}", full_path.display()));
         }
 
-        // Resolve from version (default: previous = total - 1)
-        let from_spec = params.get("from").and_then(|v| v.as_str()).unwrap_or("last1");
-        let from_ver = if params.contains_key("from") {
-            self.history.resolve_version(&full_path, from_spec)
+        // Resolve from (default: previous)
+        let from_spec = params.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        let from_default = if params.contains_key("from") { total } else {
+            if total >= 2 { total - 1 } else { 1 }
+        };
+        let from_ver = if from_spec.is_empty() {
+            from_default
         } else {
-            // Default: previous version
-            if total >= 2 { Some(total - 1) } else { Some(1) }
+            match self.history.resolve_version(&full_path, from_spec) {
+                Some(v) => v,
+                None => return ToolResult::error(format!(
+                    "Cannot resolve version '{}' for {}. Use file_history to see available versions.", from_spec, full_path.display()
+                )),
+            }
         };
 
-        let to_spec = params.get("to").and_then(|v| v.as_str()).unwrap_or("current");
-        let to_ver = if params.contains_key("to") {
-            self.history.resolve_version(&full_path, to_spec)
+        // Resolve to (default: current)
+        let to_spec = params.get("to").and_then(|v| v.as_str()).unwrap_or("");
+        let to_ver = if to_spec.is_empty() {
+            total
         } else {
-            Some(total)
+            match self.history.resolve_version(&full_path, to_spec) {
+                Some(v) => v,
+                None => return ToolResult::error(format!(
+                    "Cannot resolve version '{}' for {}. Use file_history to see available versions.", to_spec, full_path.display()
+                )),
+            }
         };
 
-        let from_ver = match from_ver {
-            Some(v) => v,
-            None => return ToolResult::error(format!(
-                "Cannot resolve 'from' version '{}' for {}. Use file_history to see available versions.", from_spec, full_path.display()
-            )),
-        };
-        let to_ver = match to_ver {
-            Some(v) => v,
-            None => return ToolResult::error(format!(
-                "Cannot resolve 'to' version '{}' for {}. Use file_history to see available versions.", to_spec, full_path.display()
-            )),
-        };
-
-        if from_ver == to_ver {
-            return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", from_ver, to_ver));
-        }
-
-        let diff_result = match self.history.diff(&full_path, from_ver, to_ver) {
-            Some(d) => d,
-            None => return ToolResult::error("Failed to compute diff."),
+        // Resolve optional to2
+        let to2_spec = params.get("to2").and_then(|v| v.as_str());
+        let to2_ver = match to2_spec {
+            Some(s) => match self.history.resolve_version(&full_path, s) {
+                Some(v) => Some(v),
+                None => return ToolResult::error(format!(
+                    "Cannot resolve version '{}' for {}. Use file_history to see available versions.", s, full_path.display()
+                )),
+            },
+            None => None,
         };
 
         let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("unified");
 
-        match mode {
-            "name-only" => {
-                return ToolResult::ok(format!("{}\n", full_path.display()));
-            }
-            "stat" => {
-                let mut total_added = 0usize;
-                let mut total_removed = 0usize;
-                for hunk in &diff_result.hunks {
-                    for line in &hunk.lines {
-                        if line.starts_with("+ ") { total_added += 1; }
-                        if line.starts_with("- ") { total_removed += 1; }
-                    }
+        // name-only mode: just show the file path(s)
+        if mode == "name-only" {
+            let mut out = format!("{}\n", full_path.display());
+            if let Some(v2) = to2_ver {
+                if v2 != to_ver {
+                    out.push_str(&format!("{}\n", full_path.display()));
                 }
-                return ToolResult::ok(format!(
-                    "{} | {} (v{} → v{})\n {} file changed, +{} -{}",
-                    full_path.display(),
-                    if total_added > 0 || total_removed > 0 { "modified" } else { "no changes" },
-                    from_ver, to_ver,
-                    1,
-                    total_added,
-                    total_removed
-                ));
             }
-            "unified" | _ => {
-                let mut output = format!("Diff: {} (v{} → v{})\n\n", full_path.display(), from_ver, to_ver);
+            return ToolResult::ok(out);
+        }
 
-                if diff_result.hunks.is_empty() {
-                    output.push_str("No differences found.\n");
-                    return ToolResult::ok(output);
-                }
-
-                let mut total_added = 0usize;
-                let mut total_removed = 0usize;
-
-                for hunk in &diff_result.hunks {
-                    output.push_str(&format!("@@ -{},{} +{},{} @@\n",
-                        hunk.from_line, hunk.from_count,
-                        hunk.to_line, hunk.to_count));
-                    for line in &hunk.lines {
-                        if line.starts_with('+') && !line.starts_with("++") {
-                            total_added += 1;
-                        } else if line.starts_with('-') && !line.starts_with("--") {
-                            total_removed += 1;
+        // Helper: compute stats for a single diff
+        let diff_stats = |from: usize, to: usize| -> (usize, usize, usize, Option<String>) {
+            let mut added = 0usize;
+            let mut removed = 0usize;
+            let mut line_count = 0usize;
+            let mut full_output = String::new();
+            if let Some(diff) = self.history.diff(&full_path, from, to) {
+                if mode == "unified" {
+                    full_output.push_str(&format!("@@ v{} → v{} @@\n\n", from, to));
+                    for hunk in &diff.hunks {
+                        full_output.push_str(&format!("@@ -{},{} +{},{} @@\n",
+                            hunk.from_line, hunk.from_count,
+                            hunk.to_line, hunk.to_count));
+                        for line in &hunk.lines {
+                            if line.starts_with("+ ") && !line.starts_with("++ ") { added += 1; }
+                            if line.starts_with("- ") && !line.starts_with("-- ") { removed += 1; }
+                            line_count += 1;
+                            full_output.push_str(line);
+                            full_output.push('\n');
                         }
-                        output.push_str(line);
-                        output.push('\n');
+                    }
+                } else {
+                    for hunk in &diff.hunks {
+                        for line in &hunk.lines {
+                            if line.starts_with("+ ") && !line.starts_with("++ ") { added += 1; }
+                            if line.starts_with("- ") && !line.starts_with("-- ") { removed += 1; }
+                        }
                     }
                 }
+            }
+            (added, removed, line_count, if mode == "unified" && line_count > 0 { Some(full_output) } else { None })
+        };
 
-                output.push_str(&format!("\nSummary: +{} lines added, -{} lines removed", total_added, total_removed));
-                return ToolResult::ok(output);
+        if from_ver == to_ver && to2_ver.is_none() {
+            return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", from_ver, to_ver));
+        }
+
+        let (a_added, a_removed, a_lines, a_output) = diff_stats(from_ver, to_ver);
+
+        match to2_ver {
+            Some(v2) => {
+                if to_ver == v2 {
+                    return ToolResult::ok(format!("v{} and v{} are the same version. No differences.", to_ver, v2));
+                }
+                let (b_added, b_removed, b_lines, b_output) = diff_stats(to_ver, v2);
+
+                match mode {
+                    "stat" => {
+                        return ToolResult::ok(format!(
+                            "Chain diff: {} (v{} → v{} → v{})\n\nv{} → v{}: +{} -{}\nv{} → v{}: +{} -{}\n\nTotal: +{} -{}",
+                            full_path.display(), from_ver, to_ver, v2,
+                            from_ver, to_ver, a_added, a_removed,
+                            to_ver, v2, b_added, b_removed,
+                            a_added + b_added, a_removed + b_removed
+                        ));
+                    }
+                    _ => {
+                        let mut output = format!(
+                            "Chain diff: {} (v{} → v{} → v{})\n\n",
+                            full_path.display(), from_ver, to_ver, v2
+                        );
+                        if let Some(ref body) = a_output {
+                            output.push_str(body);
+                            output.push_str("\n");
+                        } else {
+                            output.push_str(&format!("v{} → v{}: no changes\n\n", from_ver, to_ver));
+                        }
+                        if let Some(ref body) = b_output {
+                            output.push_str(body);
+                        } else {
+                            output.push_str(&format!("v{} → v{}: no changes\n", to_ver, v2));
+                        }
+                        output.push_str(&format!(
+                            "\nSummary: v{} → v{} (+{} -{}), v{} → v{} (+{} -{}), Total: +{} -{}",
+                            from_ver, to_ver, a_added, a_removed,
+                            to_ver, v2, b_added, b_removed,
+                            a_added + b_added, a_removed + b_removed
+                        ));
+                        return ToolResult::ok(output);
+                    }
+                }
+            }
+            None => {
+                // Single diff
+                match mode {
+                    "stat" => {
+                        return ToolResult::ok(format!(
+                            "{} | (v{} → v{})\n {} file changed, +{} -{}",
+                            full_path.display(),
+                            from_ver, to_ver,
+                            1, a_added, a_removed
+                        ));
+                    }
+                    _ => {
+                        let mut output = format!("Diff: {} (v{} → v{})\n\n", full_path.display(), from_ver, to_ver);
+                        if let Some(body) = a_output {
+                            output.push_str(&body);
+                        } else {
+                            output.push_str("No differences found.\n");
+                        }
+                        output.push_str(&format!("\nSummary: +{} lines added, -{} lines removed", a_added, a_removed));
+                        return ToolResult::ok(output);
+                    }
+                }
             }
         }
     }
