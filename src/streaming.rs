@@ -124,10 +124,14 @@ impl CollectHandler {
         }
     }
 
-    /// Get the assembled text (NOT including thinking)
+    /// Get the assembled text (falls back to thinking when text is empty)
     pub fn full_response(&self) -> String {
         let text = self.text.read().unwrap();
-        text.clone()
+        if !text.is_empty() {
+            return text.clone();
+        }
+        let thinking = self.thinking.read().unwrap();
+        thinking.clone()
     }
 
     /// Get the thinking content

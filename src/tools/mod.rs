@@ -18,7 +18,7 @@ mod web_search;
 mod web_fetch;
 mod exa_search;
 mod mcp_tools;
-mod skill_tools;
+pub mod skill_tools;
 pub mod file_history_tools;
 
 // Re-export tool structs for integration tests

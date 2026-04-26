@@ -38,7 +38,9 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents using regex. Uses ripgrep (rg) if available, otherwise falls back to Go regexp."
+        "Search file contents using regex in a codebase. Uses ripgrep (rg) if available, otherwise falls back to Go regexp. \
+        Supports glob and language type filters, context lines, and output modes. \
+        For advanced ripgrep features (multiline, PCRE2, JSON output, etc.) use the exec tool to call rg directly."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -47,52 +49,60 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern to search for."
+                    "description": "Regex pattern to search for. For literal text, use fixed_strings=true instead of escaping special regex characters."
                 },
                 "path": {
                     "type": "string",
-                    "description": "File or directory to search (default: current directory)."
+                    "description": "File or directory to search in. Defaults to current directory. To avoid scanning too many files, use max_depth to limit directory traversal."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Glob to filter files (e.g. '*.py')."
+                    "description": "Glob to filter files (e.g. '*.py'). Only files matching this pattern are searched."
                 },
                 "type": {
                     "type": "string",
-                    "description": "Language type filter (e.g. 'go', 'py', 'js', 'ts', 'rust', 'java')."
+                    "description": "Language type filter. Common values: go, py, js, ts, rust, java, sh, yaml, json, md, html, css."
                 },
-                "case_insensitive": {
+                "ignore_case": {
                     "type": "boolean",
                     "description": "Case insensitive search (default: false)."
                 },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Alias for ignore_case. Case insensitive search (default: false)."
+                },
                 "fixed_strings": {
                     "type": "boolean",
-                    "description": "Treat pattern as literal string, not regex (default: false)."
+                    "description": "Treat pattern as a literal string, not regex (default: false)."
                 },
                 "output_mode": {
                     "type": "string",
-                    "description": "Output mode: 'content' (default), 'files_with_matches', or 'count'.",
+                    "description": "Output mode: 'content' (default) shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
                     "enum": ["content", "files_with_matches", "count"]
-                },
-                "count_matches": {
-                    "type": "boolean",
-                    "description": "Count per-line match occurrences (not just matching lines). Only with content mode."
-                },
-                "context_before": {
-                    "type": "integer",
-                    "description": "Lines of context before each match (default: 0)."
-                },
-                "context_after": {
-                    "type": "integer",
-                    "description": "Lines of context after each match (default: 0)."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Lines of context before and after each match (default: 0, max: 3)."
+                    "description": "Lines of context before and after each match (default: 0)."
+                },
+                "context_before": {
+                    "type": "integer",
+                    "description": "Lines of context before each match (rg only, default: 0). Overrides context if set."
+                },
+                "context_after": {
+                    "type": "integer",
+                    "description": "Lines of context after each match (rg only, default: 0). Overrides context if set."
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum directory depth to search. Limits how many levels of subdirectories to traverse. Useful for avoiding scanning too many files (default: unlimited)."
+                },
+                "max_filesize": {
+                    "type": "string",
+                    "description": "Maximum file size to search (e.g. '1M', '500K', '100B'). Files larger than this are skipped. Only applies when ripgrep is available."
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "Maximum number of results (default: 250)."
+                    "description": "Maximum number of results to return (default: 250)."
                 },
                 "offset": {
                     "type": "integer",
@@ -178,6 +188,16 @@ impl Tool for GrepTool {
         let ctx_before = if ctx_combined > 0 && ctx_before == 0 { ctx_combined } else { ctx_before };
         let ctx_after = if ctx_combined > 0 && ctx_after == 0 { ctx_combined } else { ctx_after };
 
+        let max_depth = params
+            .get("max_depth")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+
+        let max_filesize = params
+            .get("max_filesize")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
         let search_path = expand_path(path);
         if !search_path.exists() {
             return ToolResult::error(format!("Error: path not found: {}", search_path.display()));
@@ -188,14 +208,14 @@ impl Tool for GrepTool {
             return rg_search(
                 pattern, &search_path, include, &type_filter,
                 case_insensitive, fixed_strings, output_mode,
-                ctx_before, ctx_after, head_limit, offset,
+                ctx_before, ctx_after, head_limit, offset, max_depth, max_filesize,
             );
         }
 
         go_search(
             pattern, &search_path, include, &type_filter,
             case_insensitive, fixed_strings, output_mode,
-            head_limit, offset, ctx_combined, count_matches,
+            head_limit, offset, ctx_combined, count_matches, max_depth,
         )
     }
 }
@@ -217,6 +237,8 @@ fn rg_search(
     ctx_after: usize,
     head_limit: usize,
     offset: usize,
+    max_depth: usize,
+    max_filesize: &str,
 ) -> ToolResult {
     let mut args = vec!["--no-heading".to_string(), "--line-number".to_string()];
 
@@ -229,6 +251,8 @@ fn rg_search(
     if fixed_strings { args.push("-F".to_string()); }
     if ctx_before > 0 { args.push("-B".to_string()); args.push(ctx_before.to_string()); }
     if ctx_after > 0 { args.push("-A".to_string()); args.push(ctx_after.to_string()); }
+    if max_depth > 0 { args.push("--max-depth".to_string()); args.push(max_depth.to_string()); }
+    if !max_filesize.is_empty() { args.push("--max-filesize".to_string()); args.push(max_filesize.to_string()); }
 
     args.push("-m".to_string());
     args.push(head_limit.to_string());
@@ -290,6 +314,7 @@ fn go_search(
     offset: usize,
     ctx_lines: usize,
     count_matches: bool,
+    max_depth: usize,
 ) -> ToolResult {
     let search_pattern = if fixed_strings {
         regex::escape(pattern)
@@ -316,9 +341,21 @@ fn go_search(
     if info.is_file() {
         files.push(path.to_path_buf());
     } else {
+        let base_depth = path.to_string_lossy().trim_end_matches(|c| c == '/' || c == '\\')
+            .split(std::path::MAIN_SEPARATOR).count();
         for entry in WalkDir::new(path)
             .into_iter()
-            .filter_entry(|e| !is_ignored_dir(e.file_name()))
+            .filter_entry(|e| {
+                if max_depth > 0 {
+                    let cur_depth = e.path().to_string_lossy()
+                        .trim_end_matches(|c| c == '/' || c == '\\')
+                        .split(std::path::MAIN_SEPARATOR).count() - base_depth;
+                    if cur_depth >= max_depth && e.path() != path {
+                        return false;
+                    }
+                }
+                !is_ignored_dir(e.file_name())
+            })
             .filter_map(|e| e.ok())
         {
             if !entry.file_type().is_file() { continue; }
