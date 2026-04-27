@@ -256,8 +256,6 @@ fn rg_search(
 
     args.push("-m".to_string());
     args.push(head_limit.to_string());
-    args.push(pattern.to_string());
-    args.push(path.to_string_lossy().to_string());
 
     if !include.is_empty() {
         args.push("--glob".to_string());
@@ -275,22 +273,27 @@ fn rg_search(
         }
     }
 
+    args.push(pattern.to_string());
+    args.push(path.to_string_lossy().to_string());
+
     let output = match Command::new("rg").args(&args).output() {
         Ok(o) => o,
         Err(e) => return ToolResult::error(format!("Error running rg: {}", e)),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let text = if !stdout.is_empty() { stdout } else if !stderr.is_empty() { stderr.to_string() } else { String::new() };
-    if text.is_empty() {
-        if !output.status.success() {
-            return ToolResult::error(format!("Error running rg: {}", String::from_utf8_lossy(&output.stderr)));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let success = output.status.success();
+    let combined = format!("{}{}", stdout, stderr);
+    let output = combined.trim().to_string();
+    if output.is_empty() {
+        if !success {
+            return ToolResult::error(format!("Error running rg: {}", stderr.trim()));
         }
         return ToolResult::ok("No matches found.".to_string());
     }
 
-    let mut lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<&str> = output.lines().collect();
     if offset > 0 && offset < lines.len() {
         lines = lines[offset..].to_vec();
     }
