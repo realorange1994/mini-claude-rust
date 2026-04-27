@@ -362,37 +362,74 @@ impl ConversationContext {
         self.fix_role_alternation();
     }
 
-    /// Validates that every tool_result references a tool_use that exists in a
-    /// preceding assistant message. Orphaned tool_results are removed. If a
-    /// tool_result message becomes empty after removal, it is deleted entirely.
+    /// Validates bidirectional tool_use/tool_result pairing.
+    /// Handles two failure modes after truncation:
+    /// 1. Orphaned tool_results: result references a tool_use that was removed → delete result
+    /// 2. Orphaned tool_uses: tool_use has no matching result (result was truncated) →
+    ///    delete the tool_use block; if message becomes empty, replace with placeholder text
     pub fn validate_tool_pairing(&mut self) {
-        // Collect all valid tool_use IDs from assistant messages
-        let mut valid_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Pass 1: Collect all tool_use IDs from assistant messages
+        let mut call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for msg in &self.messages {
-            if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
-                for block in blocks {
-                    valid_tool_ids.insert(block.id.clone());
+            if msg.role == MessageRole::Assistant {
+                if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                    for block in blocks {
+                        call_ids.insert(block.id.clone());
+                    }
                 }
             }
         }
 
-        // Filter out orphaned tool_results
-        let mut new_messages = Vec::with_capacity(self.messages.len());
-        for mut msg in self.messages.drain(..) {
-            if let MessageContent::ToolResultBlocks(blocks) = msg.content {
-                let kept: Vec<ToolResultBlock> = blocks
-                    .into_iter()
-                    .filter(|b| valid_tool_ids.contains(&b.tool_use_id))
-                    .collect();
-                if kept.is_empty() {
-                    // Entire message was orphaned — drop it
-                    continue;
-                }
-                msg.content = MessageContent::ToolResultBlocks(kept);
+        // Pass 2: Remove orphaned tool_results, collect surviving result IDs
+        let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &mut self.messages {
+            if let MessageContent::ToolResultBlocks(blocks) = &mut msg.content {
+                blocks.retain(|b| {
+                    if call_ids.contains(&b.tool_use_id) {
+                        result_ids.insert(b.tool_use_id.clone());
+                        true
+                    } else {
+                        false
+                    }
+                });
             }
-            new_messages.push(msg);
         }
-        self.messages = new_messages;
+
+        // Pass 3: Remove orphaned tool_result messages that are now empty
+        self.messages.retain(|msg| {
+            if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
+                !blocks.is_empty()
+            } else {
+                true
+            }
+        });
+
+        // Pass 4: Remove orphaned tool_use blocks (call without matching result)
+        let mut i = 0;
+        while i < self.messages.len() {
+            let msg = &self.messages[i];
+            if msg.role == MessageRole::Assistant {
+                if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                    let kept: Vec<ToolUseBlock> = blocks
+                        .iter()
+                        .filter(|b| b.id.is_empty() || result_ids.contains(&b.id))
+                        .cloned()
+                        .collect();
+                    let removed = blocks.len() - kept.len();
+                    if removed > 0 {
+                        if kept.is_empty() {
+                            // Entire message was orphaned — replace with placeholder
+                            self.messages[i].content = MessageContent::Text(
+                                "(tool call removed — result was truncated)".to_string(),
+                            );
+                        } else {
+                            self.messages[i].content = MessageContent::ToolUseBlocks(kept);
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
     }
 
     /// Ensures strict user/assistant alternation by merging consecutive
