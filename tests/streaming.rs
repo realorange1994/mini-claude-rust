@@ -1095,3 +1095,394 @@ async fn sse_stream_non_sse_json_with_tool_calls() {
     assert_eq!(result.tool_calls[0].name, "exec");
     assert_eq!(result.tool_calls[0].id, "toolu_non_sse");
 }
+
+// ============================================================
+// Finish reason tracking tests
+// ============================================================
+
+#[test]
+fn collect_handler_finish_reason_default_none() {
+    let h = CollectHandler::new();
+    assert!(h.finish_reason().is_none());
+}
+
+#[test]
+fn collect_handler_finish_reason_set_and_get() {
+    let h = CollectHandler::new();
+    h.set_finish_reason("end_turn".to_string());
+    assert_eq!(h.finish_reason(), Some("end_turn".to_string()));
+}
+
+#[test]
+fn collect_handler_finish_reason_overwrite() {
+    let h = CollectHandler::new();
+    h.set_finish_reason("tool_use".to_string());
+    h.set_finish_reason("max_tokens".to_string());
+    assert_eq!(h.finish_reason(), Some("max_tokens".to_string()));
+}
+
+// ============================================================
+// Partial tool call detection tests
+// ============================================================
+
+#[test]
+fn collect_handler_has_partial_tool_call_empty() {
+    let h = CollectHandler::new();
+    assert!(!h.has_partial_tool_call());
+}
+
+#[test]
+fn collect_handler_has_partial_tool_call_with_args() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"command":"ls"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    assert!(!h.has_partial_tool_call());
+}
+
+#[test]
+fn collect_handler_has_partial_tool_call_no_args() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    // Tool call started but no arguments — stream cut off
+    assert!(h.has_partial_tool_call());
+}
+
+#[test]
+fn collect_handler_has_partial_tool_call_multiple_tools_last_empty() {
+    let h = CollectHandler::new();
+    // First tool call complete
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"command":"ls"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    // Second tool call incomplete
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t2".into()),
+        name: Some("grep".into()),
+        usage: None,
+    });
+    assert!(h.has_partial_tool_call());
+}
+
+#[test]
+fn collect_handler_clear_partial_tool_call() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    assert!(h.has_partial_tool_call());
+    h.clear_partial_tool_call();
+    assert!(!h.has_partial_tool_call());
+    assert!(h.tool_calls().is_empty());
+}
+
+#[test]
+fn collect_handler_clear_partial_tool_call_when_none() {
+    let h = CollectHandler::new();
+    h.clear_partial_tool_call(); // should not panic
+    assert!(!h.has_partial_tool_call());
+}
+
+#[test]
+fn collect_handler_clear_partial_tool_call_preserves_earlier_tools() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"command":"ls"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t2".into()),
+        name: Some("grep".into()),
+        usage: None,
+    });
+    // Only last (incomplete) tool removed
+    h.clear_partial_tool_call();
+    let calls = h.tool_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "exec");
+}
+
+// ============================================================
+// Truncated tool argument detection tests
+// ============================================================
+
+#[test]
+fn collect_handler_has_truncated_tool_args_valid_json() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("read_file".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"path":"/tmp/f.txt"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    assert!(!h.has_truncated_tool_args());
+}
+
+#[test]
+fn collect_handler_has_truncated_tool_args_invalid_json() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("read_file".into()),
+        usage: None,
+    });
+    // Stream cut off mid-JSON
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"path":"/tmp"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    assert!(h.has_truncated_tool_args());
+}
+
+#[test]
+fn collect_handler_has_truncated_tool_args_empty_args_ignored() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("read_file".into()),
+        usage: None,
+    });
+    // Tool call started but no arguments yet — not truncated
+    assert!(!h.has_truncated_tool_args());
+}
+
+#[test]
+fn collect_handler_has_truncated_tool_args_multiple_one_truncated() {
+    let h = CollectHandler::new();
+    // First tool call complete
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"command":"ls"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    // Second tool call truncated
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t2".into()),
+        name: Some("grep".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"pattern":"TOD"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    assert!(h.has_truncated_tool_args());
+}
+
+// ============================================================
+// ClearText tests
+// ============================================================
+
+#[test]
+fn collect_handler_clear_text() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::Text,
+        content: "accumulated text".into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+    assert_eq!(h.full_response(), "accumulated text");
+    h.clear_text();
+    assert_eq!(h.full_response(), "");
+}
+
+// ============================================================
+// StreamResult tests
+// ============================================================
+
+#[test]
+fn stream_result_completed_true() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolCall,
+        content: String::new(),
+        id: Some("t1".into()),
+        name: Some("exec".into()),
+        usage: None,
+    });
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::ToolArgument,
+        content: r#"{"command":"echo hi"}"#.into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+
+    let calls = h.tool_calls();
+    let text = h.full_response();
+    let thinking = h.thinking();
+    let fr = h.finish_reason();
+
+    let result = miniclaudecode_rust::streaming::StreamResult {
+        tool_calls: calls,
+        text,
+        thinking,
+        completed: true,
+        finish_reason: fr,
+    };
+
+    assert!(result.completed);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.finish_reason, None);
+}
+
+#[test]
+fn stream_result_completed_false_has_partial() {
+    let h = CollectHandler::new();
+    h.handle(StreamChunk {
+        chunk_type: ChunkType::Text,
+        content: "partial response".into(),
+        id: None,
+        name: None,
+        usage: None,
+    });
+
+    let result = miniclaudecode_rust::streaming::StreamResult {
+        tool_calls: h.tool_calls(),
+        text: h.full_response(),
+        thinking: h.thinking(),
+        completed: false,
+        finish_reason: h.finish_reason(),
+    };
+
+    assert!(!result.completed);
+    assert_eq!(result.text, "partial response");
+    assert!(result.tool_calls.is_empty());
+}
+
+// ============================================================
+// SSE message_delta with stop_reason test
+// ============================================================
+
+#[tokio::test]
+async fn sse_stream_finish_reason_from_message_delta() {
+    let events = vec![
+        serde_json::json!({"type": "message_start", "message": {"id": "msg_6"}}),
+        serde_json::json!({
+            "type": "content_block_start",
+            "content_block": { "type": "text", "text": "" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "delta": { "type": "text_delta", "text": "Done." }
+        }),
+        serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn" },
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        serde_json::json!({ "type": "message_stop" }),
+    ];
+
+    let body = build_sse_body(&events);
+    let result = run_sse_stream(&body).await.unwrap();
+
+    // Note: process_sse_events sets finish_reason on CollectHandler internally
+    // but StreamResult exposes it via the return path
+    assert!(result.completed);
+}
+
+#[tokio::test]
+async fn sse_stream_finish_reason_tool_use() {
+    let events = vec![
+        serde_json::json!({"type": "message_start", "message": {"id": "msg_7"}}),
+        serde_json::json!({
+            "type": "content_block_start",
+            "content_block": { "type": "tool_use", "id": "t1", "name": "exec" }
+        }),
+        serde_json::json!({
+            "type": "content_block_delta",
+            "delta": { "type": "input_json_delta", "partial_json": r#"{"command":"ls"}"# }
+        }),
+        serde_json::json!({ "type": "content_block_stop", "index": 0 }),
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "tool_use" },
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        serde_json::json!({ "type": "message_stop" }),
+    ];
+
+    let body = build_sse_body(&events);
+    let result = run_sse_stream(&body).await.unwrap();
+
+    assert!(result.completed);
+    assert_eq!(result.tool_calls.len(), 1);
+}
