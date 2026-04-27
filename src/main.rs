@@ -212,11 +212,21 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         // Simple read_line - no BufReader. On Windows, stdin.lock() is reentrant,
         // so ask_user() can also read from stdin concurrently without conflict.
         let mut input = String::new();
-        if stdin.read_line(&mut input).is_err() {
-            println!("\nGoodbye!");
-            println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
-            agent.close();
-            break;
+        match stdin.read_line(&mut input) {
+            Ok(0) => {
+                // EOF — stdin was closed
+                println!("\nGoodbye!");
+                println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
+                agent.close();
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                println!("\nGoodbye!");
+                println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
+                agent.close();
+                break;
+            }
         }
 
         let user_input = input.trim();
