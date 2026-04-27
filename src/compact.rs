@@ -564,6 +564,13 @@ impl Compactor {
             }
         }
 
+        // After truncation, validate tool pairing and fix role alternation.
+        // Naive slice truncation can orphan tool_results (their tool_use was
+        // dropped) and leave consecutive same-role messages, both of which
+        // cause the Anthropic API to reject the request with error 2013.
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
+
         let entries_after = context.len();
         let tokens_after = estimate_total_tokens(context.messages());
         let tokens_saved = tokens_before.saturating_sub(tokens_after);

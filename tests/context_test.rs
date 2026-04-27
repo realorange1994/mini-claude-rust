@@ -343,3 +343,121 @@ fn tool_result_content_deserialization() {
         ToolResultContent::Text { text } => assert_eq!(text, "Hello"),
     }
 }
+
+// ─── Tool pairing validation ───
+
+#[test]
+fn validate_tool_pairing_keeps_valid() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("Run ls".to_string());
+    ctx.add_assistant_tool_calls(vec![ToolUseBlock {
+        id: "call_1".to_string(),
+        name: "exec".to_string(),
+        input: HashMap::new(),
+    }]);
+    ctx.add_tool_results(vec![ToolResultBlock {
+        tool_use_id: "call_1".to_string(),
+        content: vec![ToolResultContent::Text { text: "output".to_string() }],
+        is_error: false,
+    }]);
+
+    ctx.validate_tool_pairing();
+    assert_eq!(ctx.len(), 3); // Nothing should be removed
+}
+
+#[test]
+fn validate_tool_pairing_removes_orphan() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("Start".to_string());
+    // Simulate truncation: tool_use is gone but tool_result remains
+    ctx.add_tool_results(vec![ToolResultBlock {
+        tool_use_id: "call_deleted".to_string(),
+        content: vec![ToolResultContent::Text { text: "orphan".to_string() }],
+        is_error: false,
+    }]);
+    ctx.add_assistant_text("Response".to_string());
+    ctx.add_user_message("Next".to_string());
+
+    assert_eq!(ctx.len(), 4);
+    ctx.validate_tool_pairing();
+    // Orphaned tool_result message should be removed
+    assert_eq!(ctx.len(), 3);
+}
+
+#[test]
+fn validate_tool_pairing_partial_removal() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("Start".to_string());
+    ctx.add_assistant_tool_calls(vec![
+        ToolUseBlock { id: "call_1".to_string(), name: "a".to_string(), input: HashMap::new() },
+        ToolUseBlock { id: "call_2".to_string(), name: "b".to_string(), input: HashMap::new() },
+    ]);
+    ctx.add_tool_results(vec![
+        ToolResultBlock { tool_use_id: "call_1".to_string(), content: vec![ToolResultContent::Text { text: "r1".to_string() }], is_error: false },
+        ToolResultBlock { tool_use_id: "call_2".to_string(), content: vec![ToolResultContent::Text { text: "r2".to_string() }], is_error: false },
+        ToolResultBlock { tool_use_id: "call_deleted".to_string(), content: vec![ToolResultContent::Text { text: "orphan".to_string() }], is_error: false },
+    ]);
+
+    ctx.validate_tool_pairing();
+    assert_eq!(ctx.len(), 3); // One tool_result removed from the message
+}
+
+// ─── Role alternation fix ───
+
+#[test]
+fn fix_role_alternation_merges_consecutive_user() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("First".to_string());
+    ctx.add_user_message("Second".to_string());
+    ctx.add_assistant_text("Response".to_string());
+
+    assert_eq!(ctx.len(), 3);
+    ctx.fix_role_alternation();
+    // Two consecutive user messages should be merged
+    assert_eq!(ctx.len(), 2);
+}
+
+#[test]
+fn fix_role_alternation_merges_consecutive_assistant() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("Hello".to_string());
+    ctx.add_assistant_text("Part 1".to_string());
+    ctx.add_assistant_text("Part 2".to_string());
+
+    assert_eq!(ctx.len(), 3);
+    ctx.fix_role_alternation();
+    assert_eq!(ctx.len(), 2);
+}
+
+#[test]
+fn fix_role_alternation_preserves_valid_sequence() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("A".to_string());
+    ctx.add_assistant_text("B".to_string());
+    ctx.add_user_message("C".to_string());
+    ctx.add_assistant_text("D".to_string());
+
+    let before = ctx.len();
+    ctx.fix_role_alternation();
+    assert_eq!(ctx.len(), before); // No change needed
+}
+
+#[test]
+fn fix_role_alternation_preserves_system_messages() {
+    let config = test_config();
+    let mut ctx = ConversationContext::new(config);
+    ctx.add_user_message("A".to_string());
+    ctx.add_compact_boundary(miniclaudecode_rust::context::CompactTrigger::Auto, 1000);
+    ctx.add_user_message("B".to_string());
+
+    // System messages are kept as-is (they're filtered out by entries_to_messages_from_ctx)
+    ctx.fix_role_alternation();
+    // System messages should be preserved
+    assert!(ctx.len() >= 2);
+}

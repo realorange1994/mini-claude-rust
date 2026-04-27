@@ -313,6 +313,10 @@ impl ConversationContext {
                 }
 
                 self.messages = merged;
+
+                // After truncation, validate tool pairing and fix alternation
+                self.validate_tool_pairing();
+                self.fix_role_alternation();
             } else {
                 self.messages = vec![self.messages[0].clone()];
             }
@@ -329,6 +333,8 @@ impl ConversationContext {
         let first = self.messages[0..1].to_vec();
         let recent = self.messages[self.messages.len() - keep..].to_vec();
         self.messages = [first, recent].concat();
+        self.validate_tool_pairing();
+        self.fix_role_alternation();
     }
 
     /// AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
@@ -340,6 +346,8 @@ impl ConversationContext {
         let first = self.messages[0..1].to_vec();
         let recent = self.messages[self.messages.len() - keep..].to_vec();
         self.messages = [first, recent].concat();
+        self.validate_tool_pairing();
+        self.fix_role_alternation();
     }
 
     /// MinimumHistory drops to bare minimum - only first user message and last 2 entries.
@@ -350,6 +358,103 @@ impl ConversationContext {
         let first = self.messages[0..1].to_vec();
         let recent = self.messages[self.messages.len() - 2..].to_vec();
         self.messages = [first, recent].concat();
+        self.validate_tool_pairing();
+        self.fix_role_alternation();
+    }
+
+    /// Validates that every tool_result references a tool_use that exists in a
+    /// preceding assistant message. Orphaned tool_results are removed. If a
+    /// tool_result message becomes empty after removal, it is deleted entirely.
+    pub fn validate_tool_pairing(&mut self) {
+        // Collect all valid tool_use IDs from assistant messages
+        let mut valid_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &self.messages {
+            if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                for block in blocks {
+                    valid_tool_ids.insert(block.id.clone());
+                }
+            }
+        }
+
+        // Filter out orphaned tool_results
+        let mut new_messages = Vec::with_capacity(self.messages.len());
+        for mut msg in self.messages.drain(..) {
+            if let MessageContent::ToolResultBlocks(blocks) = msg.content {
+                let kept: Vec<ToolResultBlock> = blocks
+                    .into_iter()
+                    .filter(|b| valid_tool_ids.contains(&b.tool_use_id))
+                    .collect();
+                if kept.is_empty() {
+                    // Entire message was orphaned — drop it
+                    continue;
+                }
+                msg.content = MessageContent::ToolResultBlocks(kept);
+            }
+            new_messages.push(msg);
+        }
+        self.messages = new_messages;
+    }
+
+    /// Ensures strict user/assistant alternation by merging consecutive
+    /// messages with the same role. Critical for Anthropic API compliance.
+    pub fn fix_role_alternation(&mut self) {
+        if self.messages.is_empty() {
+            return;
+        }
+
+        let mut merged: Vec<Message> = Vec::with_capacity(self.messages.len());
+        for msg in self.messages.drain(..) {
+            // Skip system messages (compact boundaries, etc.) — they are
+            // filtered out by entries_to_messages_from_ctx anyway.
+            if msg.role == MessageRole::System {
+                merged.push(msg);
+                continue;
+            }
+
+            if let Some(last) = merged.last_mut() {
+                if last.role == msg.role {
+                    // Merge same-role consecutive messages
+                    match &msg.content {
+                        MessageContent::Text(b) => {
+                            if let MessageContent::Text(a) = &mut last.content {
+                                a.push_str("\n\n");
+                                a.push_str(b);
+                            } else {
+                                last.content = msg.content;
+                            }
+                        }
+                        MessageContent::ToolUseBlocks(b) => {
+                            if let MessageContent::ToolUseBlocks(a) = &mut last.content {
+                                a.extend(b.clone());
+                            } else {
+                                last.content = msg.content;
+                            }
+                        }
+                        MessageContent::ToolResultBlocks(b) => {
+                            if let MessageContent::ToolResultBlocks(a) = &mut last.content {
+                                a.extend(b.clone());
+                            } else {
+                                last.content = msg.content;
+                            }
+                        }
+                        MessageContent::Summary(b) => {
+                            if let MessageContent::Summary(a) = &mut last.content {
+                                a.push_str("\n\n");
+                                a.push_str(b);
+                            } else {
+                                last.content = msg.content;
+                            }
+                        }
+                        _ => {
+                            last.content = msg.content;
+                        }
+                    }
+                    continue;
+                }
+            }
+            merged.push(msg);
+        }
+        self.messages = merged;
     }
 }
 
