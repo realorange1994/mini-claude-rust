@@ -291,7 +291,7 @@ You have access to the following tools to help the user with software engineerin
     prompt.push_str("8. For file edits, provide enough context in old_string to uniquely match.\n");
     prompt.push_str("9. Be concise and direct in your responses.\n");
     prompt.push_str("10. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.\n");
-    prompt.push_str("11. Use git directly for git operations -- it is available in the PATH.\n\n");
+    prompt.push_str("11. Prefer built-in tools over exec commands. For git operations, use the git tool instead of exec. For file searches, use grep and glob instead of exec. Always choose the most appropriate built-in tool when available.\n\n");
 
     // Common tool parameter
     prompt.push_str("## Tool Parameters\n\n");
