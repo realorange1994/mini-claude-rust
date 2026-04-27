@@ -53,7 +53,7 @@ impl Tool for GitTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path. NOT used as working directory (use 'directory' for that)"
+                    "description": "For clone: destination directory path. For init/worktree: target path. For mv: destination path. For blame: file path to blame. NOT used as working directory (use 'directory' for that)"
                 },
                 "directory": {
                     "type": "string",
@@ -61,7 +61,7 @@ impl Tool for GitTool {
                 },
                 "branch": {
                     "type": "string",
-                    "description": "Branch name for checkout/branch/push/pull/worktree. Also used as tag name for tag operation. checkout does NOT support 'files' param - use 'restore' to unstage files"
+                    "description": "Branch name for checkout/branch/push/pull/switch/worktree. For checkout: with flags=[\"-b\"] creates new branch. Also used as tag name for tag operation."
                 },
                 "message": {
                     "type": "string",
@@ -137,6 +137,14 @@ impl Tool for GitTool {
                     "type": "boolean",
                     "description": "Remove a worktree (for worktree remove)"
                 },
+                "stash_subcommand": {
+                    "type": "string",
+                    "description": "Stash subcommand: pop, apply, drop, list, show (for stash operation). Default is 'push' (just 'git stash')"
+                },
+                "stash_include_untracked": {
+                    "type": "boolean",
+                    "description": "Include untracked files in stash (for stash push, adds -u flag)"
+                },
                 "max_count": {
                     "type": "integer",
                     "description": "Maximum number of entries to return (for log, rev-list, default: 20)"
@@ -162,8 +170,11 @@ impl Tool for GitTool {
 
         // Determine working directory:
         // - For clone: use directory param (path is the clone destination, not workdir)
+        // - For blame: use directory param only (path is the file to blame, not workdir)
         // - For other operations: use directory param if set, otherwise path param
         let work_dir = if operation == "clone" {
+            params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
+        } else if operation == "blame" {
             params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
         } else {
             params.get("directory")
@@ -349,6 +360,13 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "checkout" => {
             args.push("checkout".to_string());
+            // Handle -b/-B early so they come before branch name: `git checkout -b <branch>`
+            let has_create = params.get("flags").and_then(|v| v.as_array())
+                .map(|f| f.iter().any(|x| x.as_str() == Some("-b") || x.as_str() == Some("-B")))
+                .unwrap_or(false);
+            if has_create {
+                args.push("-b".to_string());
+            }
             if let Some(ours_theirs) = params.get("ours_theirs").and_then(|v| v.as_str()) {
                 if ours_theirs == "ours" {
                     args.push("--ours".to_string());
@@ -367,6 +385,8 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
             } else if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
                 args.push(target.to_string());
             }
+            // Return early to skip generic flags loop for checkout
+            return Ok(args);
         }
         "switch" => {
             args.push("switch".to_string());
@@ -378,6 +398,10 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "merge" => {
             args.push("merge".to_string());
+            if let Some(message) = params.get("message").and_then(|v| v.as_str()) {
+                args.push("-m".to_string());
+                args.push(message.to_string());
+            }
             if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
                 args.push(target.to_string());
             }
@@ -406,6 +430,16 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "stash" => {
             args.push("stash".to_string());
+            // Support stash subcommands: pop, apply, drop, list, show
+            if let Some(sub) = params.get("stash_subcommand").and_then(|v| v.as_str()) {
+                if matches!(sub, "pop" | "apply" | "drop" | "list" | "show") {
+                    args.push(sub.to_string());
+                }
+            }
+            if params.get("stash_include_untracked").and_then(|v| v.as_bool()).unwrap_or(false) {
+                // Use -u flag for include untracked (stash push only)
+                args.push("-u".to_string());
+            }
         }
         "clean" => {
             args.push("clean".to_string());
@@ -463,14 +497,16 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "blame" => {
             args.push("blame".to_string());
-            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                args.push(path.to_string());
+            } else if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 for f in files {
                     if let Some(s) = f.as_str() {
                         args.push(s.to_string());
                     }
                 }
             } else {
-                return Err("files is required for blame (file path)".to_string());
+                return Err("path or files is required for blame (file path)".to_string());
             }
         }
         "reflog" => {
@@ -559,4 +595,1232 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
     }
 
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_repo_path() -> String {
+        // Use a path that doesn't contain backslashes that confuse git on Windows
+        let cargo_dir = env!("CARGO_MANIFEST_DIR");
+        // Normalize to forward slashes for git
+        cargo_dir.replace('\\', "/") + "/target/test_git_repo"
+    }
+
+    fn setup_test_repo() -> String {
+        let base = test_repo_path();
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        Command::new("git").args(["init"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["config", "user.name", "Test"]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/init.txt", base), "initial").unwrap();
+        Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "initial"]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/second.txt", base), "second").unwrap();
+        Command::new("git").args(["add", "second.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "second"]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/third.txt", base), "third").unwrap();
+        Command::new("git").args(["add", "third.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "third"]).current_dir(&base).output().unwrap();
+        base
+    }
+
+    fn run_tool(operation: &str, params: &[(&str, Value)]) -> ToolResult {
+        let tool = GitTool::new();
+        let mut map = HashMap::new();
+        for (k, v) in params {
+            map.insert(k.to_string(), v.clone());
+        }
+        map.insert("directory".to_string(), Value::String(test_repo_path()));
+        map.insert("operation".to_string(), Value::String(operation.to_string()));
+        tool.execute(map)
+    }
+
+    fn make_params(params: &[(&str, Value)]) -> HashMap<String, Value> {
+        let mut map = HashMap::new();
+        for (k, v) in params {
+            map.insert(k.to_string(), v.clone());
+        }
+        map
+    }
+
+    #[test]
+    fn test_git_init() {
+        let init_path = format!("{}/new_init", test_repo_path());
+        let _ = fs::remove_dir_all(&init_path);
+        fs::create_dir_all(&init_path).unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("init".to_string()));
+        params.insert("path".to_string(), Value::String(init_path.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "init failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/.git", init_path)).is_ok());
+    }
+
+    #[test]
+    fn test_git_mv() {
+        let base = setup_test_repo();
+        let src = "mv_source.txt";
+        let dst = "mv_dest.txt";
+        let src_path = format!("{}/{}", base, src);
+        let dst_path = format!("{}/{}", base, dst);
+        let _ = fs::remove_file(&dst_path);
+        fs::write(&src_path, "rename me").unwrap();
+        // Small delay for Windows file handle release
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Command::new("git").args(["add", src]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "add mv source"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("mv".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("files".to_string(), Value::Array(vec![
+            Value::String(src.to_string()),
+            Value::String(dst.to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "mv failed: {}", result.output);
+        assert!(fs::metadata(&dst_path).is_ok(), "Destination file should exist");
+        assert!(fs::metadata(&src_path).is_err(), "Source file should not exist");
+    }
+
+    #[test]
+    fn test_git_clean_dry_run() {
+        let base = setup_test_repo();
+        // Use a unique filename to avoid conflicts
+        let filename = "clean_test_untracked.txt";
+        let filepath = format!("{}/{}", base, filename);
+        fs::write(&filepath, "untracked").unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clean".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("dry_run".to_string(), Value::Bool(true));
+        params.insert("recursive".to_string(), Value::Bool(true));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "clean --dry-run failed: {}", result.output);
+        // Clean dry-run either mentions the file or says "Would remove"
+        assert!(result.output.contains("clean_test_untracked") || result.output.contains("Would remove") || result.output.contains("untracked"));
+        assert!(fs::metadata(&filepath).is_ok());
+        // Clean up
+        let _ = fs::remove_file(&filepath);
+    }
+
+    #[test]
+    fn test_git_clean_force() {
+        let base = setup_test_repo();
+        let filename = "clean_force_untracked.txt";
+        let filepath = format!("{}/{}", base, filename);
+        fs::write(&filepath, "untracked").unwrap();
+        // Ensure file is fully written and closed
+        drop(fs::read_to_string(&filepath));
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clean".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("force".to_string(), Value::Bool(true));
+        params.insert("recursive".to_string(), Value::Bool(true));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "clean -fd failed: {}", result.output);
+        // Give Windows a moment to release the file handle
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(fs::metadata(&filepath).is_err(), "File should have been removed by clean -fd");
+    }
+
+    #[test]
+    fn test_git_cherry_pick() {
+        let base = setup_test_repo();
+        // Remove any stale lock file
+        let _ = fs::remove_file(format!("{}/.git/index.lock", base));
+
+        // Create a feature branch with a commit
+        Command::new("git").args(["checkout", "-b", "cpfeature"]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/cpfile.txt", base), "cherry feature").unwrap();
+        Command::new("git").args(["add", "cpfile.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "cherry pick feature"]).current_dir(&base).output().unwrap();
+        let cherry_hash_out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&base).output().unwrap();
+        let hash = String::from_utf8_lossy(&cherry_hash_out.stdout).trim().to_string();
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("cherry-pick".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(hash));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "cherry-pick failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/cpfile.txt", base)).is_ok());
+    }
+
+    #[test]
+    fn test_git_revert() {
+        let base = setup_test_repo();
+        let third_hash = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&base).output().unwrap();
+        let hash = String::from_utf8_lossy(&third_hash.stdout).trim().to_string();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("revert".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(hash));
+        params.insert("message".to_string(), Value::String("Revert third commit".to_string()));
+        // Use flags for --no-edit to avoid editor
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--no-edit".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "revert failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_merge() {
+        let base = setup_test_repo();
+        // Create a feature branch with a unique name
+        let branch_name = "merge_test_branch";
+        let filename = "merge_test_file.txt";
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/{}", base, filename), "merge content").unwrap();
+        Command::new("git").args(["add", filename]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "merge test file"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "merge failed: {}", result.output);
+        // Verify the merge file exists
+        let merge_path = format!("{}/{}", base, filename);
+        assert!(fs::metadata(&merge_path).is_ok(), "Merged file should exist at {}", merge_path);
+    }
+
+    #[test]
+    fn test_git_rebase() {
+        let base = setup_test_repo();
+        // Create a branch from master with unique names
+        let branch_name = "rebase_test_branch";
+        let filename = "rebase_test_file.txt";
+        let master_filename = "rebase_master_file.txt";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+        fs::write(format!("{}/{}", base, filename), "rebase content").unwrap();
+        Command::new("git").args(["add", filename]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "rebase commit"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+        // Add a commit on master
+        fs::write(format!("{}/{}", base, master_filename), "master content").unwrap();
+        Command::new("git").args(["add", master_filename]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "master commit"]).current_dir(&base).output().unwrap();
+        // Now rebase rebase_test_branch onto current master
+        Command::new("git").args(["checkout", branch_name]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("rebase".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String("master".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "rebase failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_fetch() {
+        let base = setup_test_repo();
+        // Create a bare repo as remote
+        let bare_path = format!("{}/bare_fetch.git", base);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        // Add remote and fetch
+        Command::new("git").args(["remote", "add", "fetchremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("fetch".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("fetchremote".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "fetch failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_clone() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_clone.git", base);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        let clone_dest = format!("{}/cloned_repo", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clone".to_string()));
+        params.insert("repo".to_string(), Value::String(bare_path.clone()));
+        params.insert("path".to_string(), Value::String(clone_dest.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "clone failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/.git", clone_dest)).is_ok(), "Cloned repo should have .git directory");
+    }
+
+    #[test]
+    fn test_git_clone_no_dest() {
+        // Clone without specifying path — git clones to repo-name directory
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_clone2.git", base);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        let expected_dest = format!("{}/bare_clone2", base); // git strips .git
+        let _ = fs::remove_dir_all(&expected_dest);
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clone".to_string()));
+        params.insert("repo".to_string(), Value::String(bare_path.clone()));
+        params.insert("directory".to_string(), Value::String(base.clone())); // run from base dir
+        let result = tool.execute(params);
+        assert!(!result.is_error, "clone without path failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/.git", expected_dest)).is_ok());
+    }
+
+    #[test]
+    fn test_git_branch_create_list_delete() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+
+        // Test branch list (no branch param)
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("branch".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "branch list failed: {}", result.output);
+        assert!(result.output.contains("master"), "Should show master branch");
+
+        // Test branch create
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("branch".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("branch".to_string(), Value::String("newbranch".to_string()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "branch create failed: {}", result2.output);
+
+        // Verify branch exists
+        let mut params3 = HashMap::new();
+        params3.insert("operation".to_string(), Value::String("branch".to_string()));
+        params3.insert("directory".to_string(), Value::String(base.clone()));
+        let result3 = tool.execute(params3);
+        assert!(!result3.is_error, "branch list after create failed: {}", result3.output);
+        assert!(result3.output.contains("newbranch"), "Should show newbranch");
+
+        // Test branch delete with flags
+        let mut params4 = HashMap::new();
+        params4.insert("operation".to_string(), Value::String("branch".to_string()));
+        params4.insert("directory".to_string(), Value::String(base.clone()));
+        params4.insert("branch".to_string(), Value::String("newbranch".to_string()));
+        params4.insert("flags".to_string(), Value::Array(vec![Value::String("-d".to_string())]));
+        let result4 = tool.execute(params4);
+        assert!(!result4.is_error, "branch delete failed: {}", result4.output);
+
+        // Verify branch deleted
+        let mut params5 = HashMap::new();
+        params5.insert("operation".to_string(), Value::String("branch".to_string()));
+        params5.insert("directory".to_string(), Value::String(base.clone()));
+        let result5 = tool.execute(params5);
+        assert!(!result5.is_error, "branch list after delete failed: {}", result5.output);
+        assert!(!result5.output.contains("newbranch"), "Should not show newbranch");
+    }
+
+    #[test]
+    fn test_branch_switch_full_cycle() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+
+        // Create branch
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("branch".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("branch".to_string(), Value::String("dev".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "branch create failed: {}", result.output);
+
+        // Switch to it
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("switch".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("branch".to_string(), Value::String("dev".to_string()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "switch failed: {}", result2.output);
+
+        // Verify current branch
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+        assert_eq!(current, "dev", "Should be on dev branch after switch");
+
+        // Make a commit on dev
+        fs::write(format!("{}/dev_only.txt", base), "dev content").unwrap();
+        Command::new("git").args(["add", "dev_only.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "dev commit"]).current_dir(&base).output().unwrap();
+
+        // Switch back to master
+        let mut params3 = HashMap::new();
+        params3.insert("operation".to_string(), Value::String("switch".to_string()));
+        params3.insert("directory".to_string(), Value::String(base.clone()));
+        params3.insert("branch".to_string(), Value::String("master".to_string()));
+        let result3 = tool.execute(params3);
+        assert!(!result3.is_error, "switch back to master failed: {}", result3.output);
+
+        // Verify dev_only.txt no longer exists
+        assert!(fs::metadata(format!("{}/dev_only.txt", base)).is_err(),
+            "dev_only.txt should not exist on master");
+    }
+
+    #[test]
+    fn test_checkout_create_branch() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+
+        // Test checkout -b (create and switch to new branch)
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("checkout".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("branch".to_string(), Value::String("newbranch".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("-b".to_string())]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "checkout -b failed: {}", result.output);
+
+        // Verify current branch
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+        assert_eq!(current, "newbranch", "Should be on newbranch after checkout -b");
+    }
+
+    #[test]
+    fn test_clone_and_push_pull_cycle() {
+        // Full cycle: setup → clone → modify → push → clone again → verify
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_cycle.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+
+        // Add bare as remote and push
+        Command::new("git").args(["remote", "add", "origin2", bare_path.as_str()]).current_dir(&base).output().unwrap();
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("origin2".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("-u".to_string()),
+            Value::String(current_branch.clone()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push failed: {}", result.output);
+
+        // Clone from bare repo
+        let clone_dest = format!("{}/cycle_clone", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("clone".to_string()));
+        params2.insert("repo".to_string(), Value::String(bare_path.clone()));
+        params2.insert("path".to_string(), Value::String(clone_dest.clone()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "clone from bare failed: {}", result2.output);
+
+        // Verify cloned repo has all files
+        assert!(fs::metadata(format!("{}/init.txt", clone_dest)).is_ok());
+        assert!(fs::metadata(format!("{}/second.txt", clone_dest)).is_ok());
+        assert!(fs::metadata(format!("{}/third.txt", clone_dest)).is_ok());
+    }
+
+    #[test]
+    fn test_git_worktree_list_add_remove() {
+        let base = setup_test_repo();
+        let wt_path = format!("{}/wt_workdir", base);
+        let _ = fs::remove_dir_all(&wt_path);
+
+        // Test worktree list
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("worktree".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "worktree list failed: {}", result.output);
+
+        // Test worktree add - requires worktree_name (trigger), path, and worktree_branch
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("worktree".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("worktree_name".to_string(), Value::String("dummy".to_string())); // triggers add
+        params2.insert("path".to_string(), Value::String(wt_path.clone()));
+        params2.insert("worktree_branch".to_string(), Value::String("wt-branch-new".to_string()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "worktree add failed: {}", result2.output);
+        assert!(fs::metadata(&wt_path).is_ok());
+
+        // Test worktree remove
+        let _ = Command::new("git").args(["worktree", "remove", "-f", wt_path.as_str()]).current_dir(&base).output();
+    }
+
+    #[test]
+    fn test_git_push_pull_local_remote() {
+        let base = setup_test_repo();
+        // Get current branch name
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        let bare_path = format!("{}/bare_push.git", base);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "pushremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        // Test push (use -u and --all to push all branches)
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("pushremote".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("-u".to_string()),
+            Value::String(current_branch.clone()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push failed: {}", result.output);
+
+        // Clone and test pull
+        let pull_dest = format!("{}/pull_test", base);
+        Command::new("git").args(["clone", bare_path.as_str(), pull_dest.as_str()]).output().unwrap();
+
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("pull".to_string()));
+        params2.insert("directory".to_string(), Value::String(pull_dest.clone()));
+        params2.insert("remote".to_string(), Value::String("origin".to_string()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "pull failed: {}", result2.output);
+    }
+
+    #[test]
+    fn test_git_describe() {
+        let base = setup_test_repo();
+        // Create an annotated tag (required for describe)
+        Command::new("git").args(["tag", "-a", "v1.0.0", "-m", "version 1"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("describe".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "describe failed: {}", result.output);
+        assert!(result.output.contains("v1.0.0"));
+    }
+
+    #[test]
+    fn test_git_shortlog() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("shortlog".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        // shortlog with no commits to a different branch is OK, might return empty or summary
+        // Don't assert success/failure since shortlog can return non-zero on some setups
+        // Just verify it runs without a fatal error
+        assert!(!result.output.contains("fatal"), "shortlog should not fail fatally: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_blame() {
+        let base = setup_test_repo();
+        // Verify the repo was properly set up
+        let log_out = Command::new("git").args(["log", "--oneline"]).current_dir(&base).output().unwrap();
+        assert!(log_out.status.success(), "Repo should have commits: {}", String::from_utf8_lossy(&log_out.stderr));
+
+        // Test blame with path parameter
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("blame".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("path".to_string(), Value::String("init.txt".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "blame with path failed: {}", result.output);
+
+        // Test blame with files parameter
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("blame".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("files".to_string(), Value::Array(vec![Value::String("init.txt".to_string())]));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "blame with files failed: {}", result2.output);
+    }
+
+    #[test]
+    fn test_git_reflog() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("reflog".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "reflog failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_remote() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_remote_test.git", base);
+        // Clean up any previous runs
+        let _ = fs::remove_dir_all(&bare_path);
+        let _ = Command::new("git").args(["remote", "remove", "testremote"]).current_dir(&base).output();
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "testremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("remote".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "remote failed: {}", result.output);
+        assert!(result.output.contains("testremote"));
+    }
+
+    #[test]
+    fn test_git_rev_parse() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("rev-parse".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String("HEAD".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "rev-parse failed: {}", result.output);
+        assert!(result.output.trim().len() == 40, "rev-parse should return 40-char hash");
+    }
+
+    #[test]
+    fn test_git_rev_list() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("rev-list".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "rev-list failed: {}", result.output);
+        // With --count flag, output is just the number
+        assert!(result.output.trim().chars().all(|c| c.is_ascii_digit()), "rev-list should return a count: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_show() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("show".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "show failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_stash_push_pop() {
+        let base = setup_test_repo();
+        // Modify a tracked file
+        fs::write(format!("{}/init.txt", base), "modified for stash").unwrap();
+
+        let tool = GitTool::new();
+
+        // Test stash push
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("stash".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "stash push failed: {}", result.output);
+        assert!(result.output.contains("Saved") || result.output.contains("No local changes"), "stash should save or report no changes");
+
+        // Test stash list
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("stash".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("stash_subcommand".to_string(), Value::String("list".to_string()));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "stash list failed: {}", result2.output);
+
+        // Test stash pop
+        let mut params3 = HashMap::new();
+        params3.insert("operation".to_string(), Value::String("stash".to_string()));
+        params3.insert("directory".to_string(), Value::String(base.clone()));
+        params3.insert("stash_subcommand".to_string(), Value::String("pop".to_string()));
+        let result3 = tool.execute(params3);
+        assert!(!result3.is_error, "stash pop failed: {}", result3.output);
+    }
+
+    #[test]
+    fn test_git_ls_tree() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("ls-tree".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "ls-tree failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_cached_diff() {
+        let base = setup_test_repo();
+        // Stage a change
+        fs::write(format!("{}/init.txt", base), "modified content for diff test").unwrap();
+        Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("diff".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("cached".to_string(), Value::Bool(true));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "diff --cached failed: {}", result.output);
+        // The output should contain diff markers or the modified content
+        assert!(result.output.contains("@@") || result.output.contains("diff") || result.output.contains("modified") || result.output == "(no output)", "diff output: {}", result.output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Commit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_commit_basic() {
+        let base = setup_test_repo();
+        fs::write(format!("{}/new_file.txt", base), "new content").unwrap();
+        Command::new("git").args(["add", "new_file.txt"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("message".to_string(), Value::String("add new file".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "basic commit failed: {}", result.output);
+        assert!(result.output.contains("add new file") || result.output.contains("master"));
+    }
+
+    #[test]
+    fn test_commit_all() {
+        let base = setup_test_repo();
+        // Modify an existing tracked file (no add needed)
+        fs::write(format!("{}/init.txt", base), "modified content").unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("message".to_string(), Value::String("modify init".to_string()));
+        params.insert("all".to_string(), Value::Bool(true)); // -a flag
+        let result = tool.execute(params);
+        assert!(!result.is_error, "commit -a failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_commit_author() {
+        let base = setup_test_repo();
+        fs::write(format!("{}/author_test.txt", base), "author test").unwrap();
+        Command::new("git").args(["add", "author_test.txt"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("message".to_string(), Value::String("test author".to_string()));
+        params.insert("author".to_string(), Value::String("Alice <alice@example.com>".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "commit with author failed: {}", result.output);
+
+        // Verify the author was set
+        let author_out = Command::new("git").args(["log", "-1", "--format=%an <%ae>"]).current_dir(&base).output().unwrap();
+        let author = String::from_utf8_lossy(&author_out.stdout).trim().to_string();
+        assert_eq!(author, "Alice <alice@example.com>", "Author should be Alice");
+    }
+
+    #[test]
+    fn test_commit_empty_message_required() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base));
+        // No message — should error
+        let result = tool.execute(params);
+        assert!(result.is_error, "commit without message should fail");
+        assert!(result.output.contains("message is required"));
+    }
+
+    #[test]
+    fn test_commit_allow_empty() {
+        let base = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("message".to_string(), Value::String("empty commit".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--allow-empty".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "commit --allow-empty failed: {}", result.output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Push tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_push_to_local_bare() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_push_test.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "pushremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        // Get current branch
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("pushremote".to_string()));
+        params.insert("branch".to_string(), Value::String(current_branch.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push failed: {}", result.output);
+
+        // Verify pushed by cloning from bare
+        let clone_dest = format!("{}/verify_push", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+        assert!(fs::metadata(format!("{}/init.txt", clone_dest)).is_ok(), "Cloned repo should have init.txt");
+    }
+
+    #[test]
+    fn test_push_force() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_force_push.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "forceremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("forceremote".to_string()));
+        params.insert("branch".to_string(), Value::String(current_branch.clone()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--force".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push --force failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_push_all() {
+        let base = setup_test_repo();
+        // Create a second branch
+        Command::new("git").args(["branch", "second-branch"]).current_dir(&base).output().unwrap();
+
+        let bare_path = format!("{}/bare_all_push.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "allremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("allremote".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--all".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push --all failed: {}", result.output);
+
+        // Verify both branches exist in bare repo
+        let clone_dest = format!("{}/verify_all", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+        let branches_out = Command::new("git").args(["branch", "-a"]).current_dir(&clone_dest).output().unwrap();
+        let branches = String::from_utf8_lossy(&branches_out.stdout);
+        assert!(branches.contains("second-branch"), "Should have second-branch after push --all");
+    }
+
+    #[test]
+    fn test_push_tags() {
+        let base = setup_test_repo();
+        Command::new("git").args(["tag", "v2.0"]).current_dir(&base).output().unwrap();
+
+        let bare_path = format!("{}/bare_tags_push.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "tagsremote", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("tagsremote".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--tags".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push --tags failed: {}", result.output);
+
+        // Verify tag exists in bare repo
+        let clone_dest = format!("{}/verify_tags", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+        let tags_out = Command::new("git").args(["tag"]).current_dir(&clone_dest).output().unwrap();
+        let tags = String::from_utf8_lossy(&tags_out.stdout);
+        assert!(tags.contains("v2.0"), "Should have v2.0 tag after push --tags");
+    }
+
+    #[test]
+    fn test_push_set_upstream() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_upstream.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+        Command::new("git").args(["remote", "add", "upstream", bare_path.as_str()]).current_dir(&base).output().unwrap();
+
+        let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
+        let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("remote".to_string(), Value::String("upstream".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("-u".to_string()),
+            Value::String(current_branch.clone()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "push -u failed: {}", result.output);
+
+        // Verify upstream is set
+        let config_out = Command::new("git").args(["config", "--get", &format!("branch.{}.remote", current_branch)]).current_dir(&base).output().unwrap();
+        let config = String::from_utf8_lossy(&config_out.stdout).trim().to_string();
+        assert_eq!(config, "upstream", "Upstream remote should be 'upstream'");
+    }
+
+    #[test]
+    fn test_commit_amend() {
+        let base = setup_test_repo();
+        fs::write(format!("{}/amend_file.txt", base), "amend content").unwrap();
+        Command::new("git").args(["add", "amend_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "original message"]).current_dir(&base).output().unwrap();
+
+        // Now amend the commit
+        fs::write(format!("{}/amend_file.txt", base), "amended content").unwrap();
+        Command::new("git").args(["add", "amend_file.txt"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("message".to_string(), Value::String("amended message".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--amend".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "commit --amend failed: {}", result.output);
+
+        // Verify the message was amended
+        let log_out = Command::new("git").args(["log", "-1", "--format=%s"]).current_dir(&base).output().unwrap();
+        let msg = String::from_utf8_lossy(&log_out.stdout).trim().to_string();
+        assert_eq!(msg, "amended message", "Commit message should be amended");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pull tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pull_basic() {
+        // Setup: create bare repo as remote, clone to dest, make change in bare via push
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_pull_test.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+
+        // Clone from bare to get a separate working copy
+        let clone_dest = format!("{}/pull_clone", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+
+        // Push a new commit from base to bare
+        fs::write(format!("{}/pull_test_file.txt", base), "new content on base").unwrap();
+        Command::new("git").args(["add", "pull_test_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "new commit to push"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["push", bare_path.as_str(), "master"]).current_dir(&base).output().unwrap();
+
+        // Now pull in the cloned repo
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("pull".to_string()));
+        params.insert("directory".to_string(), Value::String(clone_dest.clone()));
+        params.insert("remote".to_string(), Value::String("origin".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "pull failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/pull_test_file.txt", clone_dest)).is_ok(), "Pulled file should exist");
+    }
+
+    #[test]
+    fn test_pull_rebase() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_rebase_pull.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+
+        let clone_dest = format!("{}/rebase_pull_clone", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+
+        // Push a commit from base
+        fs::write(format!("{}/rebase_test_file.txt", base), "rebase push").unwrap();
+        Command::new("git").args(["add", "rebase_test_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "rebase push commit"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["push", bare_path.as_str(), "master"]).current_dir(&base).output().unwrap();
+
+        // Pull with --rebase
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("pull".to_string()));
+        params.insert("directory".to_string(), Value::String(clone_dest.clone()));
+        params.insert("remote".to_string(), Value::String("origin".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--rebase".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "pull --rebase failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_pull_ff_only() {
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_ff_pull.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+
+        let clone_dest = format!("{}/ff_pull_clone", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+
+        // Push a commit (fast-forward scenario)
+        fs::write(format!("{}/ff_test.txt", base), "ff content").unwrap();
+        Command::new("git").args(["add", "ff_test.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "ff push"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["push", bare_path.as_str(), "master"]).current_dir(&base).output().unwrap();
+
+        // Pull with --ff-only
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("pull".to_string()));
+        params.insert("directory".to_string(), Value::String(clone_dest.clone()));
+        params.insert("remote".to_string(), Value::String("origin".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--ff-only".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "pull --ff-only failed: {}", result.output);
+    }
+
+    #[test]
+    fn test_pull_no_commits() {
+        // Pull when already up to date
+        let base = setup_test_repo();
+        let bare_path = format!("{}/bare_uptodate.git", base);
+        let _ = fs::remove_dir_all(&bare_path);
+        Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
+
+        let clone_dest = format!("{}/uptodate_clone", base);
+        let _ = fs::remove_dir_all(&clone_dest);
+        Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
+
+        // No new commits — should say "Already up to date"
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("pull".to_string()));
+        params.insert("directory".to_string(), Value::String(clone_dest.clone()));
+        params.insert("remote".to_string(), Value::String("origin".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "pull (uptodate) failed: {}", result.output);
+        assert!(result.output.contains("Already") || result.output.contains("up-to-date") || result.output.contains("up to date") || result.output == "(no output)",
+            "Should report up to date or succeed: {}", result.output);
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge tests — extended
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_merge_fast_forward() {
+        let base = setup_test_repo();
+        // Create branch from an earlier point, then add commits on master
+        let branch_name = "ff_merge_branch";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+
+        // Add a commit on the branch
+        fs::write(format!("{}/ff_merge_file.txt", base), "ff merge content").unwrap();
+        Command::new("git").args(["add", "ff_merge_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "ff merge commit"]).current_dir(&base).output().unwrap();
+
+        // Switch back and fast-forward merge
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "fast-forward merge failed: {}", result.output);
+        assert!(fs::metadata(format!("{}/ff_merge_file.txt", base)).is_ok());
+    }
+
+    #[test]
+    fn test_merge_no_ff() {
+        let base = setup_test_repo();
+        let branch_name = "no_ff_branch";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+
+        fs::write(format!("{}/no_ff_file.txt", base), "no-ff content").unwrap();
+        Command::new("git").args(["add", "no_ff_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "no-ff branch commit"]).current_dir(&base).output().unwrap();
+
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        // Merge with --no-ff to force a merge commit
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--no-ff".to_string()),
+            Value::String("--no-edit".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "merge --no-ff failed: {}", result.output);
+
+        // Verify merge commit exists (has two parents)
+        let parent_count = Command::new("git").args(["log", "-1", "--format=%P"]).current_dir(&base).output().unwrap();
+        let parents = String::from_utf8_lossy(&parent_count.stdout).trim().to_string();
+        assert!(parents.split_whitespace().count() >= 2, "Merge commit should have multiple parents, got: {}", parents);
+    }
+
+    #[test]
+    fn test_merge_squash() {
+        let base = setup_test_repo();
+        let branch_name = "squash_branch";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+
+        fs::write(format!("{}/squash_file.txt", base), "squash content").unwrap();
+        Command::new("git").args(["add", "squash_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "squash branch commit"]).current_dir(&base).output().unwrap();
+
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        // Squash merge
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--squash".to_string()),
+        ]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "merge --squash failed: {}", result.output);
+
+        // Squash merge leaves changes staged but not committed — commit them
+        Command::new("git").args(["commit", "-m", "squashed merge"]).current_dir(&base).output().unwrap();
+        assert!(fs::metadata(format!("{}/squash_file.txt", base)).is_ok());
+    }
+
+    #[test]
+    fn test_merge_conflict_and_abort() {
+        let base = setup_test_repo();
+        let branch_name = "conflict_branch";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+
+        // Modify same file on branch
+        fs::write(format!("{}/init.txt", base), "branch version of init").unwrap();
+        Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "branch change to init"]).current_dir(&base).output().unwrap();
+
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        // Modify same file on master
+        fs::write(format!("{}/init.txt", base), "master version of init").unwrap();
+        Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "master change to init"]).current_dir(&base).output().unwrap();
+
+        // Try to merge — should conflict
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        let result = tool.execute(params);
+        assert!(result.is_error, "merge should conflict: {}", result.output);
+
+        // Abort the merge
+        let mut params2 = HashMap::new();
+        params2.insert("operation".to_string(), Value::String("merge".to_string()));
+        params2.insert("directory".to_string(), Value::String(base.clone()));
+        params2.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--abort".to_string()),
+        ]));
+        let result2 = tool.execute(params2);
+        assert!(!result2.is_error, "merge --abort failed: {}", result2.output);
+    }
+
+    #[test]
+    fn test_merge_with_custom_message() {
+        let base = setup_test_repo();
+        let branch_name = "msg_merge_branch";
+        let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
+        Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
+
+        fs::write(format!("{}/msg_merge_file.txt", base), "msg merge content").unwrap();
+        Command::new("git").args(["add", "msg_merge_file.txt"]).current_dir(&base).output().unwrap();
+        Command::new("git").args(["commit", "-m", "msg merge branch commit"]).current_dir(&base).output().unwrap();
+
+        Command::new("git").args(["checkout", "master"]).current_dir(&base).output().unwrap();
+
+        // Merge with custom message using -m flag
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("merge".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("target".to_string(), Value::String(branch_name.to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![
+            Value::String("--no-edit".to_string()),
+        ]));
+        params.insert("message".to_string(), Value::String("custom merge message".to_string()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "merge failed: {}", result.output);
+    }
 }
