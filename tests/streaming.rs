@@ -765,7 +765,7 @@ fn build_sse_body(events: &[serde_json::Value]) -> String {
 }
 
 /// Helper: run process_sse_events against a mock server
-async fn run_sse_stream(sse_body: &str) -> anyhow::Result<Vec<ToolCallInfo>> {
+async fn run_sse_stream(sse_body: &str) -> anyhow::Result<miniclaudecode_rust::streaming::StreamResult> {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -828,7 +828,7 @@ async fn sse_stream_text_only_response() {
 
     let body = build_sse_body(&events);
     let result = run_sse_stream(&body).await.unwrap();
-    assert!(result.is_empty());
+    assert!(result.tool_calls.is_empty());
 }
 
 #[tokio::test]
@@ -863,10 +863,10 @@ async fn sse_stream_tool_call_response() {
 
     let body = build_sse_body(&events);
     let result = run_sse_stream(&body).await.unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].id, "toolu_01");
-    assert_eq!(result[0].name, "read_file");
-    assert_eq!(result[0].arguments, r#"{"path":"/tmp/f.txt"}"#);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].id, "toolu_01");
+    assert_eq!(result.tool_calls[0].name, "read_file");
+    assert_eq!(result.tool_calls[0].arguments, r#"{"path":"/tmp/f.txt"}"#);
 }
 
 #[tokio::test]
@@ -896,7 +896,9 @@ async fn sse_stream_thinking_then_text() {
 
     let body = build_sse_body(&events);
     let result = run_sse_stream(&body).await.unwrap();
-    assert!(result.is_empty());
+    assert!(result.tool_calls.is_empty());
+    assert_eq!(result.thinking, "Analyzing...");
+    assert_eq!(result.text, "Done.");
 }
 
 #[tokio::test]
@@ -928,9 +930,9 @@ async fn sse_stream_multiple_tool_calls() {
 
     let body = build_sse_body(&events);
     let result = run_sse_stream(&body).await.unwrap();
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0].name, "exec");
-    assert_eq!(result[1].name, "grep");
+    assert_eq!(result.tool_calls.len(), 2);
+    assert_eq!(result.tool_calls[0].name, "exec");
+    assert_eq!(result.tool_calls[1].name, "grep");
 }
 
 #[tokio::test]
@@ -976,8 +978,8 @@ async fn sse_stream_non_sse_json_response() {
     .await
     .unwrap();
 
-    assert!(result.is_empty());
-    assert_eq!(collect.full_response(), "Direct JSON answer");
+    assert!(result.tool_calls.is_empty());
+    assert_eq!(result.text, "Direct JSON answer");
 }
 
 #[tokio::test]
@@ -1089,7 +1091,7 @@ async fn sse_stream_non_sse_json_with_tool_calls() {
     .await
     .unwrap();
 
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].name, "exec");
-    assert_eq!(result[0].id, "toolu_non_sse");
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].name, "exec");
+    assert_eq!(result.tool_calls[0].id, "toolu_non_sse");
 }

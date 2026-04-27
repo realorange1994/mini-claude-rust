@@ -1119,10 +1119,9 @@ impl AgentLoop {
             return Err(anyhow!("Request cancelled by user"));
         }
 
-        result?;
-
-        let tool_calls = collect.tool_calls();
-        let text = collect.full_response();
+        let stream_result = result?;
+        let tool_calls = stream_result.tool_calls;
+        let text = stream_result.text;
         let is_confused = collect.is_tool_use_as_text();
 
         if is_confused {

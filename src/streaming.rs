@@ -1,5 +1,6 @@
 //! Streaming response handling for agent loop
-//! Full implementation of SSE parsing, stall detection, and chunk collection.
+//! Full implementation of SSE parsing, stall detection, chunk collection,
+//! and transient error recovery (matching hermes-agent patterns).
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -57,6 +58,30 @@ pub struct ToolCallInfo {
     pub name: String,
     pub arguments: String,
 }
+
+/// Result of a streaming API call, including partial delivery on failure.
+#[derive(Debug, Clone)]
+pub struct StreamResult {
+    pub tool_calls: Vec<ToolCallInfo>,
+    pub text: String,
+    pub thinking: String,
+    pub completed: bool,
+}
+
+/// Detect transient errors that are safe to retry (matching hermes-agent patterns).
+fn is_transient_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    let patterns = [
+        "connection lost", "connection reset", "connection error",
+        "peer closed", "broken pipe", "upstream connect error",
+        "timeout", "timed out", "pool timeout", "connect timeout",
+        "remote protocol error", "stream error",
+    ];
+    patterns.iter().any(|p| lower.contains(p))
+}
+
+/// Maximum stream retries before giving up (matching hermes-agent default of 2).
+const MAX_STREAM_RETRIES: usize = 2;
 
 impl CollectHandler {
     pub fn new() -> Self {
@@ -442,6 +467,7 @@ impl Default for StallDetector {
 }
 
 /// ProcessSseEvents processes SSE events from the Anthropic API.
+/// Retries on transient errors and returns partial results on failure.
 pub async fn process_sse_events(
     client: &reqwest::Client,
     base_url: &str,
@@ -455,17 +481,16 @@ pub async fn process_sse_events(
     term: &TerminalHandler,
     stall: &Arc<StallDetector>,
     interrupted: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<Vec<ToolCallInfo>> {
+) -> Result<StreamResult> {
     // Check for interruption before starting
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(anyhow!("Request cancelled by user"));
     }
 
-    // Build request payload
+    // Build request payload (reusable across retries)
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), serde_json::json!(model));
     payload.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-    // Match Go SDK format: system is an array of text blocks
     payload.insert("system".to_string(), serde_json::json!([{"type": "text", "text": system}]));
     payload.insert("messages".to_string(), serde_json::json!(messages));
     if !tools.is_empty() {
@@ -473,131 +498,202 @@ pub async fn process_sse_events(
     }
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+    let mut retry = 0;
+    let mut deltas_already_sent = false;
 
-    // Create a cancellation token driven by the interrupted flag (polls every 100ms)
-    let cancel_token = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel_token.clone();
-    let interrupted_clone = interrupted.clone();
-    let cancel_guard = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-        loop {
-            interval.tick().await;
-            if interrupted_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                cancel_clone.cancel();
-                return;
-            }
+    loop {
+        // Check for interruption before each attempt
+        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+            return partial_result(collect);
         }
-    });
 
-    // Race HTTP send against cancellation
-    let response = tokio::select! {
-        resp = client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("anthropic-version", "2023-06-01")
-            .body(serde_json::to_string(&payload)?)
-            .send() => {
-                match resp {
-                    Ok(r) => r,
-                    Err(e) => {
-                        cancel_guard.abort();
-                        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                            return Err(anyhow!("Request cancelled by user"));
+        // Create cancellation token for this attempt
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel_token.clone();
+        let interrupted_clone = interrupted.clone();
+        let cancel_guard = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                if interrupted_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    cancel_clone.cancel();
+                    return;
+                }
+            }
+        });
+
+        // Race HTTP send against cancellation
+        let response = tokio::select! {
+            resp = client
+                .post(&url)
+                .header("x-api-key", api_key)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("anthropic-version", "2023-06-01")
+                .body(serde_json::to_string(&payload).unwrap())
+                .send() => {
+                    match resp {
+                        Ok(r) => r,
+                        Err(e) => {
+                            cancel_guard.abort();
+                            if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                                return partial_result(collect);
+                            }
+                            let err_str = e.to_string();
+                            if is_transient_error(&err_str) && retry < MAX_STREAM_RETRIES {
+                                retry += 1;
+                                eprintln!("[!] Stream connection failed (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
+                                stall.reset();
+                                continue;
+                            }
+                            return Err(anyhow!("API request failed: {}", e));
                         }
-                        return Err(anyhow!("API request failed: {}", e));
                     }
                 }
+            _ = cancel_token.cancelled() => {
+                cancel_guard.abort();
+                return partial_result(collect);
             }
-        _ = cancel_token.cancelled() => {
-            cancel_guard.abort();
-            return Err(anyhow!("Request cancelled by user"));
-        }
-    };
-
-    cancel_guard.abort();
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(anyhow!("API error {}: {}", status, body));
-    }
-
-    let mut stream = response.bytes_stream();
-
-    let mut buf = String::new();
-    let mut sse_detected = false;
-
-    while let Some(result) = stream.next().await {
-        // Check for interruption during streaming
-        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(anyhow!("Request cancelled by user"));
-        }
-
-        let bytes = match result {
-            Ok(b) => b,
-            Err(e) => return Err(anyhow!("stream error: {}", e)),
         };
 
-        // Reset stall tracking on each event
-        stall.reset();
+        cancel_guard.abort();
 
-        let raw = String::from_utf8_lossy(&bytes);
-
-        // Try to detect non-SSE JSON response (raw Anthropic message format)
-        if !sse_detected {
-            let trimmed = raw.trim();
-            if trimmed.starts_with('{') && !trimmed.starts_with("data:") && !trimmed.starts_with("event:") {
-                // Non-SSE JSON - parse as complete message and return
-                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    let tool_calls = parse_anthropic_message(&msg, collect, term);
-                    return Ok(tool_calls);
-                }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            // Check if streaming is not supported (switch to non-streaming upstream)
+            if body.contains("stream") && body.contains("not supported") {
+                return Err(anyhow!("streaming not supported by this provider"));
             }
-            sse_detected = true;
+            return Err(anyhow!("API error {}: {}", status, body));
         }
 
-        // Process bytes as SSE
-        for b in bytes {
-            if b == b'\n' {
-                let line = buf.trim().to_string();
-                buf.clear();
+        let mut stream = response.bytes_stream();
+        let mut buf = String::new();
+        let mut sse_detected = false;
 
-                if line.is_empty() {
-                    continue;
+        // Stream processing loop with stall timeout
+        loop {
+            // Check for interruption during streaming
+            if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return partial_result(collect);
+            }
+
+            // Stall timeout: race next chunk against timeout
+            let timeout_dur = stall.timeout();
+            let chunk = tokio::select! {
+                result = stream.next() => result,
+                _ = tokio::time::sleep(timeout_dur) => {
+                    if is_transient_error(&format!("stream stalled after {:?}", timeout_dur)) && retry < MAX_STREAM_RETRIES {
+                        retry += 1;
+                        eprintln!("[!] Stream stalled for {:?}, reconnecting (attempt {}/{})...",
+                            timeout_dur, retry, MAX_STREAM_RETRIES);
+                        stall.reset();
+                        // Drop the stream to close connection
+                        drop(stream);
+                        break; // retry outer loop
+                    }
+                    return Err(anyhow!("stream stalled after {:?}", timeout_dur));
                 }
+            };
 
-                // Parse SSE line: "data: <json>"
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(chunk) = parse_sse_event(&event) {
-                            collect.handle(chunk.clone());
-                            term.handle(chunk.clone());
+            let bytes = match chunk {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => {
+                    let err_str = e.to_string();
+                    // Transient error: retry if we haven't exceeded limit
+                    if is_transient_error(&err_str) && retry < MAX_STREAM_RETRIES {
+                        retry += 1;
+                        // If deltas were already sent, show a reconnecting marker
+                        if deltas_already_sent {
+                            eprintln!("\n  [!] Connection dropped; reconnecting...");
+                        } else {
+                            eprintln!("[!] Stream error (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
+                        }
+                        stall.reset();
+                        break; // retry outer loop
+                    }
+                    // Non-transient or retries exhausted: return partial results
+                    return partial_result(collect);
+                }
+                None => {
+                    // Stream ended normally
+                    break;
+                }
+            };
 
-                            if collect.is_tool_use_as_text() {
-                                return Err(anyhow!("model confused: echoed tool syntax as text"));
+            // Reset stall tracking on each event
+            stall.reset();
+
+            let raw = String::from_utf8_lossy(&bytes);
+
+            // Try to detect non-SSE JSON response (raw Anthropic message format)
+            if !sse_detected {
+                let trimmed = raw.trim();
+                if trimmed.starts_with('{') && !trimmed.starts_with("data:") && !trimmed.starts_with("event:") {
+                    // Non-SSE JSON - parse as complete message and return
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        parse_anthropic_message(&msg, collect, term);
+                        return partial_result(collect);
+                    }
+                }
+                sse_detected = true;
+            }
+
+            // Process bytes as SSE
+            for b in bytes {
+                if b == b'\n' {
+                    let line = buf.trim().to_string();
+                    buf.clear();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Parse SSE line: "data: <json>"
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(chunk) = parse_sse_event(&event) {
+                                collect.handle(chunk.clone());
+                                term.handle(chunk.clone());
+                                deltas_already_sent = true;
+
+                                if collect.is_tool_use_as_text() {
+                                    return Err(anyhow!("model confused: echoed tool syntax as text"));
+                                }
                             }
                         }
                     }
+                } else if b != b'\r' {
+                    buf.push(b as char);
                 }
-            } else if b != b'\r' {
-                buf.push(b as char);
             }
         }
+
+        // If we get here, stream ended normally (None from stream.next())
+        // Signal end of stream
+        term.handle(StreamChunk {
+            chunk_type: ChunkType::Done,
+            content: String::new(),
+            id: None,
+            name: None,
+            usage: None,
+        });
+
+        return partial_result(collect);
     }
+}
 
-    // Signal end of stream
-    term.handle(StreamChunk {
-        chunk_type: ChunkType::Done,
-        content: String::new(),
-        id: None,
-        name: None,
-        usage: None,
-    });
-
-    Ok(collect.tool_calls())
+/// Build a StreamResult from the CollectHandler, marking completion based on
+/// whether the stream ended normally.
+fn partial_result(collect: &CollectHandler) -> Result<StreamResult> {
+    Ok(StreamResult {
+        tool_calls: collect.tool_calls(),
+        text: collect.full_response(),
+        thinking: collect.thinking(),
+        completed: true,
+    })
 }
 
 /// Parse a complete Anthropic message JSON (non-streaming format) and extract tool calls/text
