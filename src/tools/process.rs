@@ -123,10 +123,16 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -151,10 +157,16 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(format!("Killed process {}", pid))
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        stderr.trim().to_string()
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -175,12 +187,19 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                if o.status.success() && stdout.trim().is_empty() {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let out = stdout.trim().to_string();
+                if out.is_empty() {
                     ToolResult::ok(format!("No processes matching '{}' found", pattern))
                 } else if o.status.success() {
-                    ToolResult::ok(stdout.trim().to_string())
+                    ToolResult::ok(out)
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let err_out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", out, stderr.trim())
+                    } else {
+                        out
+                    };
+                    ToolResult::error(err_out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -201,12 +220,18 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if stdout.trim().is_empty() {
                     ToolResult::ok(format!("No processes matching '{}' found", pattern))
                 } else if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -223,10 +248,16 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -236,16 +267,22 @@ impl ProcessTool {
     #[cfg(target_os = "windows")]
     fn windows_pstree(&self) -> ToolResult {
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Get-Process | Select-Object -First 30 Id, ProcessName, @{N='Parent';E={(Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.Id)\").ParentProcessId}} | Format-Table -AutoSize"])
+            .args(["-NoProfile", "-Command", r#"Get-Process | Select-Object -First 30 Id, ProcessName, @{N='Parent';E={(Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").ParentProcessId}} | Format-Table -AutoSize"#])
             .output();
 
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -263,10 +300,16 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -347,10 +390,18 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                if o.status.success() {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if o.status.success() && !stdout.trim().is_empty() {
                     ToolResult::ok(stdout.trim().to_string())
-                } else {
+                } else if o.status.success() {
                     ToolResult::ok(format!("No processes matching '{}' found", pattern))
+                } else {
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        format!("No processes matching '{}' found", pattern)
+                    };
+                    ToolResult::ok(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -359,17 +410,23 @@ impl ProcessTool {
 
     #[cfg(not(target_os = "windows"))]
     fn unix_top(&self, params: HashMap<String, Value>) -> ToolResult {
+        let lines = params.get("lines").and_then(|v| v.as_i64()).unwrap_or(10) as usize;
         let output = Command::new("top").args(["-b", "-n", "1"]).output();
 
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
-                    let lines = params.get("lines").and_then(|v| v.as_i64()).unwrap_or(10) as usize;
                     let top_lines: Vec<&str> = stdout.lines().take(lines + 6).collect();
                     ToolResult::ok(top_lines.join("\n"))
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -383,10 +440,16 @@ impl ProcessTool {
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
                 if o.status.success() {
                     ToolResult::ok(stdout.trim().to_string())
                 } else {
-                    ToolResult::error(stdout.trim().to_string())
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
                 }
             }
             Err(e) => ToolResult::error(format!("Error: {}", e)),
@@ -395,7 +458,14 @@ impl ProcessTool {
 }
 
 fn sanitize_ps_input(s: &str) -> String {
+    // Strip PowerShell metacharacters to prevent command injection.
+    // Matches Go's sanitizePSInput behavior.
     s.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == '\\')
+        .filter(|c| {
+            !matches!(
+                c,
+                '\'' | '"' | '`' | '$' | ';' | '&' | '|' | '(' | ')' | '{' | '}' | '<' | '>' | '\n' | '\r'
+            )
+        })
         .collect()
 }
