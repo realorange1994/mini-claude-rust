@@ -29,7 +29,7 @@ struct Args {
     mode: String,
 
     /// Max agent loop turns per message
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 90)]
     max_turns: usize,
 
     /// Enable streaming output

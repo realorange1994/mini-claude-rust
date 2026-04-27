@@ -37,7 +37,7 @@ impl Default for Config {
             model: "claude-sonnet-4-20250514".to_string(),
             api_key: None,
             base_url: None,
-            max_turns: 30,
+            max_turns: 90,
             max_context_msgs: 100,
             permission_mode: PermissionMode::Ask,
             allowed_commands: vec![
