@@ -940,6 +940,19 @@ impl AgentLoop {
                         continue;
                     }
 
+                    // Truncated tool arguments - model was cut off mid-tool-call
+                    if err_str.contains("truncated") || err_str.contains("incomplete JSON") {
+                        eprintln!("[!] Tool arguments were truncated, injecting corrective hint...");
+                        continue_reason = ContinueReason::MaxOutputTokens;
+                        let mut ctx = self.context.write().await;
+                        ctx.add_user_message(
+                            "ERROR: Your tool call arguments was cut off due to length limits. \
+                            Do NOT repeat the truncated tool call. \
+                            If you need to make multiple tool calls, make them one at a time with shorter arguments.".to_string(),
+                        );
+                        continue;
+                    }
+
                     eprintln!("[!] Turn failed: {}", e);
 
                     // Detect context length error
@@ -1124,8 +1137,31 @@ impl AgentLoop {
         let text = stream_result.text;
         let is_confused = collect.is_tool_use_as_text();
 
+        // If stream returned partial results (retry exhausted), signal transient
+        // error so the outer retry loop in call_with_retry_and_fallback retries
+        // with a fresh connection. This prevents the agent loop from acting on
+        // incomplete tool calls.
+        if !stream_result.completed {
+            eprintln!("[!] Stream returned partial results, retrying with fresh connection");
+            return Err(anyhow!("stream returned partial result (partial delivery)"));
+        }
+
         if is_confused {
             return Err(anyhow!("model confused: echoed tool syntax as text"));
+        }
+
+        // Check for truncated tool arguments (matching Hermes truncated arg detection).
+        // If tool args are incomplete JSON, the model was cut off mid-tool-call.
+        // Return error so the agent loop can retry with corrective hint.
+        if collect.has_truncated_tool_args() {
+            let names: Vec<_> = tool_calls.iter().map(|t| t.name.clone()).collect();
+            eprintln!("[!] Tool arguments truncated: {:?}, injecting corrective hint", names);
+            return Err(anyhow!("tool arguments were truncated (incomplete JSON)"));
+        }
+
+        // Log finish_reason for debugging
+        if let Some(reason) = stream_result.finish_reason {
+            eprintln!("[DEBUG] Stream finish_reason={}", reason);
         }
 
         Ok((tool_calls, text))
@@ -1513,6 +1549,7 @@ pub fn is_transient_error(err_str: &str) -> bool {
         "broken pipe",
         "temporary",
         "transient",
+        "partial",
     ];
 
     let err_lower = err_str.to_lowercase();

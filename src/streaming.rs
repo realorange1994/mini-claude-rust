@@ -50,6 +50,7 @@ pub struct CollectHandler {
     thinking: RwLock<String>,
     tool_use_as_text: RwLock<bool>,
     usage: RwLock<Option<Usage>>,
+    finish_reason: RwLock<Option<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -66,6 +67,13 @@ pub struct StreamResult {
     pub text: String,
     pub thinking: String,
     pub completed: bool,
+    /// Why the stream ended. Matches Anthropic stop_reason values:
+    /// - "end_turn": normal completion
+    /// - "stop_sequence": stop sequence hit
+    /// - "max_tokens": output token limit reached
+    /// - "tool_use": model yielded to tool use
+    /// - None: stream ended abnormally (error, stall, interrupt)
+    pub finish_reason: Option<String>,
 }
 
 /// Detect transient errors that are safe to retry (matching hermes-agent patterns).
@@ -91,6 +99,7 @@ impl CollectHandler {
             thinking: RwLock::new(String::new()),
             tool_use_as_text: RwLock::new(false),
             usage: RwLock::new(None),
+            finish_reason: RwLock::new(None),
         }
     }
 
@@ -173,6 +182,60 @@ impl CollectHandler {
     /// Get tool calls
     pub fn tool_calls(&self) -> Vec<ToolCallInfo> {
         self.tool_calls.read().unwrap().clone()
+    }
+
+    /// Set the finish reason from the stream
+    pub fn set_finish_reason(&self, reason: String) {
+        let mut fr = self.finish_reason.write().unwrap();
+        *fr = Some(reason);
+    }
+
+    /// Get the finish reason
+    pub fn finish_reason(&self) -> Option<String> {
+        self.finish_reason.read().unwrap().clone()
+    }
+
+    /// Check if there's a partial (incomplete) tool call being accumulated.
+    /// A tool call is partial if it has an id/name but no arguments yet completed
+    /// (the stream cut off mid-tool-call, so args may be incomplete JSON).
+    pub fn has_partial_tool_call(&self) -> bool {
+        let calls = self.tool_calls.read().unwrap();
+        if calls.is_empty() {
+            return false;
+        }
+        // Last tool call has no arguments — stream cut off during tool_use block
+        let last = calls.last().unwrap();
+        last.arguments.is_empty()
+    }
+
+    /// Check if any tool call has truncated (invalid JSON) arguments.
+    /// Matching Hermes: if JSON parse fails, the tool args were cut off mid-stream.
+    pub fn has_truncated_tool_args(&self) -> bool {
+        let calls = self.tool_calls.read().unwrap();
+        for call in calls.iter() {
+            if !call.arguments.is_empty() {
+                if serde_json::from_str::<serde_json::Value>(&call.arguments).is_err() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Clear the last partial tool call and any trailing arguments.
+    /// Used before retry to avoid duplicating tool_call entries on reconnect.
+    pub fn clear_partial_tool_call(&self) {
+        let mut calls = self.tool_calls.write().unwrap();
+        if !calls.is_empty() {
+            calls.pop();
+        }
+    }
+
+    /// Clear all pending text that was already streamed to the user.
+    /// Used when retry cannot recover text deltas (text-only case).
+    pub fn clear_text(&self) {
+        let mut text = self.text.write().unwrap();
+        text.clear();
     }
 
     /// Get usage info
@@ -402,10 +465,8 @@ pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
 /// StallDetector monitors streaming for stalls
 pub struct StallDetector {
     last_event: RwLock<Instant>,
-    #[allow(dead_code)]
-    stall_timeout: Duration,
-    #[allow(dead_code)]
-    startup_timeout: Duration,
+    stall_timeout: RwLock<Duration>,
+    startup_timeout: RwLock<Duration>,
     stall_count: RwLock<usize>,
 }
 
@@ -413,10 +474,32 @@ impl StallDetector {
     pub fn new() -> Self {
         Self {
             last_event: RwLock::new(Instant::now()),
-            stall_timeout: Duration::from_secs(90),
-            startup_timeout: Duration::from_secs(120),
+            stall_timeout: RwLock::new(Duration::from_secs(90)),
+            startup_timeout: RwLock::new(Duration::from_secs(120)),
             stall_count: RwLock::new(0),
         }
+    }
+
+    /// Configure timeouts dynamically based on provider and context size.
+    /// - Local providers: very long timeouts (effectively no stall detection)
+    /// - Large contexts (>50K tokens): 240s stall, 300s startup
+    /// - Very large contexts (>100K tokens): 300s stall, 360s startup
+    /// - Default: 90s stall, 120s startup
+    pub fn configure(&self, is_local: bool, context_tokens: usize) {
+        let mut stall = self.stall_timeout.write().unwrap();
+        let mut startup = self.startup_timeout.write().unwrap();
+        if is_local {
+            // Local providers can be very slow on cold start — use very long timeouts
+            *stall = Duration::from_secs(300);
+            *startup = Duration::from_secs(600);
+        } else if context_tokens > 100_000 {
+            *stall = Duration::from_secs(300);
+            *startup = Duration::from_secs(360);
+        } else if context_tokens > 50_000 {
+            *stall = Duration::from_secs(240);
+            *startup = Duration::from_secs(300);
+        }
+        // else: keep defaults (90s / 120s)
     }
 
     /// Reset timer on successful event
@@ -431,8 +514,9 @@ impl StallDetector {
     #[allow(dead_code)]
     pub fn check_stall(&self) -> Option<Duration> {
         let last = *self.last_event.read().unwrap();
+        let stall = self.stall_timeout.read().unwrap();
         let elapsed = last.elapsed();
-        if elapsed > self.stall_timeout {
+        if elapsed > *stall {
             Some(elapsed)
         } else {
             None
@@ -451,11 +535,13 @@ impl StallDetector {
     #[allow(dead_code)]
     pub fn timeout(&self) -> Duration {
         let last = *self.last_event.read().unwrap();
-        if last.elapsed() < self.startup_timeout {
+        let startup = self.startup_timeout.read().unwrap();
+        let stall = self.stall_timeout.read().unwrap();
+        if last.elapsed() < *startup {
             // Use startup timeout until first event
-            self.startup_timeout
+            *startup
         } else {
-            self.stall_timeout
+            *stall
         }
     }
 }
@@ -468,6 +554,11 @@ impl Default for StallDetector {
 
 /// ProcessSseEvents processes SSE events from the Anthropic API.
 /// Retries on transient errors and returns partial results on failure.
+///
+/// Retry strategy (matching hermes-agent):
+/// - No deltas sent yet: clean retry, accumulators untouched
+/// - Deltas sent + tool call in-flight: clear partial tool, retry with marker
+/// - Deltas sent (text only): return partial stub (can't retry without duplicating text)
 pub async fn process_sse_events(
     client: &reqwest::Client,
     base_url: &str,
@@ -487,6 +578,11 @@ pub async fn process_sse_events(
         return Err(anyhow!("Request cancelled by user"));
     }
 
+    // Configure stall detector based on provider and context size
+    let estimated_tokens = estimate_message_tokens(messages) + system.len() / 4;
+    let is_local = is_local_endpoint(base_url);
+    stall.configure(is_local, estimated_tokens);
+
     // Build request payload (reusable across retries)
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), serde_json::json!(model));
@@ -499,12 +595,14 @@ pub async fn process_sse_events(
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
     let mut retry = 0;
-    let mut deltas_already_sent = false;
+    // Track what was already delivered to the user so we can decide
+    // whether retry is safe or would cause duplication.
+    let mut deltas_state = DeltasState::None; // tracks: none, text_only, tool_in_flight
 
     loop {
         // Check for interruption before each attempt
         if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-            return partial_result(collect);
+            return partial_result(collect, false);
         }
 
         // Create cancellation token for this attempt
@@ -538,22 +636,27 @@ pub async fn process_sse_events(
                         Err(e) => {
                             cancel_guard.abort();
                             if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                                return partial_result(collect);
+                                return partial_result(collect, false);
                             }
                             let err_str = e.to_string();
                             if is_transient_error(&err_str) && retry < MAX_STREAM_RETRIES {
                                 retry += 1;
                                 eprintln!("[!] Stream connection failed (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
                                 stall.reset();
+                                // Before retry: clear any partial tool call to avoid duplicates
+                                if matches!(deltas_state, DeltasState::ToolInFlight(_)) {
+                                    collect.clear_partial_tool_call();
+                                }
                                 continue;
                             }
-                            return Err(anyhow!("API request failed: {}", e));
+                            // Non-transient or retries exhausted
+                            return partial_result(collect, false);
                         }
                     }
                 }
             _ = cancel_token.cancelled() => {
                 cancel_guard.abort();
-                return partial_result(collect);
+                return partial_result(collect, false);
             }
         };
 
@@ -577,7 +680,7 @@ pub async fn process_sse_events(
         loop {
             // Check for interruption during streaming
             if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                return partial_result(collect);
+                return partial_result(collect, false);
             }
 
             // Stall timeout: race next chunk against timeout
@@ -585,16 +688,21 @@ pub async fn process_sse_events(
             let chunk = tokio::select! {
                 result = stream.next() => result,
                 _ = tokio::time::sleep(timeout_dur) => {
-                    if is_transient_error(&format!("stream stalled after {:?}", timeout_dur)) && retry < MAX_STREAM_RETRIES {
+                    if retry < MAX_STREAM_RETRIES {
                         retry += 1;
                         eprintln!("[!] Stream stalled for {:?}, reconnecting (attempt {}/{})...",
                             timeout_dur, retry, MAX_STREAM_RETRIES);
                         stall.reset();
                         // Drop the stream to close connection
                         drop(stream);
+                        // Before retry: clear partial tool if in-flight
+                        if matches!(deltas_state, DeltasState::ToolInFlight(_)) {
+                            collect.clear_partial_tool_call();
+                        }
                         break; // retry outer loop
                     }
-                    return Err(anyhow!("stream stalled after {:?}", timeout_dur));
+                    // Retries exhausted, return partial
+                    return partial_result(collect, false);
                 }
             };
 
@@ -605,17 +713,29 @@ pub async fn process_sse_events(
                     // Transient error: retry if we haven't exceeded limit
                     if is_transient_error(&err_str) && retry < MAX_STREAM_RETRIES {
                         retry += 1;
-                        // If deltas were already sent, show a reconnecting marker
-                        if deltas_already_sent {
-                            eprintln!("\n  [!] Connection dropped; reconnecting...");
-                        } else {
-                            eprintln!("[!] Stream error (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
-                        }
                         stall.reset();
+
+                        // Decide retry strategy based on what was already sent
+                        match &deltas_state {
+                            DeltasState::None => {
+                                // Nothing sent yet — clean retry
+                                eprintln!("[!] Stream error (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
+                            }
+                            DeltasState::ToolInFlight(_) => {
+                                // Tool call started but incomplete — clear partial, retry
+                                eprintln!("\n  [!] Connection dropped mid-tool-call; reconnecting (attempt {}/{})...", retry, MAX_STREAM_RETRIES);
+                                collect.clear_partial_tool_call();
+                            }
+                            DeltasState::TextOnly => {
+                                // Text already streamed to user — can't retry without duplication
+                                eprintln!("\n  [!] Stream interrupted after text output, returning partial result...");
+                                return partial_result(collect, false);
+                            }
+                        }
                         break; // retry outer loop
                     }
                     // Non-transient or retries exhausted: return partial results
-                    return partial_result(collect);
+                    return partial_result(collect, false);
                 }
                 None => {
                     // Stream ended normally
@@ -635,7 +755,7 @@ pub async fn process_sse_events(
                     // Non-SSE JSON - parse as complete message and return
                     if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
                         parse_anthropic_message(&msg, collect, term);
-                        return partial_result(collect);
+                        return partial_result(collect, true);
                     }
                 }
                 sse_detected = true;
@@ -654,10 +774,33 @@ pub async fn process_sse_events(
                     // Parse SSE line: "data: <json>"
                     if let Some(data) = line.strip_prefix("data: ") {
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                            // Extract stop_reason from message_delta (matching Hermes finish_reason tracking)
+                            if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
+                                if event_type == "message_delta" {
+                                    if let Some(delta) = event.get("delta") {
+                                        if let Some(stop_reason) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                                            collect.set_finish_reason(stop_reason.to_string());
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Some(chunk) = parse_sse_event(&event) {
+                                // Track delta state: what type of content was delivered
+                                match &chunk.chunk_type {
+                                    ChunkType::ToolCall => {
+                                        // A tool call started — track it as in-flight
+                                        deltas_state = DeltasState::ToolInFlight(chunk.id.clone());
+                                    }
+                                    ChunkType::Text if matches!(deltas_state, DeltasState::None) => {
+                                        // First text delta, no tool call yet
+                                        deltas_state = DeltasState::TextOnly;
+                                    }
+                                    _ => {}
+                                }
+
                                 collect.handle(chunk.clone());
                                 term.handle(chunk.clone());
-                                deltas_already_sent = true;
 
                                 if collect.is_tool_use_as_text() {
                                     return Err(anyhow!("model confused: echoed tool syntax as text"));
@@ -681,18 +824,62 @@ pub async fn process_sse_events(
             usage: None,
         });
 
-        return partial_result(collect);
+        return partial_result(collect, true);
     }
 }
 
-/// Build a StreamResult from the CollectHandler, marking completion based on
-/// whether the stream ended normally.
-fn partial_result(collect: &CollectHandler) -> Result<StreamResult> {
+/// Tracks what content was already streamed to the user, used to decide
+/// whether a retry is safe or would cause text duplication.
+#[derive(Debug, Clone)]
+enum DeltasState {
+    /// No deltas sent yet — clean retry is safe
+    None,
+    /// Text was already streamed — retry would duplicate text
+    TextOnly,
+    /// A tool call started with this ID but may be incomplete
+    ToolInFlight(Option<String>),
+}
+
+/// Estimate total message tokens (rough: ~4 chars per token).
+/// Used to configure stall timeout for large contexts.
+fn estimate_message_tokens(messages: &[serde_json::Value]) -> usize {
+    let mut total_chars = 0;
+    for msg in messages {
+        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    total_chars += text.len();
+                }
+                // Tool results and tool_use blocks are smaller in token count
+            }
+        }
+        if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+            total_chars += text.len();
+        }
+    }
+    total_chars / 4 // rough estimate: ~4 chars per token
+}
+
+/// Detect if the base_url points to a local provider (localhost, 127.0.0.1, etc.)
+fn is_local_endpoint(base_url: &str) -> bool {
+    let lower = base_url.to_lowercase();
+    lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("0.0.0.0")
+        || lower.contains("::1")
+        || lower.contains("local")
+}
+
+/// Build a StreamResult from the CollectHandler.
+/// `completed` is true when the stream ended normally, false when partial results
+/// are returned after a failure — this lets the agent loop distinguish success from failure.
+fn partial_result(collect: &CollectHandler, completed: bool) -> Result<StreamResult> {
     Ok(StreamResult {
         tool_calls: collect.tool_calls(),
         text: collect.full_response(),
         thinking: collect.thinking(),
-        completed: true,
+        completed,
+        finish_reason: collect.finish_reason(),
     })
 }
 
