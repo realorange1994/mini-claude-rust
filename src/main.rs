@@ -234,7 +234,17 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
             continue;
         }
 
-        if user_input.starts_with('/') {
+        // Check for exact command match — only treat as command if the first
+        // word is a known command. Unknown /xxx is passed through as prompt text.
+        let is_known_cmd = if user_input.starts_with('/') {
+            let parts: Vec<&str> = user_input.split_whitespace().collect();
+            let cmd = parts.first().unwrap_or(&"").to_lowercase();
+            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume")
+        } else {
+            false
+        };
+
+        if is_known_cmd {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
             let cmd = parts.first().unwrap_or(&"").to_lowercase();
 
@@ -254,10 +264,11 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                 }
                 "/mode" => {
                     if let Some(mode) = parts.get(1) {
-                        match *mode {
+                        let mode_lower = mode.to_lowercase();
+                        match mode_lower.as_str() {
                             "ask" | "auto" | "plan" => {
-                                agent.config.permission_mode = PermissionMode::from_str(mode);
-                                println!("Mode changed to: {}", mode);
+                                agent.config.permission_mode = PermissionMode::from_str(&mode_lower);
+                                println!("Mode changed to: {}", mode_lower);
                             }
                             _ => {
                                 println!("Unknown mode: {}", mode);
@@ -327,10 +338,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     }
                     continue;
                 }
-                _ => {
-                    println!("Unknown command: {}. Type /help for help.", cmd);
-                    continue;
-                }
+                _ => unreachable!(),
             }
         }
 
