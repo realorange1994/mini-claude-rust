@@ -118,6 +118,12 @@ fn main() -> Result<()> {
     cfg.permission_mode = PermissionMode::from_str(&args.mode);
     cfg.max_turns = args.max_turns;
 
+    // Validate: model is required
+    if cfg.model.is_empty() {
+        eprintln!("[!] No model specified. Set it via --model flag, ANTHROPIC_MODEL env, or model in .claude/settings.json");
+        std::process::exit(1);
+    }
+
     // Always initialize file history (with disk persistence) — shared Arc between tools and agent_loop
     use miniclaudecode_rust::filehistory::FileHistory;
     use std::sync::Arc;
@@ -306,7 +312,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                         match agent_loop::AgentLoop::from_transcript(
                             agent.config.clone(),
                             registry,
-                            true, // use stream
+                            agent.use_stream,
                             &transcript_path.unwrap(),
                         ) {
                             Ok(new_agent) => {

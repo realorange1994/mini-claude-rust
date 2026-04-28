@@ -34,7 +34,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: String::new(),
             api_key: None,
             base_url: None,
             max_turns: 90,
@@ -163,14 +163,6 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
             }
             if let Some(model) = settings.env.anthropic_model {
                 cfg.model = model;
-            } else if let Some(model) = settings.env.anthropic_default_sonnet_model {
-                cfg.model = model;
-            } else if let Some(model) = settings.env.anthropic_default_opus_model {
-                cfg.model = model;
-            } else if let Some(model) = settings.env.anthropic_default_haiku_model {
-                cfg.model = model;
-            } else if let Some(model) = settings.env.anthropic_reasoning_model {
-                cfg.model = model;
             }
 
             // Load MCP servers from settings.json
@@ -230,7 +222,7 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     cfg.file_history = Some(Arc::new(FileHistory::new_with_dir(&snapshots_dir)));
 
     // Return found if any config was loaded
-    if cfg.api_key.is_some() || cfg.model != Config::default().model || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {
+    if cfg.api_key.is_some() || !cfg.model.is_empty() || cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty()) {
         Some(cfg)
     } else {
         None

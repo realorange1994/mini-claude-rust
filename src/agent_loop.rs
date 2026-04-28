@@ -42,7 +42,7 @@ pub struct AgentLoop {
     gate: PermissionGate,
     context: Arc<RwLock<ConversationContext>>,
     client: reqwest::Client,
-    use_stream: bool,
+    pub use_stream: bool,
     max_tool_chars: usize,
     max_turns: usize,
     base_url: String,
