@@ -148,6 +148,7 @@ impl AgentLoop {
         registry: Registry,
         use_stream: bool,
         transcript_path: &Path,
+        continue_transcript: bool,
     ) -> Result<Self> {
         let api_key = config.api_key.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
@@ -191,19 +192,23 @@ impl AgentLoop {
 
         let context = Self::rebuild_context_from_transcript(&entries, config.clone());
 
-        // Create new transcript file for this session
-        let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let transcript_dir = PathBuf::from(".claude").join("transcripts");
-        let _ = std::fs::create_dir_all(&transcript_dir);
-        let new_transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
-        let new_transcript = Transcript::new(&new_transcript_path);
-
-        // Log resume info
-        let _ = new_transcript.add_user(format!(
-            "Resumed from {} ({} messages restored)",
-            transcript_path.display(),
-            entries.len()
-        ));
+        // Create transcript writer: continue original file or start new session
+        let new_transcript = if continue_transcript {
+            Transcript::new(&transcript_path.to_path_buf())
+        } else {
+            let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            let transcript_dir = PathBuf::from(".claude").join("transcripts");
+            let _ = std::fs::create_dir_all(&transcript_dir);
+            let path = transcript_dir.join(format!("{}.jsonl", session_id));
+            let t = Transcript::new(&path);
+            let _ = t.add_system(format!("model={}, mode={}", config.model, config.permission_mode));
+            let _ = t.add_user(format!(
+                "Resumed from {} ({} messages restored)",
+                transcript_path.display(),
+                entries.len()
+            ));
+            t
+        };
 
         let compactor = RwLock::new(
             Compactor::new()
