@@ -558,8 +558,6 @@ impl AgentLoop {
             // Rebuild messages from current context state (includes tool results)
             let messages = self.entries_to_messages_async().await;
 
-            eprintln!();
-
             // Call with retry and fallback
             let result = self.call_with_retry_and_fallback(
                 system_prompt,
