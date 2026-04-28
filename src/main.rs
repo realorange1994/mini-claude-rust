@@ -208,17 +208,14 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         println!("\n[Interrupted] Press Ctrl+C again within 2s to exit, or continue working.");
     }).expect("Failed to set Ctrl+C handler");
 
-    let stdin = io::stdin();
     let mut stdout = io::stdout();
 
     loop {
         print!("\n> ");
         stdout.flush().unwrap();
 
-        // Simple read_line - no BufReader. On Windows, stdin.lock() is reentrant,
-        // so ask_user() can also read from stdin concurrently without conflict.
         let mut input = String::new();
-        match stdin.read_line(&mut input) {
+        match io::stdin().read_line(&mut input) {
             Ok(0) => {
                 // EOF — stdin was closed
                 println!("\nGoodbye!");
@@ -228,10 +225,24 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
             }
             Ok(_) => {}
             Err(_) => {
-                println!("\nGoodbye!");
-                println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
-                agent.close();
-                break;
+                // On Windows, Ctrl+C breaks the stdin handle.
+                // Reopen CONIN$ to recover stdin, then continue the loop.
+                // The interrupted flag was set by the signal handler, clear it.
+                interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                // On Windows, reopen the console input to recover from the broken handle
+                #[cfg(target_os = "windows")]
+                {
+                    use std::fs::File;
+                    use std::io::BufRead;
+                    let mut retry = String::new();
+                    if let Ok(f) = File::open("CONIN$") {
+                        let mut reader = io::BufReader::new(f);
+                        // Drain the ^C character that may be in the buffer
+                        let _ = reader.read_line(&mut retry);
+                    }
+                }
+                continue;
             }
         }
 
