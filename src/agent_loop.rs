@@ -955,7 +955,7 @@ impl AgentLoop {
 
                     // Detect context length error
                     if err_str.contains("context_length") || err_str.contains("prompt is too long") ||
-                       err_str.contains("400") || err_str.contains("stream stalled") || err_str.contains("context canceled") {
+                       err_str.contains("400") || err_str.contains("stream stalled") {
                         context_errors += 1;
                         continue_reason = ContinueReason::PromptTooLong;
 
