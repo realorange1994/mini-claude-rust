@@ -265,13 +265,6 @@ impl Tool for GitTool {
                     return ToolResult::error(err_msg);
                 }
 
-                // Warn about non-zero exit codes even if success
-                if let Some(code) = output.status.code() {
-                    if code != 0 {
-                        result = format!("Warning: command succeeded but exit code was {}.\n\n{}", code, result);
-                    }
-                }
-
                 ToolResult {
                     output: result,
                     is_error: false,
