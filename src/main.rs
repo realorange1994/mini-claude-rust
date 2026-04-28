@@ -147,7 +147,7 @@ fn main() -> Result<()> {
         tools::register_builtin_tools(&resume_registry);
         tools::register_mcp_and_skills(&resume_registry, &cfg);
 
-        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, args.stream, &transcript_path, args.resume.as_deref() == Some("last")) {
+        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, args.stream, &transcript_path, true) {
             Ok(agent) => {
                 println!("[+] Resumed session from: {}", transcript_path.display());
                 agent
@@ -325,7 +325,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                             registry,
                             agent.use_stream,
                             &transcript_path.unwrap(),
-                            target == "last",
+                            true,
                         ) {
                             Ok(new_agent) => {
                                 agent = new_agent;
