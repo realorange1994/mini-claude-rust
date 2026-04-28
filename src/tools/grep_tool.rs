@@ -265,8 +265,9 @@ fn rg_search(
         let type_map = get_type_map();
         if let Some(exts) = type_map.get(&type_filter.to_lowercase()) {
             for e in exts {
+                let glob = if e.starts_with('*') { e.clone() } else { format!("*{}", e) };
                 args.push("--type-add".to_string());
-                args.push(format!("mytype:{}", e));
+                args.push(format!("mytype:{}", glob));
             }
             args.push("--type".to_string());
             args.push("mytype".to_string());
@@ -283,17 +284,19 @@ fn rg_search(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let success = output.status.success();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let is_error = !output.status.success() && exit_code != 1;
     let combined = format!("{}{}", stdout, stderr);
-    let output = combined.trim().to_string();
-    if output.is_empty() {
-        if !success {
+    let text = combined.trim().to_string();
+    if text.is_empty() {
+        // rg exits with code 1 when no matches found — not a real error
+        if is_error {
             return ToolResult::error(format!("Error running rg: {}", stderr.trim()));
         }
         return ToolResult::ok("No matches found.".to_string());
     }
 
-    let mut lines: Vec<&str> = output.lines().collect();
+    let mut lines: Vec<&str> = text.lines().collect();
     if offset > 0 && offset < lines.len() {
         lines = lines[offset..].to_vec();
     }
