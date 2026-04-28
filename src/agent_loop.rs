@@ -938,6 +938,15 @@ impl AgentLoop {
                         continue;
                     }
 
+                    // 2013 error: tool_result doesn't follow tool_call — repair pairing before retry
+                    if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
+                        eprintln!("[!] Tool pairing error (2013), repairing context...");
+                        let mut ctx = self.context.write().await;
+                        ctx.validate_tool_pairing();
+                        ctx.fix_role_alternation();
+                        continue;
+                    }
+
                     // Truncated tool arguments - model was cut off mid-tool-call
                     if err_str.contains("truncated") || err_str.contains("incomplete JSON") {
                         eprintln!("[!] Tool arguments were truncated, injecting corrective hint...");
