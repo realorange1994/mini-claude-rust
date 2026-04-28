@@ -183,13 +183,44 @@ impl Tool for GitTool {
                 .map(PathBuf::from)
         };
 
-        let args = build_git_args(&params, operation);
-        if args.is_err() {
-            return ToolResult::error(args.unwrap_err());
+        // Check remote configuration for operations that need it
+        if matches!(operation, "push" | "pull" | "fetch") {
+            let remote = params.get("remote").and_then(|v| v.as_str());
+            if remote.is_none() {
+                // Check if there's an origin remote configured
+                let mut check_cmd = Command::new("git");
+                check_cmd.args(["remote"]);
+                if let Some(ref dir) = work_dir {
+                    check_cmd.current_dir(dir);
+                }
+                match check_cmd.output() {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if !stdout.contains("origin") {
+                            return ToolResult::error(format!(
+                                "Error: no remote specified and no 'origin' remote found. Available remotes:\n{}",
+                                stdout.trim()
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return ToolResult::error(format!(
+                            "Error: cannot determine git remotes: {}. Make sure you're in a git repository.",
+                            e
+                        ));
+                    }
+                }
+            }
         }
 
+        let args = build_git_args(&params, operation);
+        if let Err(e) = &args {
+            return ToolResult::error(format!("Error building command: {}", e));
+        }
+        let args = args.unwrap();
+
         let mut cmd = Command::new("git");
-        cmd.args(&args.unwrap());
+        cmd.args(&args);
 
         if let Some(proxy) = params.get("proxy").and_then(|v| v.as_str()) {
             cmd.env("https_proxy", proxy);
@@ -222,12 +253,34 @@ impl Tool for GitTool {
                     result = "(no output)".to_string();
                 }
 
+                // Check exit code and provide detailed error on failure
+                if !output.status.success() {
+                    let exit_code = output.status.code().unwrap_or(-1);
+                    let cmd_str = format!("git {}", args.join(" "));
+                    let err_msg = if result.is_empty() || result == "(no output)" {
+                        format!("Error: '{}' failed with exit code {}", cmd_str, exit_code)
+                    } else {
+                        format!("Error: '{}' failed with exit code {}.\n\nOutput:\n{}", cmd_str, exit_code, result)
+                    };
+                    return ToolResult::error(err_msg);
+                }
+
+                // Warn about non-zero exit codes even if success
+                if let Some(code) = output.status.code() {
+                    if code != 0 {
+                        result = format!("Warning: command succeeded but exit code was {}.\n\n{}", code, result);
+                    }
+                }
+
                 ToolResult {
                     output: result,
-                    is_error: !output.status.success(),
+                    is_error: false,
                 }
             }
-            Err(e) => ToolResult::error(format!("Error: {}", e)),
+            Err(e) => {
+                let cmd_str = format!("git {}", args.join(" "));
+                ToolResult::error(format!("Error executing '{}': {}. Make sure git is installed and accessible.", cmd_str, e))
+            }
         }
     }
 }
