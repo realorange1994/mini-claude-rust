@@ -395,18 +395,28 @@ fn expand_git_reference(
     }
 
     let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let content = if content.is_empty() {
-        "(no output)".to_string()
+    let (content, is_empty) = if content.is_empty() {
+        // Provide context-specific empty messages so the model understands what "empty" means
+        let empty_msg = match label {
+            "@diff" => "(working tree is clean — no unstaged changes)",
+            "@staged" => "(nothing staged — no staged changes to commit)",
+            s if s.starts_with("@git:") => "(no commits found in this repository)",
+            _ => "(no output)",
+        };
+        (empty_msg.to_string(), true)
     } else {
-        content
+        (content, false)
     };
 
     let tokens = content.len() / 4;
 
-    (
-        format!("## {} ({} tokens)\n```diff\n{}\n```", label, tokens, content),
-        String::new(),
-    )
+    let block = if is_empty {
+        format!("## {} (0 tokens)\n{}", label, content)
+    } else {
+        format!("## {} ({} tokens)\n```diff\n{}\n```", label, tokens, content)
+    };
+
+    (block, String::new())
 }
 
 fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
