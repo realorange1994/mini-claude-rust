@@ -312,6 +312,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                 }
                 "/clear" => {
                     let count = agent.clear_context();
+                    agent.registry.blocking_read().clear_files_read();
                     if count > 0 {
                         println!("[clear] Cleared {} messages.", count);
                     } else {

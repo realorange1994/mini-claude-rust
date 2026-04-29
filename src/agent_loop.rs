@@ -768,7 +768,8 @@ impl AgentLoop {
                                     let tool_name = tc.name.clone();
 
                                     // Capture path for post-execution snapshot before params is moved
-                                    let snapshot_path = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
+                                    // Also captures read_file path for mark_file_read tracking
+                                    let snapshot_path = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" || tool_name == "read_file" {
                                         params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p))
                                     } else {
                                         None
@@ -813,10 +814,23 @@ impl AgentLoop {
                                         }
                                     }
 
+                                    // Clone snapshot_path for use both inside and after spawn_blocking
+                                    let snapshot_path_post = snapshot_path.clone();
+
                                     // Execute tool on blocking thread pool — ensures synchronous
                                     // syscalls don't block the async runtime's core threads.
                                     let tool_result = tokio::time::timeout(tool_timeout, tokio::task::spawn_blocking(move || {
                                         let registry = registry_clone.blocking_read();
+
+                                        // Read-before-edit enforcement: file must be read and unmodified
+                                        if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
+                                            if let Some(path) = &snapshot_path {
+                                                if let Err(msg) = registry.check_file_stale(&path.to_string_lossy()) {
+                                                    return ToolResult::error(msg);
+                                                }
+                                            }
+                                        }
+
                                         let tool = registry.get(&tool_name);
                                         match tool {
                                             Some(t) => {
@@ -833,7 +847,14 @@ impl AgentLoop {
                                                         eprintln!("[coercion] {}", w);
                                                     }
                                                 }
-                                                t.execute(coerced)
+                                                let result = t.execute(coerced);
+                                                // Mark file as read after successful read_file
+                                                if !result.is_error && tool_name == "read_file" {
+                                                    if let Some(path) = &snapshot_path {
+                                                        registry.mark_file_read(&path.to_string_lossy());
+                                                    }
+                                                }
+                                                result
                                             }
                                             None => ToolResult::error(format!("Tool not found: {}", tool_name)),
                                         }
@@ -844,7 +865,7 @@ impl AgentLoop {
                                         Ok(Ok(result)) => {
                                             // Post-execution snapshot: captures new files and final state
                                             if !result.is_error {
-                                                if let Some(path) = snapshot_path.as_ref() {
+                                                if let Some(path) = snapshot_path_post.as_ref() {
                                                     let _ = file_history.snapshot_current_with_desc(path, snapshot_desc.clone());
                                                 }
                                                 // Clear file history for deleted files (rm/rmrf)

@@ -33,7 +33,7 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists."
+        "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists. You must read the file first with read_file before writing to an existing file."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {

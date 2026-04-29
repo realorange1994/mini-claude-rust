@@ -40,6 +40,7 @@ pub use web_search::WebSearchTool;
 use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 /// ToolResult holds the output of a tool execution with structured metadata
 #[derive(Debug, Clone, Default)]
@@ -161,12 +162,16 @@ pub trait Tool: Send + Sync {
 /// Registry collects tool instances and provides lookup
 pub struct Registry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Tracks which files have been read by read_file and their mtime at read time
+    /// (for read-before-edit and stale-detection)
+    files_read: Arc<RwLock<HashMap<String, SystemTime>>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
+            files_read: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -185,6 +190,62 @@ impl Registry {
         let tools = self.tools.read().unwrap();
         tools.values().cloned().collect()
     }
+
+    /// Mark a file as having been read, storing its current mtime
+    pub fn mark_file_read(&self, path: &str) {
+        let normalized = normalize_file_path(path);
+        let mtime = std::fs::metadata(expand_path(path))
+            .ok()
+            .and_then(|m| m.modified().ok());
+        self.files_read.write().unwrap().insert(normalized, mtime.unwrap_or(SystemTime::UNIX_EPOCH));
+    }
+
+    /// Check if a file has been read before and hasn't been modified since
+    /// Returns Ok(()) if safe to edit, or Err(error_message) if not
+    pub fn check_file_stale(&self, path: &str) -> Result<(), String> {
+        let normalized = normalize_file_path(path);
+        let fp = expand_path(path);
+
+        // New file creation: file doesn't exist yet, allow without read
+        if !fp.exists() {
+            return Ok(());
+        }
+
+        let guard = self.files_read.read().unwrap();
+        let stored_mtime = guard.get(&normalized).copied();
+        drop(guard);
+
+        let stored = stored_mtime.ok_or("Error: file has not been read yet. Read it first with read_file before editing.".to_string())?;
+
+        match std::fs::metadata(&fp) {
+            Ok(meta) => {
+                let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                if current_mtime == stored {
+                    Ok(())
+                } else {
+                    Err("Error: file has been modified since read, either by the user or by a linter. Read it again before attempting to write it.".to_string())
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File was deleted — not a staleness issue for new file creation
+                Ok(())
+            }
+            Err(e) => {
+                Err(format!("Error: cannot check file status: {}", e))
+            }
+        }
+    }
+
+    /// Clear the read-file tracking (e.g., on /clear)
+    pub fn clear_files_read(&self) {
+        self.files_read.write().unwrap().clear();
+    }
+}
+
+/// Normalize a file path for consistent comparison (lowercase on Windows, forward slashes)
+fn normalize_file_path(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    p.to_lowercase()
 }
 
 impl Default for Registry {

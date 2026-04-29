@@ -31,7 +31,7 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string with a new string. Provide enough context in old_string to uniquely identify the target."
+        "Edit a file by replacing an exact string with a new string. You must read the file first with read_file before editing. Provide enough context in old_string to uniquely identify the target."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {

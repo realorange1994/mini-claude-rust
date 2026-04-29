@@ -31,7 +31,7 @@ impl Tool for MultiEditTool {
     }
 
     fn description(&self) -> &str {
-        "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. Accepts a list of {old_string, new_string} pairs."
+        "Apply multiple search/replace edits to a file atomically. If any edit fails, all are rolled back. You must read the file first with read_file before editing. Accepts a list of {old_string, new_string} pairs."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
