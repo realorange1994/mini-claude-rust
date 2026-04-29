@@ -10,10 +10,10 @@ use tempfile::TempDir;
 #[test]
 fn config_default() {
     let cfg = Config::default();
-    assert_eq!(cfg.model, "claude-sonnet-4-20250514");
+    assert_eq!(cfg.model, "");
     assert!(cfg.api_key.is_none());
     assert!(cfg.base_url.is_none());
-    assert_eq!(cfg.max_turns, 30);
+    assert_eq!(cfg.max_turns, 90);
     assert_eq!(cfg.max_context_msgs, 100);
     assert_eq!(cfg.permission_mode, PermissionMode::Ask);
     assert!(cfg.mcp_manager.is_none());
@@ -26,7 +26,7 @@ fn config_default() {
 #[test]
 fn config_new() {
     let cfg = Config::new();
-    assert_eq!(cfg.max_turns, 30);
+    assert_eq!(cfg.max_turns, 90);
 }
 
 #[test]
