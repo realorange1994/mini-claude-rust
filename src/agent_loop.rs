@@ -1707,8 +1707,20 @@ impl AgentLoop {
             };
         }
 
+        // If too few messages, nothing to compact
+        if messages.len() <= 3 {
+            return crate::compact::CompactStats {
+                phase: crate::compact::CompactPhase::None,
+                entries_before,
+                entries_after: entries_before,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: tokens_before,
+                estimated_tokens_after: tokens_before,
+            };
+        }
+
         // Use local truncation: keep system + last N messages
-        let keep_last = 10; // Keep last 10 messages as tail
+        let keep_last = 10;
         let total = messages.len();
         let split = if total > keep_last + 1 { total - keep_last } else { 1 };
 
