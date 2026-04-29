@@ -255,84 +255,125 @@ impl Default for CollectHandler {
 /// TerminalHandler prints clean output to terminal
 // --- Thinking block filter state machine (Hermes-style) ---
 
-/// State machine for filtering <thinking>...</thinking> and ༽...{{-- blocks
-/// from terminal display. Thinking content is shown in a dimmed style.
+/// Tag constants for the think filter state machine.
+const THINK_OPEN_LONG: &str = "<thinking>";
+const THINK_OPEN_SHORT: &str = "<think>";
+const THINK_CLOSE_LONG: &str = "</thinking>";
+const THINK_CLOSE_SHORT: &str = "</think>";
+
+/// ANSI escape codes for dim/gray styling of thinking content.
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+/// State machine for filtering `<thinking>...</thinking>`, `<think>...</think>`,
+/// and Anthropic extended thinking blocks from terminal display.
+/// Thinking content is shown in a dimmed style; tag markers are stripped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkFilterState {
-    /// Normal text — pass through
+    /// Normal text — pass through as-is
     Normal,
-    /// Detected '<' that might start <thinking> or ༽
+    /// Detected `<` that might start `<thinking>` or `<think>`; consuming tag
     InThinkOpenTag,
-    /// Inside a thinking block — suppress or dim
+    /// Inside a thinking block — output content with ANSI dim styling
     InThinkBlock,
-    /// Detected '<' that might start </thinking> or ༽
+    /// Detected `<` that might start `</thinking>` or `</think>`; consuming tag
     InThinkCloseTag,
+}
+
+/// Output action from the think filter state machine for a single character.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThinkFilterAction {
+    /// Print this character as normal (non-thinking) text
+    Print(char),
+    /// This character is thinking content; the caller should wrap with dim styling
+    Think(char),
+    /// Suppress this character (it is part of a tag being consumed)
+    Suppress,
+    /// False-alarm recovery: replay these buffered characters as normal text
+    FlushNormal(String),
+    /// False-alarm recovery: replay these buffered characters as thinking text
+    FlushThink(String),
+    /// Transition: just entered a thinking block, emit ANSI dim start code
+    EnterThink,
+    /// Transition: just exited a thinking block, emit ANSI reset code
+    ExitThink,
 }
 
 impl ThinkFilterState {
     /// Process a character through the state machine.
-    /// Returns (new_state, output_char) where output_char is None if the char should be suppressed.
-    pub fn process(self, c: char, buf: &mut String) -> (Self, Option<char>) {
+    /// Returns (new_state, Vec<ThinkFilterAction>) describing what the caller
+    /// should do with this character and any buffered content.
+    pub fn process(self, c: char, buf: &mut String) -> (Self, Vec<ThinkFilterAction>) {
         match self {
             ThinkFilterState::Normal => {
-                buf.push(c);
-                // Check for thinking tag starts
+                // Check for opening tag <think> or <thinking>
                 if c == '<' {
-                    // Could be start of <thinking> or </thinking>
-                    if buf.ends_with("<") {
-                        return (ThinkFilterState::InThinkOpenTag, None);
-                    }
+                    buf.push(c);
+                    return (ThinkFilterState::InThinkOpenTag, vec![ThinkFilterAction::Suppress]);
                 }
-                // Check for ༽ (Anthropic extended thinking close)
-                if buf.ends_with("༽") {
-                    // This is actually the close tag for ༽...{{-- thinking
-                    // But we detect it in Normal state, meaning we just exited
-                }
-                (ThinkFilterState::Normal, Some(c))
+                (ThinkFilterState::Normal, vec![ThinkFilterAction::Print(c)])
             }
             ThinkFilterState::InThinkOpenTag => {
                 buf.push(c);
-                // Check if we're building <thinking>
-                if buf.ends_with("<thinking") {
-                    return (ThinkFilterState::InThinkBlock, None);
+                let buffered = buf.as_str();
+
+                // Check for complete open tags
+                if buffered.ends_with(THINK_OPEN_LONG) || buffered.ends_with(THINK_OPEN_SHORT) {
+                    buf.clear();
+                    return (
+                        ThinkFilterState::InThinkBlock,
+                        vec![ThinkFilterAction::Suppress, ThinkFilterAction::EnterThink],
+                    );
                 }
-                if buf.ends_with("</thinking") {
-                    return (ThinkFilterState::InThinkCloseTag, None);
+
+                // Check if still a potential prefix of either open tag
+                if THINK_OPEN_LONG.starts_with(buffered) || THINK_OPEN_SHORT.starts_with(buffered) {
+                    return (ThinkFilterState::InThinkOpenTag, vec![ThinkFilterAction::Suppress]);
                 }
-                // If we see a '>' that doesn't match, go back to normal
-                if c == '>' && !buf.ends_with("<thinking>") && !buf.ends_with("</thinking>") {
-                    // False alarm — output the buffered tag start
-                    let tag_start = buf.rfind('<').unwrap_or(0);
-                    let _to_output: String = buf.drain(tag_start..).collect();
-                    // We can't easily un-consume, so just go back to normal
-                    return (ThinkFilterState::Normal, None);
-                }
-                // If we see a space or other non-matching char after '<', it's not a thinking tag
-                if !c.is_alphabetic() && c != '/' && c != '>' {
-                    return (ThinkFilterState::Normal, None);
-                }
-                (ThinkFilterState::InThinkOpenTag, None)
+
+                // False alarm: '<' was not part of a thinking tag.
+                // Replay the buffered characters as normal text.
+                let to_flush = buf.clone();
+                buf.clear();
+                (
+                    ThinkFilterState::Normal,
+                    vec![ThinkFilterAction::FlushNormal(to_flush)],
+                )
             }
             ThinkFilterState::InThinkBlock => {
-                // Inside thinking block — suppress output
-                buf.push(c);
-                // Check for closing tag
+                // Check for closing tag </think> or </thinking>
                 if c == '<' {
-                    return (ThinkFilterState::InThinkCloseTag, None);
+                    buf.push(c);
+                    return (ThinkFilterState::InThinkCloseTag, vec![ThinkFilterAction::Suppress]);
                 }
-                (ThinkFilterState::InThinkBlock, None)
+                (ThinkFilterState::InThinkBlock, vec![ThinkFilterAction::Think(c)])
             }
             ThinkFilterState::InThinkCloseTag => {
                 buf.push(c);
-                if buf.ends_with("</thinking>") {
+                let buffered = buf.as_str();
+
+                // Check for complete close tags
+                if buffered.ends_with(THINK_CLOSE_LONG) || buffered.ends_with(THINK_CLOSE_SHORT) {
                     buf.clear();
-                    return (ThinkFilterState::Normal, None);
+                    return (
+                        ThinkFilterState::Normal,
+                        vec![ThinkFilterAction::Suppress, ThinkFilterAction::ExitThink],
+                    );
                 }
-                // If this isn't actually a close tag, go back to InThinkBlock
-                if c == '>' && !buf.ends_with("</thinking>") {
-                    return (ThinkFilterState::InThinkBlock, None);
+
+                // Check if still a potential prefix of either close tag
+                if THINK_CLOSE_LONG.starts_with(buffered) || THINK_CLOSE_SHORT.starts_with(buffered) {
+                    return (ThinkFilterState::InThinkCloseTag, vec![ThinkFilterAction::Suppress]);
                 }
-                (ThinkFilterState::InThinkCloseTag, None)
+
+                // False alarm: '<' in thinking block was not a close tag.
+                // Replay the buffered characters as thinking text.
+                let to_flush = buf.clone();
+                buf.clear();
+                (
+                    ThinkFilterState::InThinkBlock,
+                    vec![ThinkFilterAction::FlushThink(to_flush)],
+                )
             }
         }
     }
@@ -445,6 +486,12 @@ pub struct TerminalHandler {
     thinking_buf: RwLock<String>,
     cur_tool_name: RwLock<String>,
     cur_tool_args: RwLock<String>,
+    /// Think filter state machine: tracks whether we are inside a thinking block
+    think_filter_state: RwLock<ThinkFilterState>,
+    /// Buffer for the think filter state machine (holds partial tag matches)
+    think_filter_buf: RwLock<String>,
+    /// Whether ANSI dim styling is currently active (to avoid duplicate escape codes)
+    think_dim_active: RwLock<bool>,
 }
 
 impl TerminalHandler {
@@ -454,6 +501,9 @@ impl TerminalHandler {
             thinking_buf: RwLock::new(String::new()),
             cur_tool_name: RwLock::new(String::new()),
             cur_tool_args: RwLock::new(String::new()),
+            think_filter_state: RwLock::new(ThinkFilterState::Normal),
+            think_filter_buf: RwLock::new(String::new()),
+            think_dim_active: RwLock::new(false),
         }
     }
 
@@ -495,6 +545,21 @@ impl TerminalHandler {
             }
             ChunkType::Done => {
                 self.flush_tool_call();
+                // Close any open ANSI dim styling at end of stream
+                {
+                    let mut dim = self.think_dim_active.write().unwrap();
+                    if *dim {
+                        eprint!("{}", ANSI_RESET);
+                        *dim = false;
+                    }
+                }
+                // Reset think filter state for next stream
+                {
+                    let mut state = self.think_filter_state.write().unwrap();
+                    *state = ThinkFilterState::Normal;
+                    let mut buf = self.think_filter_buf.write().unwrap();
+                    buf.clear();
+                }
                 let seen = self.seen_tool_call.read().unwrap();
                 if !*seen {
                     let buf = self.thinking_buf.read().unwrap();
@@ -507,9 +572,104 @@ impl TerminalHandler {
             ChunkType::Text => {
                 // Flush any pending tool call before text
                 self.flush_tool_call();
-                // Text is collected by CollectHandler; don't print here
+                // Run text through the think filter state machine
+                self.filter_and_print(&chunk.content);
             }
             _ => {}
+        }
+    }
+
+    /// Run text through the think filter state machine and print to stderr.
+    /// Thinking content is wrapped with ANSI dim codes; tag markers are stripped.
+    /// False-alarm recovery correctly replays buffered characters.
+    fn filter_and_print(&self, text: &str) {
+        let mut state = self.think_filter_state.write().unwrap();
+        let mut buf = self.think_filter_buf.write().unwrap();
+        let mut dim = self.think_dim_active.write().unwrap();
+
+        for c in text.chars() {
+            let (new_state, actions) = state.process(c, &mut buf);
+            *state = new_state;
+
+            for action in actions {
+                match action {
+                    ThinkFilterAction::Print(ch) => {
+                        // If dim is active, close it before printing normal text
+                        if *dim {
+                            eprint!("{}", ANSI_RESET);
+                            *dim = false;
+                        }
+                        eprint!("{}", ch);
+                    }
+                    ThinkFilterAction::Think(ch) => {
+                        // If dim is not active, open it before printing thinking text
+                        if !*dim {
+                            eprint!("{}", ANSI_DIM);
+                            *dim = true;
+                        }
+                        eprint!("{}", ch);
+                    }
+                    ThinkFilterAction::Suppress => {
+                        // Part of a tag — do not print
+                    }
+                    ThinkFilterAction::FlushNormal(flushed) => {
+                        // False alarm: replay buffered characters as normal text
+                        if *dim {
+                            eprint!("{}", ANSI_RESET);
+                            *dim = false;
+                        }
+                        eprint!("{}", flushed);
+                    }
+                    ThinkFilterAction::FlushThink(flushed) => {
+                        // False alarm inside think block: replay as thinking text
+                        if !*dim {
+                            eprint!("{}", ANSI_DIM);
+                            *dim = true;
+                        }
+                        eprint!("{}", flushed);
+                    }
+                    ThinkFilterAction::EnterThink => {
+                        // Entering thinking block — open dim styling
+                        if !*dim {
+                            eprint!("{}", ANSI_DIM);
+                            *dim = true;
+                        }
+                    }
+                    ThinkFilterAction::ExitThink => {
+                        // Exiting thinking block — close dim styling
+                        if *dim {
+                            eprint!("{}", ANSI_RESET);
+                            *dim = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush any remaining partial tag in the buffer at end of stream
+        if !buf.is_empty() {
+            let remaining = buf.clone();
+            buf.clear();
+            match *state {
+                ThinkFilterState::InThinkOpenTag => {
+                    // Partial open tag at end of stream — treat as normal text
+                    if *dim {
+                        eprint!("{}", ANSI_RESET);
+                        *dim = false;
+                    }
+                    eprint!("{}", remaining);
+                    *state = ThinkFilterState::Normal;
+                }
+                ThinkFilterState::InThinkCloseTag => {
+                    // Partial close tag inside thinking block — treat as thinking text
+                    if !*dim {
+                        eprint!("{}", ANSI_DIM);
+                        *dim = true;
+                    }
+                    eprint!("{}", remaining);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1341,5 +1501,219 @@ mod tests {
         progress.record_tool_call();
         progress.record_tool_call();
         assert_eq!(progress.tool_calls_received, 3, "tool_calls_received should increment each time");
+    }
+
+    // --- ThinkFilter state machine tests ---
+
+    fn collect_actions(input: &str) -> Vec<ThinkFilterAction> {
+        let mut state = ThinkFilterState::Normal;
+        let mut buf = String::new();
+        let mut all_actions = Vec::new();
+
+        for c in input.chars() {
+            let (new_state, actions) = state.process(c, &mut buf);
+            state = new_state;
+            all_actions.extend(actions);
+        }
+
+        // Flush any remaining partial tag in the buffer (end-of-stream handling)
+        if !buf.is_empty() {
+            let remaining = buf.clone();
+            buf.clear();
+            match state {
+                ThinkFilterState::InThinkOpenTag => {
+                    all_actions.push(ThinkFilterAction::FlushNormal(remaining));
+                    state = ThinkFilterState::Normal;
+                }
+                ThinkFilterState::InThinkCloseTag => {
+                    all_actions.push(ThinkFilterAction::FlushThink(remaining));
+                }
+                _ => {}
+            }
+        }
+
+        all_actions
+    }
+
+    #[test]
+    fn test_think_filter_long_tag() {
+        // <thinking>...content...</thinking> should produce:
+        // - Suppress for the tags
+        // - EnterThink after open tag
+        // - Think for content
+        // - ExitThink after close tag
+        let input = "<thinking>Hello world</thinking>";
+        let actions = collect_actions(input);
+
+        // Collect the output (what would be printed)
+        let mut output = String::new();
+        let mut think_content = String::new();
+        let mut entered_think = false;
+        let mut exited_think = false;
+
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Print(c) => output.push(*c),
+                ThinkFilterAction::Think(c) => think_content.push(*c),
+                ThinkFilterAction::EnterThink => entered_think = true,
+                ThinkFilterAction::ExitThink => exited_think = true,
+                ThinkFilterAction::Suppress => {}
+                ThinkFilterAction::FlushNormal(s) => output.push_str(s),
+                ThinkFilterAction::FlushThink(s) => think_content.push_str(s),
+            }
+        }
+
+        assert!(entered_think, "Should enter think block");
+        assert!(exited_think, "Should exit think block");
+        assert_eq!(output, "");
+        assert_eq!(think_content, "Hello world");
+    }
+
+    #[test]
+    fn test_think_filter_short_tag() {
+        // <think>...content</think> should work the same as long tags
+        let input = "<think>I am thinking</think>";
+        let actions = collect_actions(input);
+
+        let mut think_content = String::new();
+        let mut entered_think = false;
+        let mut exited_think = false;
+
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Think(c) => think_content.push(*c),
+                ThinkFilterAction::EnterThink => entered_think = true,
+                ThinkFilterAction::ExitThink => exited_think = true,
+                _ => {}
+            }
+        }
+
+        assert!(entered_think, "Should enter think block with short tag");
+        assert!(exited_think, "Should exit think block with short tag");
+        assert_eq!(think_content, "I am thinking");
+    }
+
+    #[test]
+    fn test_think_filter_false_alarm_recovery() {
+        // <notathing> should NOT enter think block; the '<' should be replayed
+        let input = "<notathing>hello";
+        let actions = collect_actions(input);
+
+        let mut output = String::new();
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Print(c) => output.push(*c),
+                ThinkFilterAction::FlushNormal(s) => output.push_str(s),
+                _ => {}
+            }
+        }
+
+        assert_eq!(output, input, "Non-thinking tags should pass through unchanged");
+    }
+
+    #[test]
+    fn test_think_filter_false_alarm_in_think_block() {
+        // Inside a thinking block, <notathing> should NOT exit; should replay as thinking
+        let input = "<thinking>foo<notathing>bar</thinking>";
+        let actions = collect_actions(input);
+
+        let mut think_content = String::new();
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Think(c) => think_content.push(*c),
+                ThinkFilterAction::FlushThink(s) => think_content.push_str(s),
+                _ => {}
+            }
+        }
+
+        assert_eq!(think_content, "foo<notathing>bar", "False alarm inside think block should replay as thinking");
+    }
+
+    #[test]
+    fn test_think_filter_mixed_text_and_thinking() {
+        let input = "Hello <thinking>secret</thinking> world";
+        let actions = collect_actions(input);
+
+        let mut normal = String::new();
+        let mut think = String::new();
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Print(c) => normal.push(*c),
+                ThinkFilterAction::Think(c) => think.push(*c),
+                ThinkFilterAction::FlushNormal(s) => normal.push_str(s),
+                ThinkFilterAction::FlushThink(s) => think.push_str(s),
+                _ => {}
+            }
+        }
+
+        assert_eq!(normal, "Hello  world", "Normal text should pass through");
+        assert_eq!(think, "secret", "Thinking content should be filtered");
+    }
+
+    #[test]
+    fn test_think_filter_partial_tag_not_matched() {
+        // <thi should not match; replay as normal text
+        let input = "<thi";
+        let actions = collect_actions(input);
+
+        let mut output = String::new();
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Print(c) => output.push(*c),
+                ThinkFilterAction::FlushNormal(s) => output.push_str(s),
+                _ => {}
+            }
+        }
+
+        assert_eq!(output, input, "Partial tag at end of stream should be flushed as normal");
+    }
+
+    #[test]
+    fn test_think_filter_state_normal_to_inthinkblock() {
+        let mut state = ThinkFilterState::Normal;
+        let mut buf = String::new();
+
+        // Process '<thinking>' character by character
+        for c in "<thinking>".chars() {
+            let (new_state, _) = state.process(c, &mut buf);
+            state = new_state;
+        }
+
+        assert_eq!(state, ThinkFilterState::InThinkBlock);
+    }
+
+    #[test]
+    fn test_think_filter_state_inthinkblock_to_normal() {
+        let mut state = ThinkFilterState::InThinkBlock;
+        let mut buf = String::new();
+
+        // Process '</thinking>' character by character
+        for c in "</thinking>".chars() {
+            let (new_state, _) = state.process(c, &mut buf);
+            state = new_state;
+        }
+
+        assert_eq!(state, ThinkFilterState::Normal);
+    }
+
+    #[test]
+    fn test_think_filter_multiple_blocks() {
+        let input = "A<thinking>1</thinking>B<thinking>2</thinking>C";
+        let actions = collect_actions(input);
+
+        let mut normal = String::new();
+        let mut think = String::new();
+        for a in &actions {
+            match a {
+                ThinkFilterAction::Print(c) => normal.push(*c),
+                ThinkFilterAction::Think(c) => think.push(*c),
+                ThinkFilterAction::FlushNormal(s) => normal.push_str(s),
+                ThinkFilterAction::FlushThink(s) => think.push_str(s),
+                _ => {}
+            }
+        }
+
+        assert_eq!(normal, "ABC", "Multiple thinking blocks should yield correct normal text");
+        assert_eq!(think, "12", "Multiple thinking blocks should yield all thinking content");
     }
 }
