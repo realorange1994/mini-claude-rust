@@ -202,6 +202,7 @@ pub enum CompactPhase {
     TurnBased,       // Keep first + last 5 entries
     SelectiveClear,  // Keep first + last 3 entries
     Aggressive,      // Keep first + last 2 entries
+    Truncated,       // Simple head truncation (for /compact command)
 }
 
 /// CompactStats tracks compaction metrics
@@ -979,6 +980,9 @@ impl Compactor {
             }
             CompactPhase::Aggressive => {
                 context.minimum_history();
+            }
+            CompactPhase::Truncated => {
+                // Already handled by force_compact in agent_loop
             }
         }
 

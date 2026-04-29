@@ -1687,6 +1687,62 @@ impl AgentLoop {
     pub fn interrupted_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.interrupted.clone()
     }
+
+    /// Force compact the conversation context (for /compact command).
+    /// Uses local truncation-based compaction (no LLM call).
+    pub fn force_compact(&self) -> crate::compact::CompactStats {
+        let mut context = self.context.blocking_write();
+        let messages = context.messages().to_vec();
+        let entries_before = context.len();
+        let tokens_before = crate::compact::estimate_total_tokens(&messages);
+
+        if messages.is_empty() {
+            return crate::compact::CompactStats {
+                phase: crate::compact::CompactPhase::None,
+                entries_before: 0,
+                entries_after: 0,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: 0,
+                estimated_tokens_after: 0,
+            };
+        }
+
+        // Use local truncation: keep system + last N messages
+        let keep_last = 10; // Keep last 10 messages as tail
+        let total = messages.len();
+        let split = if total > keep_last + 1 { total - keep_last } else { 1 };
+
+        // Keep first (system) and last keep_last messages
+        let mut kept = vec![messages[0].clone()];
+        kept.extend(messages[split..].to_vec());
+
+        let tokens_after = crate::compact::estimate_total_tokens(&kept);
+        let saved = tokens_before.saturating_sub(tokens_after);
+
+        // Add compact boundary marker
+        context.add_compact_boundary(crate::context::CompactTrigger::Manual, tokens_before);
+        context.replace_messages(kept);
+
+        let entries_after = context.len();
+
+        crate::compact::CompactStats {
+            phase: crate::compact::CompactPhase::Truncated,
+            entries_before,
+            entries_after,
+            estimated_tokens_saved: saved,
+            estimated_tokens_before: tokens_before,
+            estimated_tokens_after: tokens_after,
+        }
+    }
+
+    /// Clear all conversation messages (for /clear command).
+    /// Returns the number of messages cleared.
+    pub fn clear_context(&self) -> usize {
+        let mut context = self.context.blocking_write();
+        let count = context.len();
+        context.clear();
+        count
+    }
 }
 
 /// Re-export for backward compatibility

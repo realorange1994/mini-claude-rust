@@ -256,7 +256,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         let is_known_cmd = if user_input.starts_with('/') {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
             let cmd = parts.first().unwrap_or(&"").to_lowercase();
-            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume")
+            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/clear")
         } else {
             false
         };
@@ -297,8 +297,37 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     }
                     continue;
                 }
+                "/compact" => {
+                    let stats = agent.force_compact();
+                    if stats.entries_before == 0 {
+                        println!("No messages to compact.");
+                    } else if stats.estimated_tokens_saved > 0 {
+                        println!("[compact] {} -> {} entries, ~{} tokens saved",
+                            stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
+                    } else {
+                        println!("[compact] No compaction needed ({} entries, ~{} tokens).",
+                            stats.entries_before, stats.estimated_tokens_before);
+                    }
+                    continue;
+                }
+                "/clear" => {
+                    let count = agent.clear_context();
+                    if count > 0 {
+                        println!("[clear] Cleared {} messages.", count);
+                    } else {
+                        println!("[clear] No messages to clear.");
+                    }
+                    continue;
+                }
                 "/help" => {
-                    println!("Commands: /tools, /mode, /resume, /help, /quit");
+                    println!("Commands:");
+                    println!("  /help    — Show available commands");
+                    println!("  /compact — Force context compaction");
+                    println!("  /clear   — Clear conversation history");
+                    println!("  /mode    — Switch permission mode (ask|auto|plan)");
+                    println!("  /resume  — Resume a previous session");
+                    println!("  /tools   — List available tools");
+                    println!("  /quit    — Exit");
                     continue;
                 }
                 "/resume" => {
