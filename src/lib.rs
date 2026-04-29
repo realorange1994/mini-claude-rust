@@ -5,6 +5,8 @@ pub mod context;
 pub mod filehistory;
 pub mod mcp;
 pub mod permissions;
+pub mod context_references;
+pub mod rate_limit;
 pub mod skills;
 pub mod streaming;
 pub mod tools;

@@ -13,6 +13,7 @@ use miniclaudecode_rust::streaming::{
     parse_anthropic_message, parse_sse_event, tool_arg_summary, ChunkType, CollectHandler,
     StallDetector, StreamChunk, TerminalHandler, ToolCallInfo, Usage,
 };
+use miniclaudecode_rust::rate_limit::RateLimitState;
 use std::time::Duration;
 
 // ============================================================
@@ -784,6 +785,7 @@ async fn run_sse_stream(sse_body: &str) -> anyhow::Result<miniclaudecode_rust::s
     let term = TerminalHandler::new();
     let stall = std::sync::Arc::new(StallDetector::new());
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rate_state = RateLimitState::default();
 
     miniclaudecode_rust::streaming::process_sse_events(
         &client,
@@ -798,6 +800,7 @@ async fn run_sse_stream(sse_body: &str) -> anyhow::Result<miniclaudecode_rust::s
         &term,
         &stall,
         interrupted,
+        &rate_state,
     )
     .await
 }
@@ -974,6 +977,7 @@ async fn sse_stream_non_sse_json_response() {
         &term,
         &stall,
         interrupted,
+        &RateLimitState::default(),
     )
     .await
     .unwrap();
@@ -1010,6 +1014,7 @@ async fn sse_stream_api_error_returns_err() {
         &term,
         &stall,
         interrupted,
+        &RateLimitState::default(),
     )
     .await;
 
@@ -1087,6 +1092,7 @@ async fn sse_stream_non_sse_json_with_tool_calls() {
         &term,
         &stall,
         interrupted,
+        &RateLimitState::default(),
     )
     .await
     .unwrap();

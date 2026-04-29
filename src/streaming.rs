@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 
+use crate::rate_limit::{parse_rate_limit_headers, RateLimitState};
 use crate::tools::truncate_at;
 
 /// Streaming chunk types
@@ -759,6 +760,7 @@ pub async fn process_sse_events(
     term: &TerminalHandler,
     stall: &Arc<StallDetector>,
     interrupted: Arc<std::sync::atomic::AtomicBool>,
+    rate_state: &RateLimitState,
 ) -> Result<StreamResult> {
     // Check for interruption before starting
     if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -848,6 +850,11 @@ pub async fn process_sse_events(
         };
 
         cancel_guard.abort();
+
+        // Capture rate limit headers from response
+        if let Some(rl) = parse_rate_limit_headers(response.headers(), "") {
+            rate_state.update(&rl);
+        }
 
         if !response.status().is_success() {
             let status = response.status();

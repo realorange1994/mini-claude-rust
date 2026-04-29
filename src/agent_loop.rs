@@ -5,6 +5,7 @@ use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
+use crate::rate_limit::RateLimitState;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
 use anyhow::{anyhow, Result};
@@ -55,6 +56,8 @@ pub struct AgentLoop {
     interrupted: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks which skills have been shown/read/used across turns
     skill_tracker: Arc<RwLock<SkillTracker>>,
+    /// Rate limit state parsed from API response headers
+    rate_limit_state: RateLimitState,
 }
 
 impl AgentLoop {
@@ -138,6 +141,7 @@ impl AgentLoop {
             file_history,
             rt,
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
         }
     }
@@ -238,6 +242,7 @@ impl AgentLoop {
             file_history,
             rt,
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
         })
     }
@@ -380,10 +385,29 @@ impl AgentLoop {
         // Clear interrupted flag at start of new request
         self.interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
 
+        // Expand @ context references (e.g., @file:main.go, @diff)
+        let processed_msg = {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let est_tokens: usize = 100000; // default context length estimate
+            let result = crate::context_references::preprocess_context_references(
+                user_message, &cwd, est_tokens,
+            );
+            if result.expanded && !result.blocked {
+                result.message
+            } else {
+                if !result.warnings.is_empty() {
+                    for w in &result.warnings {
+                        eprintln!("[WARN] {}", w);
+                    }
+                }
+                user_message.to_string()
+            }
+        };
+
         // Add user message to context
         {
             let mut ctx = self.context.blocking_write();
-            ctx.add_user_message(user_message.to_string());
+            ctx.add_user_message(processed_msg);
         }
 
         // Log user message to transcript
@@ -1137,6 +1161,7 @@ impl AgentLoop {
             &term,
             &stall,
             self.interrupted.clone(),
+            &self.rate_limit_state,
         ).await;
 
         // Check if interrupted
