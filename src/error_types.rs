@@ -325,3 +325,85 @@ mod tests {
         assert!(err.retry_delay().is_some());
     }
 }
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_transient() {
+        // "connection refused" -> Transient with ConnectionLost
+        let err = classify_error("connection refused");
+        assert!(matches!(err, AgentError::Transient { source: TransientError::ConnectionLost, .. }));
+
+        // "connection timed out" -> Transient with Timeout
+        let err = classify_error("connection timed out");
+        assert!(matches!(err, AgentError::Transient { source: TransientError::Timeout, .. }));
+    }
+
+    #[test]
+    fn test_classify_context_overflow() {
+        // "context_length_exceeded" -> ContextOverflow
+        let err = classify_error("context_length_exceeded");
+        assert!(matches!(err, AgentError::ContextOverflow { .. }));
+
+        // "too many tokens" -> ContextOverflow
+        let err = classify_error("too many tokens in prompt");
+        assert!(matches!(err, AgentError::ContextOverflow { .. }));
+    }
+
+    #[test]
+    fn test_classify_auth() {
+        // "authentication failed" -> Auth
+        let err = classify_error("authentication failed");
+        assert!(matches!(err, AgentError::Auth { .. }));
+
+        // "unauthorized" -> Auth
+        let err = classify_error("unauthorized access");
+        assert!(matches!(err, AgentError::Auth { .. }));
+    }
+
+    #[test]
+    fn test_classify_rate_limit() {
+        // "rate limit exceeded" -> RateLimit
+        let err = classify_error("rate limit exceeded");
+        assert!(matches!(err, AgentError::RateLimit { .. }));
+    }
+
+    #[test]
+    fn test_classify_fatal() {
+        // "fatal error" does not match any known pattern -> Fatal (default)
+        let err = classify_error("fatal error");
+        assert!(matches!(err, AgentError::Fatal { .. }));
+    }
+
+    #[test]
+    fn test_is_transient_error() {
+        // "connection refused" is transient -> true
+        assert!(is_transient_error("connection refused"));
+        // "authentication failed" is not transient -> false
+        assert!(!is_transient_error("authentication failed"));
+    }
+
+    #[test]
+    fn test_is_context_length_error() {
+        // "context_length_exceeded" is a context overflow -> true (retryable)
+        assert!(is_transient_error("context_length_exceeded"));
+        // "normal error" is not -> false
+        assert!(!is_transient_error("normal error"));
+    }
+
+    #[test]
+    fn test_large_session_heuristic() {
+        // When a server disconnects and the session is large,
+        // the connection error is still classified as Transient initially,
+        // but we verify that ContextOverflow is also retryable so the
+        // retry loop can handle both scenarios.
+        let conn_err = classify_error("connection reset by peer");
+        assert!(conn_err.is_retryable());
+
+        let overflow_err = classify_error("prompt is too long: too many tokens");
+        assert!(matches!(overflow_err, AgentError::ContextOverflow { .. }));
+        assert!(overflow_err.is_retryable());
+    }
+}

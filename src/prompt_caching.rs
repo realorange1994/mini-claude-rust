@@ -136,3 +136,124 @@ mod tests {
         assert!(messages.is_empty());
     }
 }
+
+#[cfg(test)]
+mod prompt_caching_extra_tests {
+    use super::*;
+
+    /// Empty vec should remain unchanged after applying prompt caching.
+    #[test]
+    fn test_apply_prompt_caching_empty() {
+        let mut messages: Vec<serde_json::Value> = vec![];
+        apply_prompt_caching(&mut messages, "5m");
+        assert!(messages.is_empty(), "empty vec should stay empty");
+    }
+
+    /// Fewer than 4 messages: system + all non-system messages get cache markers.
+    #[test]
+    fn test_apply_prompt_caching_short() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "You are helpful"}),
+            serde_json::json!({"role": "user", "content": "Hello"}),
+            serde_json::json!({"role": "assistant", "content": "Hi"}),
+        ];
+
+        apply_prompt_caching(&mut messages, "5m");
+
+        // System message (index 0): content turned into array, last block has cache_control
+        let sys_content = messages[0].get("content").unwrap().as_array().unwrap();
+        assert!(
+            sys_content.last().unwrap().get("cache_control").is_some(),
+            "system message should have cache_control"
+        );
+
+        // User (index 1) and assistant (index 2): both should have cache_control
+        for i in 1..=2 {
+            let has_cache = messages[i].get("cache_control").is_some()
+                || messages[i]
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|b| b.get("cache_control"))
+                    .is_some();
+            assert!(has_cache, "message at index {} should have cache_control", i);
+        }
+    }
+
+    /// 6 messages: system + last 3 non-system get markers, middle ones don't.
+    #[test]
+    fn test_apply_prompt_caching_long() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "You are helpful"}),   // 0 - cached
+            serde_json::json!({"role": "user", "content": "Hello"}),                // 1 - NOT cached
+            serde_json::json!({"role": "assistant", "content": "Hi"}),              // 2 - NOT cached
+            serde_json::json!({"role": "user", "content": "How are you?"}),         // 3 - cached
+            serde_json::json!({"role": "assistant", "content": "Fine"}),            // 4 - cached
+            serde_json::json!({"role": "user", "content": "Thanks"}),               // 5 - cached
+        ];
+
+        apply_prompt_caching(&mut messages, "5m");
+
+        // System (0) and last 3 non-system (3, 4, 5) should have cache_control
+        let cached_indices = [0usize, 3, 4, 5];
+        for i in cached_indices {
+            let has_cache = messages[i].get("cache_control").is_some()
+                || messages[i]
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|b| b.get("cache_control"))
+                    .is_some();
+            assert!(has_cache, "message at index {} should have cache_control", i);
+        }
+
+        // Middle messages (1, 2) should NOT have cache_control
+        let uncached_indices = [1usize, 2];
+        for i in uncached_indices {
+            let has_cache = messages[i].get("cache_control").is_some()
+                || messages[i]
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.last())
+                    .and_then(|b| b.get("cache_control"))
+                    .is_some();
+            assert!(!has_cache, "message at index {} should NOT have cache_control", i);
+        }
+    }
+
+    /// cache_system_prompt creates a text block with cache_control inside.
+    #[test]
+    fn test_cache_system_prompt() {
+        let mut system = serde_json::json!([
+            {"type": "text", "text": "You are helpful"}
+        ]);
+
+        cache_system_prompt(&mut system);
+
+        let arr = system.as_array().unwrap();
+        let first = &arr[0];
+        let cc = first.get("cache_control").unwrap();
+        assert_eq!(cc["type"], "ephemeral");
+        assert!(cc.get("ttl").is_none(), "default marker should not have ttl");
+    }
+
+    /// With 1h TTL, apply_prompt_caching includes the ttl field in markers.
+    #[test]
+    fn test_cache_system_prompt_ttl() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "You are helpful"}),
+        ];
+
+        apply_prompt_caching(&mut messages, "1h");
+
+        // System message content should have cache_control with ttl field
+        let sys_content = messages[0].get("content").unwrap().as_array().unwrap();
+        let cc = sys_content
+            .last()
+            .unwrap()
+            .get("cache_control")
+            .unwrap();
+        assert_eq!(cc["type"], "ephemeral");
+        assert_eq!(cc["ttl"], "1h", "1h TTL should include ttl field");
+    }
+}

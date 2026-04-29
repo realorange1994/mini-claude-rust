@@ -92,3 +92,97 @@ impl SkillTracker {
         self.used_skills.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::SkillInfo;
+    use std::path::PathBuf;
+
+    fn make_skill(name: &str, always: bool) -> SkillInfo {
+        SkillInfo {
+            name: name.to_string(),
+            path: PathBuf::from(format!("skills/{}.md", name)),
+            source: "builtin".to_string(),
+            available: true,
+            always,
+            description: format!("{} skill", name),
+            commands: vec![],
+            tags: vec![],
+            version: String::new(),
+            missing_deps: vec![],
+            when_to_use: None,
+        }
+    }
+
+    #[test]
+    fn test_is_new_skill() {
+        let mut tracker = SkillTracker::new();
+        assert!(tracker.is_new_skill("commit"), "skill should be new initially");
+        tracker.mark_shown("commit");
+        assert!(!tracker.is_new_skill("commit"), "skill should not be new after mark_shown");
+    }
+
+    #[test]
+    fn test_mark_read() {
+        let mut tracker = SkillTracker::new();
+        assert!(!tracker.was_read("review"), "skill should not be read initially");
+        tracker.mark_read("review");
+        assert!(tracker.was_read("review"), "skill should be read after mark_read");
+    }
+
+    #[test]
+    fn test_mark_used() {
+        let mut tracker = SkillTracker::new();
+        assert!(!tracker.was_used("simplify"), "skill should not be used initially");
+        tracker.mark_used("simplify");
+        assert!(tracker.was_used("simplify"), "skill should be used after mark_used");
+    }
+
+    #[test]
+    fn test_get_unsent_skills() {
+        let tracker = SkillTracker::new();
+        let all_skills = vec![
+            make_skill("commit", false),
+            make_skill("review", false),
+            make_skill("simplify", false),
+        ];
+        let unsent = tracker.get_unsent_skills(&all_skills);
+        assert_eq!(unsent.len(), 3, "all skills should be unsent initially");
+
+        let mut tracker = SkillTracker::new();
+        tracker.mark_shown("commit");
+        let unsent = tracker.get_unsent_skills(&all_skills);
+        assert_eq!(unsent.len(), 2, "only un-shown skills should appear");
+        assert!(unsent.iter().all(|s| s.name != "commit"), "commit should be excluded");
+    }
+
+    #[test]
+    fn test_tracker_lifecycle() {
+        let mut tracker = SkillTracker::new();
+        let skill = "commit";
+
+        // Stage 1: brand new skill
+        assert!(tracker.is_new_skill(skill));
+        assert!(!tracker.was_read(skill));
+        assert!(!tracker.was_used(skill));
+
+        // Stage 2: shown in system prompt
+        tracker.mark_shown(skill);
+        assert!(!tracker.is_new_skill(skill));
+        assert!(!tracker.was_read(skill));
+        assert!(!tracker.was_used(skill));
+
+        // Stage 3: model reads the skill
+        tracker.mark_read(skill);
+        assert!(!tracker.is_new_skill(skill));
+        assert!(tracker.was_read(skill));
+        assert!(!tracker.was_used(skill));
+
+        // Stage 4: model uses the skill
+        tracker.mark_used(skill);
+        assert!(!tracker.is_new_skill(skill));
+        assert!(tracker.was_read(skill));
+        assert!(tracker.was_used(skill));
+    }
+}

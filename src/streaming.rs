@@ -1270,3 +1270,76 @@ pub fn parse_sse_event(event: &serde_json::Value) -> Option<StreamChunk> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn test_stream_progress_ttfb() {
+        let mut progress = StreamProgress::new();
+
+        // Before any chunk is recorded, ttfb_ms should be None
+        assert!(progress.ttfb_ms().is_none());
+
+        // After recording a chunk, ttfb_ms should be Some with a value > 0
+        progress.record_chunk(10);
+        let ttfb = progress.ttfb_ms().expect("ttfb_ms should return Some after record_chunk");
+        // TTFB should be >= 0 (practically 0 since Instant was just created,
+        // but we only assert it is not negative which is guaranteed by u64)
+        assert!(ttfb < 5000, "ttfb_ms should be reasonable, got {}", ttfb);
+    }
+
+    #[test]
+    fn test_stream_progress_throughput() {
+        let mut progress = StreamProgress::new();
+
+        // Record some chunks so tokens accumulate
+        progress.record_chunk(20); // 5 tokens (20 / 4, rounded up)
+        progress.record_chunk(12); // 3 tokens (12 / 4, rounded up)
+
+        // Give a tiny bit of time so elapsed > 0
+        thread::sleep(std::time::Duration::from_millis(10));
+
+        let tps = progress.tokens_per_second();
+        assert!(tps > 0.0, "tokens_per_second should be > 0 after recording tokens, got {}", tps);
+    }
+
+    #[test]
+    fn test_stream_progress_zero_tokens() {
+        let progress = StreamProgress::new();
+
+        // No chunks recorded — elapsed may be 0 or near-0, tokens_per_second should be 0.0
+        // because tokens_received is 0
+        let tps = progress.tokens_per_second();
+        assert_eq!(tps, 0.0, "tokens_per_second should be 0.0 with no tokens recorded, got {}", tps);
+    }
+
+    #[test]
+    fn test_stream_progress_record_chunk() {
+        let mut progress = StreamProgress::new();
+
+        progress.record_chunk(10);
+        assert_eq!(progress.chars_received, 10);
+        assert_eq!(progress.tokens_received, 10usize.div_ceil(4)); // 3 tokens
+
+        progress.record_chunk(7);
+        assert_eq!(progress.chars_received, 17, "chars_received should accumulate");
+        assert_eq!(progress.tokens_received, 10usize.div_ceil(4) + 7usize.div_ceil(4), "tokens_received should accumulate");
+    }
+
+    #[test]
+    fn test_stream_progress_record_tool_call() {
+        let mut progress = StreamProgress::new();
+
+        assert_eq!(progress.tool_calls_received, 0);
+
+        progress.record_tool_call();
+        assert_eq!(progress.tool_calls_received, 1);
+
+        progress.record_tool_call();
+        progress.record_tool_call();
+        assert_eq!(progress.tool_calls_received, 3, "tool_calls_received should increment each time");
+    }
+}

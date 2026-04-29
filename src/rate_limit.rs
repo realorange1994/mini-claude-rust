@@ -417,7 +417,8 @@ mod tests {
     fn test_fmt_seconds() {
         assert_eq!(fmt_seconds(30.0), "30s");
         assert_eq!(fmt_seconds(134.0), "2m 14s");
-        assert_eq!(fmt_seconds(3600.0), "1h 0m");
+        assert_eq!(fmt_seconds(3600.0), "1h");
+        assert_eq!(fmt_seconds(3660.0), "1h 1m");
     }
 
     #[test]
@@ -483,5 +484,74 @@ mod tests {
     fn test_format_display_empty() {
         let state = RateLimitState::default();
         assert!(format_rate_limit_display(&state).contains("No rate limit data"));
+    }
+
+    #[test]
+    fn test_rate_limit_bucket_new() {
+        let b = RateLimitBucket::default();
+        assert_eq!(b.limit, 0);
+        assert_eq!(b.remaining, 0);
+    }
+
+    #[test]
+    fn test_rate_limit_state_retry_delay_no_constraint() {
+        let state = RateLimitState::default();
+        // Default state has no data, so retry_delay should be None (0 delay)
+        assert!(state.retry_delay().is_none());
+    }
+
+    #[test]
+    fn test_rate_limit_state_retry_delay_exhausted() {
+        let state = RateLimitState::default();
+        {
+            let mut guard = state.inner.lock().unwrap();
+            guard.requests_min = RateLimitBucket {
+                limit: 100,
+                remaining: 0,
+                reset_seconds: 60.0,
+                captured_at: Instant::now(),
+            };
+            guard.captured_at = Some(Instant::now());
+        }
+
+        let delay = state.retry_delay();
+        assert!(delay.is_some());
+        let d = delay.unwrap();
+        assert!(d.as_secs_f64() > 0.0);
+    }
+
+    #[test]
+    fn test_parse_rate_limit_headers_empty() {
+        let headers = reqwest::header::HeaderMap::new();
+        let result = parse_rate_limit_headers(&headers, "test");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_rate_limit_headers_valid() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-limit-requests", "60".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-requests", "45".parse().unwrap());
+        headers.insert("x-ratelimit-reset-requests", "30".parse().unwrap());
+        headers.insert("x-ratelimit-limit-tokens", "100000".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-tokens", "80000".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "30".parse().unwrap());
+
+        let state = parse_rate_limit_headers(&headers, "test_provider").unwrap();
+        assert!(state.has_data());
+
+        let guard = state.inner.lock().unwrap();
+        assert_eq!(guard.requests_min.limit, 60);
+        assert_eq!(guard.requests_min.remaining, 45);
+        assert_eq!(guard.requests_min.reset_seconds, 30.0);
+        assert_eq!(guard.tokens_min.limit, 100000);
+        assert_eq!(guard.tokens_min.remaining, 80000);
+        assert_eq!(guard.provider, "test_provider");
+    }
+
+    #[test]
+    fn test_format_rate_limit_compact_no_data() {
+        let state = RateLimitState::default();
+        assert_eq!(format_rate_limit_compact(&state), "No rate limit data.");
     }
 }

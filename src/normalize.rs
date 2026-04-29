@@ -212,3 +212,105 @@ mod tests {
         assert_eq!(input_keys, vec!["command", "cwd"]);
     }
 }
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_normalize_whitespace() {
+        // Empty string
+        assert_eq!(normalize_whitespace(""), "");
+
+        // Single line (no trailing newline)
+        assert_eq!(normalize_whitespace("hello"), "hello");
+
+        // 3+ blank lines collapsed to at most 1 blank line (2 newlines = 1 visual blank line)
+        let input = "line1\n\n\n\nline2";
+        let result = normalize_whitespace(input);
+        assert_eq!(result, "line1\n\nline2", "3+ blank lines should collapse to 1 blank line");
+
+        // Trailing whitespace stripped from lines
+        let input = "hello   \nworld  ";
+        let result = normalize_whitespace(input);
+        assert_eq!(result, "hello\nworld", "trailing whitespace should be stripped");
+
+        // Trailing blank lines removed entirely
+        let input = "content\n\n\n";
+        let result = normalize_whitespace(input);
+        assert_eq!(result, "content", "trailing blank lines should be removed");
+    }
+
+    #[test]
+    fn test_sort_json_keys() {
+        // Flat map: keys sorted alphabetically
+        let input = json!({"z": 1, "a": 2, "m": 3});
+        let sorted = sort_json_keys(&input);
+        let keys: Vec<_> = sorted.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["a", "m", "z"]);
+
+        // Nested map: inner keys also sorted
+        let input = json!({"z": {"c": 1, "a": 2}, "a": 3});
+        let sorted = sort_json_keys(&input);
+        let outer_keys: Vec<_> = sorted.as_object().unwrap().keys().collect();
+        assert_eq!(outer_keys, vec!["a", "z"]);
+        let inner_keys: Vec<_> = sorted["z"].as_object().unwrap().keys().collect();
+        assert_eq!(inner_keys, vec!["a", "c"]);
+
+        // Array containing maps: each map's keys sorted
+        let input = json!([{"b": 1, "a": 2}, 42, "hello"]);
+        let sorted = sort_json_keys(&input);
+        let first_keys: Vec<_> = sorted[0].as_object().unwrap().keys().collect();
+        assert_eq!(first_keys, vec!["a", "b"]);
+        assert_eq!(sorted[1], json!(42));
+        assert_eq!(sorted[2], json!("hello"));
+
+        // Non-object values unchanged
+        assert_eq!(sort_json_keys(&json!(42)), json!(42));
+        assert_eq!(sort_json_keys(&json!("hello")), json!("hello"));
+        assert_eq!(sort_json_keys(&json!(null)), json!(null));
+        assert_eq!(sort_json_keys(&json!(true)), json!(true));
+    }
+
+    #[test]
+    fn test_normalize_api_messages() {
+        // Empty vec
+        let result = normalize_api_messages(&[]);
+        assert!(result.is_empty());
+
+        // Assistant message with tool_use: input keys should be sorted
+        let messages = vec![json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "edit_file",
+                "input": {"file_path": "/src/main.rs", "old_string": "foo", "new_string": "bar"}
+            }]
+        })];
+        let result = normalize_api_messages(&messages);
+        let input_keys: Vec<_> = result[0]["content"][0]["input"]
+            .as_object().unwrap().keys().collect();
+        assert_eq!(input_keys, vec!["file_path", "new_string", "old_string"],
+            "tool_use input keys should be sorted alphabetically");
+
+        // User message with tool_result: whitespace in content should be normalized
+        let messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": [{
+                    "type": "text",
+                    "text": "output\n\n\n\nmore"
+                }]
+            }]
+        })];
+        let result = normalize_api_messages(&messages);
+        let text = result[0]["content"][0]["content"][0]["text"]
+            .as_str().unwrap();
+        assert_eq!(text, "output\n\nmore",
+            "tool_result whitespace should be normalized (3+ blank lines collapsed)");
+    }
+}
