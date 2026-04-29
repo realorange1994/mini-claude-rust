@@ -5,6 +5,8 @@ use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
+use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
+use crate::error_types::{classify_error, ClassifyResult};
 use crate::rate_limit::RateLimitState;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
@@ -822,7 +824,16 @@ impl AgentLoop {
                                                 if let Some(val_err) = crate::tools::validate_params(t.as_ref(), &params) {
                                                     return val_err;
                                                 }
-                                                t.execute(params)
+                                                // Coerce argument types to match schema (LLMs often pass wrong types)
+                                                let schema = t.input_schema();
+                                                let mut coerced = params;
+                                                let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
+                                                if !coercion_result.warnings.is_empty() {
+                                                    for w in &coercion_result.warnings {
+                                                        eprintln!("[coercion] {}", w);
+                                                    }
+                                                }
+                                                t.execute(coerced)
                                             }
                                             None => ToolResult::error(format!("Tool not found: {}", tool_name)),
                                         }
@@ -1194,10 +1205,19 @@ impl AgentLoop {
                         return Err(anyhow!("Request cancelled by user"));
                     }
 
-                    // Check if it's a transient error
-                    if !is_transient_error(&err_str) {
-                        eprintln!("[!] Non-transient streaming error: {}", e);
+                    // Check if it's a transient error using rich classification
+                    let classification = classify_error(&err_str, 0, 0);
+                    if !classification.retryable {
+                        eprintln!("[!] Non-transient streaming error ({}): {}", classification.error.category(), e);
                         break;
+                    }
+
+                    // Use recovery hints for logging
+                    if classification.hints.compress {
+                        eprintln!("[!] Hint: compress context before retry");
+                    }
+                    if classification.hints.fallback {
+                        eprintln!("[!] Hint: consider model/provider fallback");
                     }
 
                     if attempt < MAX_RETRIES - 1 {
@@ -1226,6 +1246,10 @@ impl AgentLoop {
         let term = TerminalHandler::new();
         let stall = Arc::new(StallDetector::new());
 
+        // Apply prompt caching to message array (system_and_3 strategy)
+        let mut cached_messages = messages.to_vec();
+        apply_prompt_caching(&mut cached_messages, "5m");
+
         let result = process_sse_events(
             &self.client,
             &self.base_url,
@@ -1233,7 +1257,7 @@ impl AgentLoop {
             &self.config.model,
             16384,
             system_prompt,
-            messages,
+            &cached_messages,
             tools,
             &collect,
             &term,
@@ -1310,7 +1334,8 @@ impl AgentLoop {
                     }
 
                     let err_str = e.to_string();
-                    if !is_transient_error(&err_str) {
+                    let classification = classify_error(&err_str, 0, 0);
+                    if !classification.retryable {
                         return Err(e);
                     }
 
@@ -1335,12 +1360,19 @@ impl AgentLoop {
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
     ) -> Result<(Vec<ToolCallInfo>, String)> {
+        // Apply prompt caching to messages (system_and_3 strategy)
+        let mut cached_messages = messages.to_vec();
+        apply_prompt_caching(&mut cached_messages, "5m");
+
+        // Build system prompt array with cache_control
+        let mut sys_arr = serde_json::json!([{"type": "text", "text": system_prompt}]);
+        cache_system_prompt(&mut sys_arr);
+
         let mut payload = serde_json::Map::new();
         payload.insert("model".to_string(), serde_json::json!(self.config.model));
         payload.insert("max_tokens".to_string(), serde_json::json!(16384));
-        // Match Go SDK format: system is an array of text blocks
-        payload.insert("system".to_string(), serde_json::json!([{"type": "text", "text": system_prompt}]));
-        payload.insert("messages".to_string(), serde_json::json!(messages));
+        payload.insert("system".to_string(), sys_arr);
+        payload.insert("messages".to_string(), serde_json::json!(cached_messages));
         if !tools.is_empty() {
             payload.insert("tools".to_string(), serde_json::json!(tools));
         }
@@ -1520,6 +1552,16 @@ impl AgentLoop {
             return Ok(result);
         }
 
+        // Coerce argument types to match schema
+        let schema = tool.input_schema();
+        let mut coerced = params;
+        let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
+        if !coercion_result.warnings.is_empty() {
+            for w in &coercion_result.warnings {
+                eprintln!("[coercion] {}", w);
+            }
+        }
+
         // Execute with 5-minute timeout (matching Go's toolTimeout)
         let tool_name = name.to_string();
         let timeout = std::time::Duration::from_secs(300);
@@ -1527,9 +1569,9 @@ impl AgentLoop {
 
         // Since tools are sync, use spawn_blocking
         let tool_ref = tool.clone();
-        let params_clone = params.clone();
+        let coerced_clone = coerced.clone();
         let result = tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || {
-            tool_ref.execute(params_clone)
+            tool_ref.execute(coerced_clone)
         })).await;
 
         let elapsed = start.elapsed();
@@ -1647,30 +1689,8 @@ impl AgentLoop {
     }
 }
 
-/// Check if an error is transient (retryable)
-pub fn is_transient_error(err_str: &str) -> bool {
-    let patterns = [
-        "connection",
-        "timeout",
-        "timed out",
-        "network",
-        "rate limit",
-        "429",
-        "500",
-        "502",
-        "503",
-        "504",
-        "upstream",
-        "reset",
-        "broken pipe",
-        "temporary",
-        "transient",
-        "partial",
-    ];
-
-    let err_lower = err_str.to_lowercase();
-    patterns.iter().any(|p| err_lower.contains(p))
-}
+/// Re-export for backward compatibility
+pub use crate::error_types::is_transient_error;
 
 /// Limit a string to max chars, adding "..." if truncated
 pub fn limit_str(s: &str, max: usize) -> String {

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 
+use crate::prompt_caching::cache_system_prompt;
 use crate::rate_limit::{parse_rate_limit_headers, RateLimitState};
 use crate::tools::truncate_at;
 
@@ -936,7 +937,9 @@ pub async fn process_sse_events(
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), serde_json::json!(model));
     payload.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
-    payload.insert("system".to_string(), serde_json::json!([{"type": "text", "text": system}]));
+    let mut sys_arr = serde_json::json!([{"type": "text", "text": system}]);
+    cache_system_prompt(&mut sys_arr);
+    payload.insert("system".to_string(), sys_arr);
     payload.insert("messages".to_string(), serde_json::json!(messages));
     if !tools.is_empty() {
         payload.insert("tools".to_string(), serde_json::json!(tools));

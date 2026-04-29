@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod compact;
 pub mod config;
 pub mod context;
+pub mod error_types;
 pub mod filehistory;
 pub mod mcp;
 pub mod permissions;
