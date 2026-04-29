@@ -377,6 +377,13 @@ impl AgentLoop {
             context.add_tool_results(pending_tool_results);
         }
 
+        // Fix any inconsistencies from interrupted sessions:
+        // - Orphaned tool_use without matching tool_result
+        // - Orphaned tool_result without matching tool_use
+        // - Consecutive same-role messages (breaks Anthropic API)
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
+
         context
     }
 
