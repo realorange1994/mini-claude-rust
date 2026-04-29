@@ -146,6 +146,10 @@ pub fn preprocess_context_references(
     for ref_item in &refs {
         let (block, warning) = expand_reference(ref_item, cwd);
         if !warning.is_empty() {
+            // Inject the error as a context block so the model understands what happened
+            // instead of just seeing a stripped message + cryptic warning
+            let error_block = format!("## {} (error)\n{}", ref_item.raw, warning);
+            blocks.push(error_block);
             warnings.push(warning);
         }
         if !block.is_empty() {
@@ -251,7 +255,14 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
 
     let metadata = match fs::metadata(&path) {
         Ok(m) => m,
-        Err(_) => return (String::new(), format!("File not found: {}", ref_item.target)),
+        Err(e) => {
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                " (permission denied)"
+            } else {
+                ""
+            };
+            return (String::new(), format!("File not found: {}{}", ref_item.target, hint));
+        }
     };
 
     if metadata.is_dir() {
@@ -259,6 +270,15 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
             String::new(),
             format!("{}: path is a directory, use @folder: instead", ref_item.raw),
         );
+    }
+
+    // Check file size — reject files over 10MB
+    const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+    if metadata.len() > MAX_FILE_SIZE {
+        return (String::new(), format!(
+            "{}: file is too large ({} bytes, max {} MB)",
+            ref_item.raw, metadata.len(), MAX_FILE_SIZE / (1024 * 1024)
+        ));
     }
 
     // Check cache first
@@ -278,7 +298,14 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
         // Stream-read file with line limit
         let (lines, truncated) = match read_file_lines(&path, MAX_LINE_LIMIT) {
             Ok(result) => result,
-            Err(_) => return (String::new(), format!("File not found: {}", ref_item.target)),
+            Err(e) => {
+                let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    " (permission denied)"
+                } else {
+                    ""
+                };
+                return (String::new(), format!("Cannot read file: {}{}", ref_item.target, hint));
+            }
         };
 
         if is_binary_lines(&lines) {
@@ -309,6 +336,16 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
     // Apply line range if specified
     let (display_text, lines_hint) = if let Some(line_start) = ref_item.line_start {
         let all_lines: Vec<&str> = text.lines().collect();
+        let total_lines = all_lines.len();
+
+        // If requested start is beyond file length, return a clear message
+        if line_start > total_lines {
+            return (String::new(), format!(
+                "{}: file has {} lines, but line {} was requested",
+                ref_item.raw, total_lines, line_start
+            ));
+        }
+
         let start_idx = if line_start > 0 { line_start - 1 } else { 0 };
         let end_idx = ref_item.line_end
             .map(|end| end.min(all_lines.len()))
@@ -333,7 +370,15 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
             dt.push_str(&format!("\n... (truncated at {} lines)", MAX_LINE_LIMIT));
         }
 
-        (dt, format!(" (lines {}-{})", line_start, ref_item.line_end.unwrap_or(line_start)))
+        let actual_end = ref_item.line_end.unwrap_or(capped_end);
+        let mut hint = format!(" (lines {}-{}, file has {} lines)", line_start, actual_end.min(total_lines), total_lines);
+        if let Some(requested_end) = ref_item.line_end {
+            if requested_end > total_lines {
+                hint = format!(" (lines {}-{}, file has {} lines — requested end {} adjusted)", line_start, total_lines, total_lines, requested_end);
+            }
+        }
+
+        (dt, hint)
     } else {
         (text.to_string(), String::new())
     };
@@ -355,13 +400,32 @@ fn expand_folder_reference(ref_item: &ContextReference, cwd: &Path) -> (String, 
 
     let metadata = match fs::metadata(&path) {
         Ok(m) => m,
-        Err(_) => return (String::new(), format!("Folder not found: {}", ref_item.target)),
+        Err(e) => {
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                " (permission denied)"
+            } else {
+                ""
+            };
+            return (String::new(), format!("Folder not found: {}{}", ref_item.target, hint));
+        }
     };
 
     if !metadata.is_dir() {
         return (
             String::new(),
-            format!("{}: path is not a directory", ref_item.raw),
+            format!("{}: path is not a directory, use @file: instead", ref_item.raw),
+        );
+    }
+
+    // Check if folder is empty
+    let is_empty = fs::read_dir(&path)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(false);
+
+    if is_empty {
+        return (
+            format!("## @folder:{} (0 tokens)\n(empty directory — no files or subdirectories)", ref_item.target),
+            String::new(),
         );
     }
 
@@ -380,18 +444,34 @@ fn expand_git_reference(
     args: &[&str],
     label: &str,
 ) -> (String, String) {
+    // First check if we're in a git repository
+    let git_check = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output();
+
+    match git_check {
+        Ok(output) if !output.status.success() => {
+            return (String::new(), format!(
+                "{}: not a git repository — git references require a git repo", label
+            ));
+        }
+        Err(_) => {
+            return (String::new(), format!(
+                "{}: git is not installed or not available in PATH", label
+            ));
+        }
+        _ => {}
+    }
+
     let output = match Command::new("git").args(args).current_dir(cwd).output() {
         Ok(o) => o,
-        Err(e) => return (String::new(), format!("{}: {}", ref_item.raw, e)),
+        Err(e) => return (String::new(), format!("{}: git command failed — {}", label, e)),
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        // Check for specific error patterns
-        if stderr.contains("not a git repository") {
-            return (String::new(), "Not a git repository".to_string());
-        }
-        return (String::new(), format!("{}: {}", ref_item.raw, stderr));
+        return (String::new(), format!("{}: {}", label, if stderr.is_empty() { "unknown git error" } else { &stderr }));
     }
 
     let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -423,44 +503,93 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
     let url = &ref_item.target;
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return (String::new(), "Invalid URL: only http/https URLs are supported".to_string());
+        return (String::new(), format!(
+            "{}: invalid URL — must start with http:// or https://", ref_item.raw
+        ));
     }
 
     // Use curl for URL fetching (available on all platforms)
     let output = match Command::new("curl")
         .args([
             "-sL",           // silent, follow redirects
+            "-w", "%{http_code}",  // write HTTP status code to stdout
             "--max-time", "30",
             "--connect-timeout", "10",
-            "-H", "User-Agent: miniClaudeCode/1.0",
+            "-H", "User-Agent: Mozilla/5.0 (compatible; miniClaudeCode/1.0)",
             url,
         ])
         .output()
     {
         Ok(o) => o,
-        Err(e) => return (String::new(), format!("{}: curl not available: {}", ref_item.raw, e)),
+        Err(e) => return (String::new(), format!(
+            "{}: curl not available — {}", ref_item.raw, e
+        )),
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return (String::new(), format!("{}: fetch failed: {}", ref_item.raw, if stderr.is_empty() { "unknown error" } else { &stderr }));
+        let hint = if stderr.contains("timed out") {
+            " (request timed out after 30s)"
+        } else if stderr.contains("Connection refused") || stderr.contains("Could not resolve host") {
+            " (connection refused or DNS resolution failed)"
+        } else {
+            ""
+        };
+        return (String::new(), format!(
+            "{}: fetch failed — {}{}", ref_item.raw, if stderr.is_empty() { "unknown error" } else { &stderr }, hint
+        ));
     }
 
-    let content = String::from_utf8_lossy(&output.stdout);
-    if content.is_empty() {
-        return (String::new(), "No content returned".to_string());
+    let raw_output = String::from_utf8_lossy(&output.stdout);
+    // curl -w "%{http_code}" appends the status code at the end
+    // Extract it and the body separately
+    let (body, http_code) = if let Some(pos) = raw_output.rfind('\n') {
+        let last_line = raw_output[pos+1..].trim();
+        if last_line.chars().all(|c| c.is_ascii_digit()) {
+            (raw_output[..pos].to_string(), last_line.to_string())
+        } else {
+            (raw_output.to_string(), String::new())
+        }
+    } else {
+        (raw_output.to_string(), String::new())
+    };
+
+    // Check HTTP status code
+    if !http_code.is_empty() && http_code != "200" {
+        let status_hint = match http_code.as_str() {
+            "401" | "403" => " (authentication required or access denied)",
+            "404" => " (page not found)",
+            "429" => " (rate limited — too many requests)",
+            s if s.starts_with('5') => " (server error)",
+            _ => "",
+        };
+        return (String::new(), format!(
+            "{}: HTTP {}{}", ref_item.raw, http_code, status_hint
+        ));
+    }
+
+    if body.trim().is_empty() {
+        return (String::new(), format!(
+            "{}: page returned empty content", ref_item.raw
+        ));
     }
 
     // Extract content from HTML
-    let text = extract_html_content(&content);
+    let text = extract_html_content(&body);
+    if text.trim().is_empty() {
+        return (String::new(), format!(
+            "{}: page has no extractable text content (may be JS-rendered or binary)", ref_item.raw
+        ));
+    }
+
     let tokens = text.len() / 4;
 
     // Extract title
-    let title = extract_html_title(&content);
-    let title_hint = if title.is_empty() { String::new() } else { format!(" — {}", title) };
+    let title = extract_html_title(&body);
+    let title_hint = if title.is_empty() { String::new() } else { format!("Title: {}\n", title) };
 
     (
-        format!("## @url:{}{} ({} tokens)\n{}", url, title_hint, tokens, text),
+        format!("## @url:{} ({} tokens)\n{}{}", url, tokens, title_hint, text),
         String::new(),
     )
 }
