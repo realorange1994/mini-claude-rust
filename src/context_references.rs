@@ -6,10 +6,16 @@
 
 use regex::Regex;
 use std::fs;
-use std::io::Read as IoRead;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Mutex;
+
+/// Maximum number of lines to read from a file.
+const MAX_LINE_LIMIT: usize = 1000;
+
+/// Default maximum depth for folder listings.
+const MAX_FOLDER_DEPTH: usize = 3;
 
 /// A parsed @ reference in a user message.
 #[derive(Debug, Clone)]
@@ -40,6 +46,13 @@ const SENSITIVE_DIRS: &[&str] = &[
     ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/git",
 ];
 
+/// File content cache to avoid re-reading the same file.
+static FILE_CACHE: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
+fn get_file_cache() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, String>>> {
+    FILE_CACHE.lock().unwrap()
+}
+
 /// Parse @ references from a user message.
 pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
     if message.is_empty() {
@@ -47,13 +60,22 @@ pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
     }
 
     // Match @diff, @staged, @file:path, @file:path:10-50, @folder:path, @git:N, @url:url
-    let re = Regex::new(r"@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>\S+))")
+    // Also supports quoted values: @file:"path with spaces.py"
+    let re = Regex::new(r#"@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>"[^"]+"|\S+))"#)
         .expect("invalid regex");
 
     let mut refs = Vec::new();
     for cap in re.captures_iter(message) {
         let full = cap.get(0).unwrap();
         let raw = full.as_str().to_string();
+
+        // Email/social exclusion: @ must not be preceded by a word character
+        if full.start() > 0 {
+            let prev = message.as_bytes()[full.start() - 1];
+            if is_word_char(prev) {
+                continue;
+            }
+        }
 
         if let Some(simple) = cap.name("simple") {
             refs.push(ContextReference {
@@ -67,6 +89,7 @@ pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
             });
         } else if let (Some(kind), Some(value)) = (cap.name("kind"), cap.name("value")) {
             let value_str = strip_trailing_punctuation(value.as_str());
+            let value_str = strip_quotes(&value_str);
             let kind_str = kind.as_str();
 
             // Parse line range for @file:path:10-50
@@ -89,6 +112,12 @@ pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
     }
 
     refs
+}
+
+/// Check if a byte is a word character (for email/social exclusion).
+fn is_word_char(b: u8) -> bool {
+    (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z') ||
+    (b >= b'0' && b <= b'9') || b == b'_' || b == b'/'
 }
 
 /// Expand @ references in a user message.
@@ -192,8 +221,8 @@ fn expand_reference(ref_item: &ContextReference, cwd: &Path) -> (String, String)
     match ref_item.kind.as_str() {
         "file" => expand_file_reference(ref_item, cwd),
         "folder" => expand_folder_reference(ref_item, cwd),
-        "diff" => expand_git_reference(ref_item, cwd, &["diff"], "git diff"),
-        "staged" => expand_git_reference(ref_item, cwd, &["diff", "--staged"], "git diff --staged"),
+        "diff" => expand_git_reference(ref_item, cwd, &["diff"], "@diff"),
+        "staged" => expand_git_reference(ref_item, cwd, &["diff", "--staged"], "@staged"),
         "git" => {
             let mut count = 1;
             if !ref_item.target.is_empty() {
@@ -205,7 +234,7 @@ fn expand_reference(ref_item: &ContextReference, cwd: &Path) -> (String, String)
                 ref_item,
                 cwd,
                 &["log", &format!("-{}", count), "-p"],
-                &format!("git log -{} -p", count),
+                &format!("@git:{}", count),
             )
         }
         "url" => expand_url_reference(ref_item),
@@ -216,13 +245,13 @@ fn expand_reference(ref_item: &ContextReference, cwd: &Path) -> (String, String)
 fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, String) {
     let path = resolve_path(cwd, &ref_item.target);
 
-    if let Some(err) = ensure_path_allowed(&path) {
-        return (String::new(), format!("{}: {}", ref_item.raw, err));
+    if let Some(err) = ensure_path_allowed(&path, cwd) {
+        return (String::new(), err);
     }
 
     let metadata = match fs::metadata(&path) {
         Ok(m) => m,
-        Err(_) => return (String::new(), format!("{}: file not found", ref_item.raw)),
+        Err(_) => return (String::new(), format!("File not found: {}", ref_item.target)),
     };
 
     if metadata.is_dir() {
@@ -232,34 +261,79 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
         );
     }
 
-    let content = match fs::read(&path) {
-        Ok(c) => c,
-        Err(e) => return (String::new(), format!("{}: {}", ref_item.raw, e)),
+    // Check cache first
+    let cache_key = path.to_string_lossy().to_string();
+    let cached_content = {
+        let cache = get_file_cache();
+        if let Some(map) = cache.as_ref() {
+            map.get(&cache_key).cloned()
+        } else {
+            None
+        }
     };
 
-    if is_binary_content(&content) {
-        return (String::new(), format!("{}: binary files are not supported", ref_item.raw));
-    }
+    let text = if let Some(content) = cached_content {
+        content
+    } else {
+        // Stream-read file with line limit
+        let (lines, truncated) = match read_file_lines(&path, MAX_LINE_LIMIT) {
+            Ok(result) => result,
+            Err(_) => return (String::new(), format!("File not found: {}", ref_item.target)),
+        };
 
-    let text = String::from_utf8_lossy(&content);
+        if is_binary_lines(&lines) {
+            return (String::new(), format!("{}: binary files are not supported", ref_item.raw));
+        }
+
+        let mut text = lines.join("\n");
+        if truncated {
+            text.push_str(&format!("\n... (truncated at {} lines)", MAX_LINE_LIMIT));
+        }
+
+        // Cache the content
+        {
+            let mut cache = get_file_cache();
+            if cache.is_none() {
+                *cache = Some(std::collections::HashMap::new());
+            }
+            if let Some(map) = cache.as_mut() {
+                map.insert(cache_key.clone(), text.clone());
+            }
+        }
+
+        text
+    };
+
     let lang = code_fence_language(&path);
 
     // Apply line range if specified
-    let (display_text, range_hint) = if let Some(line_start) = ref_item.line_start {
-        let lines: Vec<&str> = text.lines().collect();
+    let (display_text, lines_hint) = if let Some(line_start) = ref_item.line_start {
+        let all_lines: Vec<&str> = text.lines().collect();
         let start_idx = if line_start > 0 { line_start - 1 } else { 0 };
         let end_idx = ref_item.line_end
-            .map(|end| end.min(lines.len()))
-            .unwrap_or(lines.len());
+            .map(|end| end.min(all_lines.len()))
+            .unwrap_or(all_lines.len());
         let end_idx = end_idx.max(start_idx);
 
-        let selected: Vec<String> = lines[start_idx..end_idx]
+        // Cap to MAX_LINE_LIMIT
+        let capped_end = if end_idx - start_idx > MAX_LINE_LIMIT {
+            start_idx + MAX_LINE_LIMIT
+        } else {
+            end_idx
+        };
+
+        let selected: Vec<String> = all_lines[start_idx..capped_end]
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>4} | {}", start_idx + i + 1, line))
             .collect();
 
-        (selected.join("\n"), format!(":{}-{}", line_start, ref_item.line_end.unwrap_or(line_start)))
+        let mut dt = selected.join("\n");
+        if capped_end < end_idx {
+            dt.push_str(&format!("\n... (truncated at {} lines)", MAX_LINE_LIMIT));
+        }
+
+        (dt, format!(" (lines {}-{})", line_start, ref_item.line_end.unwrap_or(line_start)))
     } else {
         (text.to_string(), String::new())
     };
@@ -267,7 +341,7 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
     let tokens = display_text.len() / 4;
 
     (
-        format!("\u{1f4c4} @file:\"{}\"{} ({} tokens)\n```{}\n{}\n```", ref_item.target, range_hint, tokens, lang, display_text),
+        format!("## @file:{}{} ({} tokens)\n```{}\n{}\n```", ref_item.target, lines_hint, tokens, lang, display_text),
         String::new(),
     )
 }
@@ -275,13 +349,13 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
 fn expand_folder_reference(ref_item: &ContextReference, cwd: &Path) -> (String, String) {
     let path = resolve_path(cwd, &ref_item.target);
 
-    if let Some(err) = ensure_path_allowed(&path) {
-        return (String::new(), format!("{}: {}", ref_item.raw, err));
+    if let Some(err) = ensure_path_allowed(&path, cwd) {
+        return (String::new(), err);
     }
 
     let metadata = match fs::metadata(&path) {
         Ok(m) => m,
-        Err(_) => return (String::new(), format!("{}: folder not found", ref_item.raw)),
+        Err(_) => return (String::new(), format!("Folder not found: {}", ref_item.target)),
     };
 
     if !metadata.is_dir() {
@@ -291,11 +365,11 @@ fn expand_folder_reference(ref_item: &ContextReference, cwd: &Path) -> (String, 
         );
     }
 
-    let listing = build_folder_listing(&path, cwd, 200);
+    let listing = build_folder_listing(&path, cwd, 200, MAX_FOLDER_DEPTH);
     let tokens = listing.len() / 4;
 
     (
-        format!("\u{1f4c1} @folder:\"{}\" ({} tokens)\n{}", ref_item.target, tokens, listing),
+        format!("## @folder:{} ({} tokens)\n{}", ref_item.target, tokens, listing),
         String::new(),
     )
 }
@@ -311,13 +385,16 @@ fn expand_git_reference(
         Err(e) => return (String::new(), format!("{}: {}", ref_item.raw, e)),
     };
 
-    let content = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Check for specific error patterns
+        if stderr.contains("not a git repository") {
+            return (String::new(), "Not a git repository".to_string());
+        }
         return (String::new(), format!("{}: {}", ref_item.raw, stderr));
-    };
+    }
 
+    let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let content = if content.is_empty() {
         "(no output)".to_string()
     } else {
@@ -327,7 +404,7 @@ fn expand_git_reference(
     let tokens = content.len() / 4;
 
     (
-        format!("\u{1f9fe} {} ({} tokens)\n```diff\n{}\n```", label, tokens, content),
+        format!("## {} ({} tokens)\n```diff\n{}\n```", label, tokens, content),
         String::new(),
     )
 }
@@ -335,17 +412,16 @@ fn expand_git_reference(
 fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
     let url = &ref_item.target;
 
-    // Validate URL scheme
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return (String::new(), format!("{}: only http/https URLs are supported", ref_item.raw));
+        return (String::new(), "Invalid URL: only http/https URLs are supported".to_string());
     }
 
     // Use curl for URL fetching (available on all platforms)
     let output = match Command::new("curl")
         .args([
             "-sL",           // silent, follow redirects
-            "--max-time", "30",  // 30s timeout
-            "--connect-timeout", "10", // 10s connect timeout
+            "--max-time", "30",
+            "--connect-timeout", "10",
             "-H", "User-Agent: miniClaudeCode/1.0",
             url,
         ])
@@ -362,15 +438,19 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
 
     let content = String::from_utf8_lossy(&output.stdout);
     if content.is_empty() {
-        return (String::new(), format!("{}: no content returned", ref_item.raw));
+        return (String::new(), "No content returned".to_string());
     }
 
-    // Strip HTML tags for a rough text extraction
-    let text = strip_html_tags(&content);
+    // Extract content from HTML
+    let text = extract_html_content(&content);
     let tokens = text.len() / 4;
 
+    // Extract title
+    let title = extract_html_title(&content);
+    let title_hint = if title.is_empty() { String::new() } else { format!(" — {}", title) };
+
     (
-        format!("\u{1f310} @url:\"{}\" ({} tokens)\n{}", url, tokens, text),
+        format!("## @url:{}{} ({} tokens)\n{}", url, title_hint, tokens, text),
         String::new(),
     )
 }
@@ -386,7 +466,6 @@ fn resolve_path(cwd: &Path, target: &str) -> PathBuf {
 
 /// Parse @file target with optional line range: "path:10-50" -> (path, Some(10), Some(50))
 fn parse_file_target(value: &str) -> (String, Option<usize>, Option<usize>) {
-    // Match pattern: filepath:digits-digits or filepath:digits-
     let line_re = Regex::new(r"^(.+):(\d+)(?:-(\d+))?$").expect("invalid line range regex");
 
     if let Some(cap) = line_re.captures(value) {
@@ -394,13 +473,10 @@ fn parse_file_target(value: &str) -> (String, Option<usize>, Option<usize>) {
         let start: usize = cap.get(2).unwrap().as_str().parse().unwrap_or(1);
         let end = cap.get(3).and_then(|m| m.as_str().parse::<usize>().ok());
 
-        // Only treat as line range if the "path" part looks like a real file
-        // (has an extension or is a known filename). Otherwise it's a Windows path like C:\...
-        let path_part = &path;
-        let looks_like_file = path_part.contains('.')
-            || path_part.contains('/')
-            || path_part.contains('\\')
-            || !path_part.contains(':'); // no drive letter
+        let looks_like_file = path.contains('.')
+            || path.contains('/')
+            || path.contains('\\')
+            || !path.contains(':');
 
         if looks_like_file && start > 0 {
             return (path, Some(start), end);
@@ -410,34 +486,112 @@ fn parse_file_target(value: &str) -> (String, Option<usize>, Option<usize>) {
     (value.to_string(), None, None)
 }
 
-/// Strip HTML tags for rough text extraction from fetched URLs.
-fn strip_html_tags(html: &str) -> String {
-    let re = Regex::new(r"<[^>]+>").unwrap();
-    let text = re.replace_all(html, "");
+/// Read a file line-by-line up to max_lines, returning (lines, truncated).
+fn read_file_lines(path: &Path, max_lines: usize) -> std::io::Result<(Vec<String>, bool)> {
+    let f = fs::File::open(path)?;
+    let reader = BufReader::new(f);
+    let mut lines = Vec::new();
+    let mut truncated = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        lines.push(line);
+        if lines.len() >= max_lines {
+            truncated = true;
+            break;
+        }
+    }
+
+    Ok((lines, truncated))
+}
+
+/// Check if lines appear to be binary.
+fn is_binary_lines(lines: &[String]) -> bool {
+    let check_len = lines.len().min(16);
+    for line in &lines[..check_len] {
+        if line.as_bytes().contains(&0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Extract meaningful content from HTML, removing scripts/styles.
+fn extract_html_content(html: &str) -> String {
+    // Remove <script> and <style> blocks entirely
+    let script_re = Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+    let style_re = Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+    let mut text = script_re.replace_all(html, "").to_string();
+    text = style_re.replace_all(&text, "").to_string();
+
+    // Try to extract <article>, <main>, or <body> content
+    let article_re = Regex::new(r"(?is)<article[^>]*>(.*?)</article>").unwrap();
+    if let Some(cap) = article_re.captures(&text) {
+        text = cap.get(1).unwrap().as_str().to_string();
+    } else {
+        let main_re = Regex::new(r"(?is)<main[^>]*>(.*?)</main>").unwrap();
+        if let Some(cap) = main_re.captures(&text) {
+            text = cap.get(1).unwrap().as_str().to_string();
+        } else {
+            let body_re = Regex::new(r"(?is)<body[^>]*>(.*?)</body>").unwrap();
+            if let Some(cap) = body_re.captures(&text) {
+                text = cap.get(1).unwrap().as_str().to_string();
+            }
+        }
+    }
+
+    // Remove remaining HTML tags
+    let tag_re = Regex::new(r"<[^>]+>").unwrap();
+    text = tag_re.replace_all(&text, "").to_string();
+
     // Collapse excessive whitespace
     let ws_re = Regex::new(r"\n{3,}").unwrap();
-    let text = ws_re.replace_all(&text, "\n\n");
+    text = ws_re.replace_all(&text, "\n\n").to_string();
+    let space_re = Regex::new(r"  +").unwrap();
+    text = space_re.replace_all(&text, " ").to_string();
+
     // Decode common HTML entities
-    let text = text.replace("&amp;", "&")
+    text = text.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&nbsp;", " ");
+
     text.trim().to_string()
 }
 
-fn ensure_path_allowed(path: &Path) -> Option<String> {
-    // Use $HOME on Unix, $USERPROFILE on Windows
+/// Extract the <title> from HTML.
+fn extract_html_title(html: &str) -> String {
+    let title_re = Regex::new(r"(?i)<title[^>]*>(.*?)</title>").unwrap();
+    if let Some(cap) = title_re.captures(html) {
+        return cap.get(1).unwrap().as_str().trim().to_string();
+    }
+    String::new()
+}
+
+/// Check if a path is allowed: not in sensitive dirs and not outside CWD.
+fn ensure_path_allowed(path: &Path, cwd: &Path) -> Option<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
     let home = PathBuf::from(home);
 
+    // Check sensitive directories
     for dir in SENSITIVE_DIRS {
         let sensitive_path = home.join(dir);
         if path.starts_with(&sensitive_path) {
             return Some("path is in a sensitive directory and cannot be attached".to_string());
+        }
+    }
+
+    // Path traversal protection: path must be within cwd
+    if let Ok(abs_cwd) = cwd.canonicalize() {
+        // For paths that don't exist yet, just check the prefix
+        let abs_path_str = path.to_string_lossy();
+        let abs_cwd_str = abs_cwd.to_string_lossy();
+        if !abs_path_str.starts_with(abs_cwd_str.as_ref()) {
+            return Some("path traversal outside working directory is not allowed".to_string());
         }
     }
 
@@ -463,7 +617,6 @@ fn remove_reference_tokens(message: &str, refs: &[ContextReference]) -> String {
     }
 
     let result = parts.join("");
-    // Clean up extra whitespace
     let re = Regex::new(r"\s{2,}").unwrap();
     re.replace_all(&result, " ").trim().to_string()
 }
@@ -471,7 +624,6 @@ fn remove_reference_tokens(message: &str, refs: &[ContextReference]) -> String {
 fn strip_trailing_punctuation(value: &str) -> String {
     let mut s = value.trim_end_matches(|c: char| c == ',' || c == '.' || c == ';' || c == '!' || c == '?');
 
-    // Remove unbalanced closing brackets
     loop {
         if s.ends_with(')') && s.matches(')').count() > s.matches('(').count() {
             s = &s[..s.len() - 1];
@@ -485,6 +637,18 @@ fn strip_trailing_punctuation(value: &str) -> String {
     }
 
     s.to_string()
+}
+
+/// Strip surrounding quotes from a value.
+fn strip_quotes(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"') ||
+           (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'') {
+            return value[1..value.len()-1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn is_binary_content(content: &[u8]) -> bool {
@@ -518,12 +682,12 @@ fn code_fence_language(path: &Path) -> &'static str {
     }
 }
 
-fn build_folder_listing(path: &Path, cwd: &Path, limit: usize) -> String {
+fn build_folder_listing(path: &Path, cwd: &Path, limit: usize, max_depth: usize) -> String {
     let rel = path.strip_prefix(cwd).unwrap_or(path);
     let mut lines = vec![format!("{}/", rel.display())];
     let mut count = 0;
 
-    if let Ok(entries) = walkdir(path, &mut count, limit, 0) {
+    if let Ok(entries) = walkdir(path, &mut count, limit, max_depth, 0) {
         lines.extend(entries);
     }
 
@@ -534,14 +698,14 @@ fn build_folder_listing(path: &Path, cwd: &Path, limit: usize) -> String {
     lines.join("\n")
 }
 
-/// Simple recursive directory listing (avoids external walkdir crate).
-fn walkdir(path: &Path, count: &mut usize, limit: usize, depth: usize) -> Result<Vec<String>, std::io::Error> {
-    let mut entries = Vec::new();
-    let indent = "  ".repeat(depth);
-
-    if *count >= limit {
-        return Ok(entries);
+/// Recursive directory listing with depth control.
+fn walkdir(path: &Path, count: &mut usize, limit: usize, max_depth: usize, depth: usize) -> Result<Vec<String>, std::io::Error> {
+    if depth >= max_depth || *count >= limit {
+        return Ok(Vec::new());
     }
+
+    let mut entries = Vec::new();
+    let indent = "  ".repeat(depth + 1);
 
     let mut dir_entries: Vec<_> = fs::read_dir(path)?
         .filter_map(|e| e.ok())
@@ -556,7 +720,6 @@ fn walkdir(path: &Path, count: &mut usize, limit: usize, depth: usize) -> Result
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        // Skip hidden files/dirs
         if name_str.starts_with('.') {
             continue;
         }
@@ -565,7 +728,7 @@ fn walkdir(path: &Path, count: &mut usize, limit: usize, depth: usize) -> Result
         if file_type.is_dir() {
             entries.push(format!("{}- {}/", indent, name_str));
             *count += 1;
-            if let Ok(sub) = walkdir(&entry.path(), count, limit, depth + 1) {
+            if let Ok(sub) = walkdir(&entry.path(), count, limit, max_depth, depth + 1) {
                 entries.extend(sub);
             }
         } else {
@@ -662,6 +825,20 @@ mod tests {
     }
 
     #[test]
+    fn test_email_exclusion() {
+        // user@domain.com should NOT match
+        let refs = parse_context_references("send to user@domain.com please");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_quoted_path() {
+        let refs = parse_context_references("check @file:\"path with spaces.py\"");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].target, "path with spaces.py");
+    }
+
+    #[test]
     fn test_strip_trailing_punctuation() {
         assert_eq!(strip_trailing_punctuation("main.go,"), "main.go");
         assert_eq!(strip_trailing_punctuation("path/to/file."), "path/to/file");
@@ -687,9 +864,17 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_html_tags() {
-        assert_eq!(strip_html_tags("<p>Hello <b>world</b></p>"), "Hello world");
-        assert_eq!(strip_html_tags("a &lt; b &amp; c"), "a < b & c");
+    fn test_extract_html_content() {
+        assert_eq!(extract_html_content("<p>Hello <b>world</b></p>"), "Hello world");
+        assert_eq!(extract_html_content("a &lt; b &amp; c"), "a < b & c");
+        // Script content should be removed
+        assert_eq!(extract_html_content("<script>alert(1)</script>Hello"), "Hello");
+    }
+
+    #[test]
+    fn test_extract_html_title() {
+        assert_eq!(extract_html_title("<html><title>My Page</title></html>"), "My Page");
+        assert_eq!(extract_html_title("<html><body>No title</body></html>"), "");
     }
 
     #[test]
@@ -710,17 +895,21 @@ mod tests {
 
     #[test]
     fn test_preprocess_blocked_by_hard_limit() {
-        // Create a temp file with lots of content
         let dir = std::env::temp_dir();
         let file_path = dir.join("ctx_ref_test.txt");
         fs::write(&file_path, "x".repeat(1000)).unwrap();
 
         let msg = format!("@file:{}", file_path.display());
-        // Very small context length to trigger hard limit
         let result = preprocess_context_references(&msg, &dir, 10);
         assert!(result.blocked);
 
-        // Cleanup
         let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_strip_quotes() {
+        assert_eq!(strip_quotes("\"hello world\""), "hello world");
+        assert_eq!(strip_quotes("'hello world'"), "hello world");
+        assert_eq!(strip_quotes("no_quotes"), "no_quotes");
     }
 }
