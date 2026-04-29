@@ -268,6 +268,7 @@ impl Tool for GitTool {
                 ToolResult {
                     output: result,
                     is_error: false,
+                    ..Default::default()
                 }
             }
             Err(e) => {

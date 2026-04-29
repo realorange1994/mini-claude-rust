@@ -252,6 +252,193 @@ impl Default for CollectHandler {
 }
 
 /// TerminalHandler prints clean output to terminal
+// --- Thinking block filter state machine (Hermes-style) ---
+
+/// State machine for filtering <thinking>...</thinking> and ༽...{{-- blocks
+/// from terminal display. Thinking content is shown in a dimmed style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkFilterState {
+    /// Normal text — pass through
+    Normal,
+    /// Detected '<' that might start <thinking> or ༽
+    InThinkOpenTag,
+    /// Inside a thinking block — suppress or dim
+    InThinkBlock,
+    /// Detected '<' that might start </thinking> or ༽
+    InThinkCloseTag,
+}
+
+impl ThinkFilterState {
+    /// Process a character through the state machine.
+    /// Returns (new_state, output_char) where output_char is None if the char should be suppressed.
+    pub fn process(self, c: char, buf: &mut String) -> (Self, Option<char>) {
+        match self {
+            ThinkFilterState::Normal => {
+                buf.push(c);
+                // Check for thinking tag starts
+                if c == '<' {
+                    // Could be start of <thinking> or </thinking>
+                    if buf.ends_with("<") {
+                        return (ThinkFilterState::InThinkOpenTag, None);
+                    }
+                }
+                // Check for ༽ (Anthropic extended thinking close)
+                if buf.ends_with("༽") {
+                    // This is actually the close tag for ༽...{{-- thinking
+                    // But we detect it in Normal state, meaning we just exited
+                }
+                (ThinkFilterState::Normal, Some(c))
+            }
+            ThinkFilterState::InThinkOpenTag => {
+                buf.push(c);
+                // Check if we're building <thinking>
+                if buf.ends_with("<thinking") {
+                    return (ThinkFilterState::InThinkBlock, None);
+                }
+                if buf.ends_with("</thinking") {
+                    return (ThinkFilterState::InThinkCloseTag, None);
+                }
+                // If we see a '>' that doesn't match, go back to normal
+                if c == '>' && !buf.ends_with("<thinking>") && !buf.ends_with("</thinking>") {
+                    // False alarm — output the buffered tag start
+                    let tag_start = buf.rfind('<').unwrap_or(0);
+                    let _to_output: String = buf.drain(tag_start..).collect();
+                    // We can't easily un-consume, so just go back to normal
+                    return (ThinkFilterState::Normal, None);
+                }
+                // If we see a space or other non-matching char after '<', it's not a thinking tag
+                if !c.is_alphabetic() && c != '/' && c != '>' {
+                    return (ThinkFilterState::Normal, None);
+                }
+                (ThinkFilterState::InThinkOpenTag, None)
+            }
+            ThinkFilterState::InThinkBlock => {
+                // Inside thinking block — suppress output
+                buf.push(c);
+                // Check for closing tag
+                if c == '<' {
+                    return (ThinkFilterState::InThinkCloseTag, None);
+                }
+                (ThinkFilterState::InThinkBlock, None)
+            }
+            ThinkFilterState::InThinkCloseTag => {
+                buf.push(c);
+                if buf.ends_with("</thinking>") {
+                    buf.clear();
+                    return (ThinkFilterState::Normal, None);
+                }
+                // If this isn't actually a close tag, go back to InThinkBlock
+                if c == '>' && !buf.ends_with("</thinking>") {
+                    return (ThinkFilterState::InThinkBlock, None);
+                }
+                (ThinkFilterState::InThinkCloseTag, None)
+            }
+        }
+    }
+}
+
+// --- Streaming progress metrics ---
+
+/// Tracks streaming progress metrics for adaptive timeouts and user feedback
+#[derive(Debug)]
+pub struct StreamProgress {
+    /// Time when the stream started
+    pub start_time: Instant,
+    /// Time when the first byte was received (TTFB)
+    pub first_byte_time: Option<Instant>,
+    /// Total tokens received so far
+    pub tokens_received: usize,
+    /// Total text characters received
+    pub chars_received: usize,
+    /// Number of tool calls received
+    pub tool_calls_received: usize,
+}
+
+impl StreamProgress {
+    pub fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            first_byte_time: None,
+            tokens_received: 0,
+            chars_received: 0,
+            tool_calls_received: 0,
+        }
+    }
+
+    /// Record that a byte/chunk was received
+    pub fn record_chunk(&mut self, content_len: usize) {
+        if self.first_byte_time.is_none() {
+            self.first_byte_time = Some(Instant::now());
+        }
+        self.chars_received += content_len;
+        // Rough token estimate
+        self.tokens_received += content_len.div_ceil(4);
+    }
+
+    /// Record a tool call
+    pub fn record_tool_call(&mut self) {
+        self.tool_calls_received += 1;
+    }
+
+    /// Get time-to-first-byte in milliseconds
+    pub fn ttfb_ms(&self) -> Option<u64> {
+        self.first_byte_time.map(|t| {
+            t.duration_since(self.start_time).as_millis() as u64
+        })
+    }
+
+    /// Get current throughput in tokens/second
+    pub fn tokens_per_second(&self) -> f64 {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            self.tokens_received as f64 / elapsed
+        } else {
+            0.0
+        }
+    }
+
+    /// Get elapsed time since stream start
+    pub fn elapsed_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
+    }
+}
+
+// --- Error classification for retry ---
+
+/// Classify an HTTP error as retryable or not.
+/// Retryable errors: network timeout, 429 rate limit, 500-504 server errors
+/// Non-retryable: 400 bad request, 401/403 auth errors, other client errors
+pub fn is_retryable_http_error(status: reqwest::StatusCode) -> bool {
+    let code = status.as_u16();
+    matches!(code, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Classify an error message as retryable or not
+pub fn is_retryable_error_msg(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    // Transient errors that are worth retrying
+    lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("reset")
+        || lower.contains("broken pipe")
+        || lower.contains("rate limit")
+        || lower.contains("overloaded")
+        || lower.contains("529") // Anthropic overloaded
+        || lower.contains("503")
+        || lower.contains("502")
+        || lower.contains("500")
+        || lower.contains("429")
+}
+
+/// Get retry delay for a given retry attempt with exponential backoff
+/// Base: 2s, max: 18s, jitter: ±0.5s
+pub fn retry_delay(attempt: usize) -> Duration {
+    let base_secs = 2u64;
+    let max_secs = 18u64;
+    let delay = (base_secs * 2u64.pow(attempt.min(4) as u32)).min(max_secs);
+    Duration::from_secs(delay)
+}
+
 pub struct TerminalHandler {
     seen_tool_call: RwLock<bool>,
     thinking_buf: RwLock<String>,

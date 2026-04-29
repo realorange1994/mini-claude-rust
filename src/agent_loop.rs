@@ -1445,6 +1445,7 @@ impl AgentLoop {
                 Ok(ToolResult {
                     output: format!("Error: {} timed out after {:?}", tool_name, timeout),
                     is_error: true,
+                    ..Default::default()
                 })
             }
         }

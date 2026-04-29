@@ -229,6 +229,62 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     }
 }
 
+/// Cached system prompt wrapper.
+/// Caches the system prompt and only rebuilds it when marked dirty
+/// (e.g., after compaction events). This is critical for Anthropic
+/// prefix caching to work effectively.
+pub struct CachedSystemPrompt {
+    cached: std::sync::RwLock<Option<String>>,
+    dirty: std::sync::atomic::AtomicBool,
+}
+
+impl CachedSystemPrompt {
+    pub fn new() -> Self {
+        Self {
+            cached: std::sync::RwLock::new(None),
+            dirty: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// Get the system prompt, rebuilding if dirty
+    pub fn get_or_build(
+        &self,
+        registry: &Registry,
+        permission_mode: &PermissionMode,
+        project_dir: &Path,
+        skill_loader: Option<&SkillLoader>,
+        skill_tracker: Option<&SkillTracker>,
+    ) -> String {
+        if !self.dirty.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(cached) = self.cached.read().unwrap().as_ref() {
+                return cached.clone();
+            }
+        }
+
+        // Rebuild the prompt
+        let prompt = build_system_prompt(
+            registry, permission_mode, project_dir, skill_loader, skill_tracker,
+        );
+
+        // Cache it
+        *self.cached.write().unwrap() = Some(prompt.clone());
+        self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        prompt
+    }
+
+    /// Mark the prompt as needing rebuild (call after compaction)
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Default for CachedSystemPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn build_system_prompt(
     registry: &Registry,
     permission_mode: &PermissionMode,

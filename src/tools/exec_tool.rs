@@ -258,6 +258,7 @@ impl Tool for ExecTool {
         ToolResult {
             output: result,
             is_error: !output.status.success(),
+            ..Default::default()
         }
     }
 }

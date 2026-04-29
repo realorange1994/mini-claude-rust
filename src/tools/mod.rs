@@ -1,5 +1,7 @@
 //! Tools module - implements all built-in tools
 
+pub mod coercion;
+
 mod exec_tool;
 mod file_read;
 mod file_write;
@@ -39,11 +41,68 @@ use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// ToolResult holds the output of a tool execution
-#[derive(Debug, Clone)]
+/// ToolResult holds the output of a tool execution with structured metadata
+#[derive(Debug, Clone, Default)]
 pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
+    /// Structured metadata for compaction summaries
+    pub metadata: ToolResultMetadata,
+}
+
+/// Metadata about a tool execution, used for generating high-quality
+/// compaction summaries (e.g., `[exec] ran "npm test" -> exit 0, 47 lines, 1.2s`)
+#[derive(Debug, Clone, Default)]
+pub struct ToolResultMetadata {
+    /// Name of the tool that was executed
+    pub tool_name: String,
+    /// Exit code (for exec/shell tools)
+    pub exit_code: Option<i32>,
+    /// Execution duration in milliseconds
+    pub duration_ms: u64,
+    /// Number of output lines (for truncation summary)
+    pub output_lines: usize,
+    /// Whether the output was truncated
+    pub truncated: bool,
+}
+
+impl ToolResultMetadata {
+    /// Generate a one-line summary for compaction
+    pub fn to_compact_summary(&self, output: &str) -> String {
+        let status = if self.exit_code.map_or(false, |c| c != 0) {
+            "error"
+        } else if self.is_error_from_output(output) {
+            "error"
+        } else {
+            "ok"
+        };
+
+        let line_count = if self.output_lines > 0 {
+            self.output_lines
+        } else {
+            output.lines().count()
+        };
+
+        let duration_str = if self.duration_ms >= 1000 {
+            format!("{:.1}s", self.duration_ms as f64 / 1000.0)
+        } else if self.duration_ms > 0 {
+            format!("{}ms", self.duration_ms)
+        } else {
+            String::new()
+        };
+
+        let duration_part = if duration_str.is_empty() { String::new() } else { format!(", {}", duration_str) };
+
+        if self.tool_name.is_empty() {
+            format!("-> {}, {} lines{}", status, line_count, duration_part)
+        } else {
+            format!("[{}] -> {}, {} lines{}", self.tool_name, status, line_count, duration_part)
+        }
+    }
+
+    fn is_error_from_output(&self, output: &str) -> bool {
+        output.contains("Error:") || output.contains("error:") || output.contains("FAILED")
+    }
 }
 
 impl ToolResult {
@@ -51,6 +110,7 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: false,
+            metadata: ToolResultMetadata::default(),
         }
     }
 
@@ -58,6 +118,16 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: true,
+            metadata: ToolResultMetadata::default(),
+        }
+    }
+
+    /// Create a ToolResult with metadata
+    pub fn with_metadata(output: impl Into<String>, is_error: bool, metadata: ToolResultMetadata) -> Self {
+        Self {
+            output: output.into(),
+            is_error,
+            metadata,
         }
     }
 }
