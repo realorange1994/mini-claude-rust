@@ -586,13 +586,50 @@ fn ensure_path_allowed(path: &Path, cwd: &Path) -> Option<String> {
     }
 
     // Path traversal protection: path must be within cwd
-    if let Ok(abs_cwd) = cwd.canonicalize() {
-        // For paths that don't exist yet, just check the prefix
-        let abs_path_str = path.to_string_lossy();
-        let abs_cwd_str = abs_cwd.to_string_lossy();
-        if !abs_path_str.starts_with(abs_cwd_str.as_ref()) {
-            return Some("path traversal outside working directory is not allowed".to_string());
+    // Use dunce to get consistent absolute paths on Windows (avoids UNC \\?\ prefix
+    // that std::fs::canonicalize produces, which breaks string prefix comparison).
+    let abs_cwd = match dunce::canonicalize(cwd) {
+        Ok(p) => p,
+        Err(_) => {
+            // Fallback: if cwd can't be resolved, skip the check
+            return None;
         }
+    };
+
+    // Try to canonicalize the path (works for existing files)
+    // For non-existent files, resolve manually
+    let abs_path = if path.exists() {
+        match dunce::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => path.to_path_buf(),
+        }
+    } else {
+        // File doesn't exist yet — resolve relative to cwd manually
+        let mut resolved = abs_cwd.clone();
+        for component in path.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::Normal(c) => {
+                    resolved.push(c);
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    resolved = path.to_path_buf();
+                    break;
+                }
+            }
+        }
+        resolved
+    };
+
+    // Normalize separators for comparison
+    let abs_path_str = abs_path.to_string_lossy().replace('\\', "/");
+    let abs_cwd_str = abs_cwd.to_string_lossy().replace('\\', "/");
+
+    if !abs_path_str.starts_with(&abs_cwd_str) {
+        return Some("path traversal outside working directory is not allowed".to_string());
     }
 
     None

@@ -388,7 +388,7 @@ impl AgentLoop {
         // Expand @ context references (e.g., @file:main.go, @diff)
         let processed_msg = {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let est_tokens: usize = 100000; // default context length estimate
+            let est_tokens: usize = 200000; // use full context window size
             let result = crate::context_references::preprocess_context_references(
                 user_message, &cwd, est_tokens,
             );
