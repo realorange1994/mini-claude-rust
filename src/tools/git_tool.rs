@@ -648,18 +648,13 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
 mod tests {
     use super::*;
     use std::fs;
+    use tempfile::TempDir;
 
-    fn test_repo_path() -> String {
-        // Use a path that doesn't contain backslashes that confuse git on Windows
-        let cargo_dir = env!("CARGO_MANIFEST_DIR");
-        // Normalize to forward slashes for git
-        cargo_dir.replace('\\', "/") + "/target/test_git_repo"
-    }
-
-    fn setup_test_repo() -> String {
-        let base = test_repo_path();
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    /// Create an isolated temp repo for each test. Returns (tempdir, repo_path_string).
+    /// The TempDir must be kept alive for the duration of the test.
+    fn setup_test_repo() -> (TempDir, String) {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().to_str().unwrap().replace('\\', "/");
 
         Command::new("git").args(["init"]).current_dir(&base).output().unwrap();
         Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&base).output().unwrap();
@@ -673,46 +668,40 @@ mod tests {
         fs::write(format!("{}/third.txt", base), "third").unwrap();
         Command::new("git").args(["add", "third.txt"]).current_dir(&base).output().unwrap();
         Command::new("git").args(["commit", "-m", "third"]).current_dir(&base).output().unwrap();
-        base
+        (temp, base)
     }
 
-    fn run_tool(operation: &str, params: &[(&str, Value)]) -> ToolResult {
+    fn run_tool_with_dir(operation: &str, params: &[(&str, Value)], dir: &str) -> ToolResult {
         let tool = GitTool::new();
         let mut map = HashMap::new();
         for (k, v) in params {
             map.insert(k.to_string(), v.clone());
         }
-        map.insert("directory".to_string(), Value::String(test_repo_path()));
+        map.insert("directory".to_string(), Value::String(dir.to_string()));
         map.insert("operation".to_string(), Value::String(operation.to_string()));
         tool.execute(map)
     }
 
-    fn make_params(params: &[(&str, Value)]) -> HashMap<String, Value> {
-        let mut map = HashMap::new();
-        for (k, v) in params {
-            map.insert(k.to_string(), v.clone());
-        }
-        map
-    }
-
     #[test]
     fn test_git_init() {
-        let init_path = format!("{}/new_init", test_repo_path());
+        let temp = TempDir::new().unwrap();
+        let init_path = temp.path().join("new_init");
+        let init_path_str = init_path.to_str().unwrap().replace('\\', "/");
         let _ = fs::remove_dir_all(&init_path);
         fs::create_dir_all(&init_path).unwrap();
 
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("init".to_string()));
-        params.insert("path".to_string(), Value::String(init_path.clone()));
+        params.insert("path".to_string(), Value::String(init_path_str.clone()));
         let result = tool.execute(params);
         assert!(!result.is_error, "init failed: {}", result.output);
-        assert!(fs::metadata(format!("{}/.git", init_path)).is_ok());
+        assert!(fs::metadata(format!("{}/.git", init_path_str)).is_ok());
     }
 
     #[test]
     fn test_git_mv() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let src = "mv_source.txt";
         let dst = "mv_dest.txt";
         let src_path = format!("{}/{}", base, src);
@@ -740,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_git_clean_dry_run() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Use a unique filename to avoid conflicts
         let filename = "clean_test_untracked.txt";
         let filepath = format!("{}/{}", base, filename);
@@ -763,7 +752,7 @@ mod tests {
 
     #[test]
     fn test_git_clean_force() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let filename = "clean_force_untracked.txt";
         let filepath = format!("{}/{}", base, filename);
         fs::write(&filepath, "untracked").unwrap();
@@ -785,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_git_cherry_pick() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Remove any stale lock file
         let _ = fs::remove_file(format!("{}/.git/index.lock", base));
 
@@ -810,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_git_revert() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let third_hash = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&base).output().unwrap();
         let hash = String::from_utf8_lossy(&third_hash.stdout).trim().to_string();
 
@@ -830,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_git_merge() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create a feature branch with a unique name
         let branch_name = "merge_test_branch";
         let filename = "merge_test_file.txt";
@@ -854,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_git_rebase() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create a branch from master with unique names
         let branch_name = "rebase_test_branch";
         let filename = "rebase_test_file.txt";
@@ -883,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_git_fetch() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create a bare repo as remote
         let bare_path = format!("{}/bare_fetch.git", base);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -901,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_git_clone() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_clone.git", base);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
         let clone_dest = format!("{}/cloned_repo", base);
@@ -920,7 +909,7 @@ mod tests {
     #[test]
     fn test_git_clone_no_dest() {
         // Clone without specifying path — git clones to repo-name directory
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_clone2.git", base);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
         let expected_dest = format!("{}/bare_clone2", base); // git strips .git
@@ -938,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_git_branch_create_list_delete() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
 
         // Test branch list (no branch param)
@@ -985,7 +974,7 @@ mod tests {
 
     #[test]
     fn test_branch_switch_full_cycle() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
 
         // Create branch
@@ -1029,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_checkout_create_branch() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
 
         // Test checkout -b (create and switch to new branch)
@@ -1050,7 +1039,7 @@ mod tests {
     #[test]
     fn test_clone_and_push_pull_cycle() {
         // Full cycle: setup → clone → modify → push → clone again → verify
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_cycle.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1090,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_git_worktree_list_add_remove() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let wt_path = format!("{}/wt_workdir", base);
         let _ = fs::remove_dir_all(&wt_path);
 
@@ -1119,7 +1108,7 @@ mod tests {
 
     #[test]
     fn test_git_push_pull_local_remote() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Get current branch name
         let branch_out = Command::new("git").args(["branch", "--show-current"]).current_dir(&base).output().unwrap();
         let current_branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
@@ -1155,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_git_describe() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create an annotated tag (required for describe)
         Command::new("git").args(["tag", "-a", "v1.0.0", "-m", "version 1"]).current_dir(&base).output().unwrap();
 
@@ -1170,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_git_shortlog() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("shortlog".to_string()));
@@ -1184,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_git_blame() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Verify the repo was properly set up
         let log_out = Command::new("git").args(["log", "--oneline"]).current_dir(&base).output().unwrap();
         assert!(log_out.status.success(), "Repo should have commits: {}", String::from_utf8_lossy(&log_out.stderr));
@@ -1209,7 +1198,7 @@ mod tests {
 
     #[test]
     fn test_git_reflog() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("reflog".to_string()));
@@ -1220,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_git_remote() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_remote_test.git", base);
         // Clean up any previous runs
         let _ = fs::remove_dir_all(&bare_path);
@@ -1239,7 +1228,7 @@ mod tests {
 
     #[test]
     fn test_git_rev_parse() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("rev-parse".to_string()));
@@ -1252,7 +1241,7 @@ mod tests {
 
     #[test]
     fn test_git_rev_list() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("rev-list".to_string()));
@@ -1265,7 +1254,7 @@ mod tests {
 
     #[test]
     fn test_git_show() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("show".to_string()));
@@ -1276,7 +1265,7 @@ mod tests {
 
     #[test]
     fn test_git_stash_push_pop() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Modify a tracked file
         fs::write(format!("{}/init.txt", base), "modified for stash").unwrap();
 
@@ -1309,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_git_ls_tree() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("ls-tree".to_string()));
@@ -1320,7 +1309,7 @@ mod tests {
 
     #[test]
     fn test_git_cached_diff() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Stage a change
         fs::write(format!("{}/init.txt", base), "modified content for diff test").unwrap();
         Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
@@ -1342,7 +1331,7 @@ mod tests {
 
     #[test]
     fn test_commit_basic() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         fs::write(format!("{}/new_file.txt", base), "new content").unwrap();
         Command::new("git").args(["add", "new_file.txt"]).current_dir(&base).output().unwrap();
 
@@ -1358,7 +1347,7 @@ mod tests {
 
     #[test]
     fn test_commit_all() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Modify an existing tracked file (no add needed)
         fs::write(format!("{}/init.txt", base), "modified content").unwrap();
 
@@ -1374,7 +1363,7 @@ mod tests {
 
     #[test]
     fn test_commit_author() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         fs::write(format!("{}/author_test.txt", base), "author test").unwrap();
         Command::new("git").args(["add", "author_test.txt"]).current_dir(&base).output().unwrap();
 
@@ -1395,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_commit_empty_message_required() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("commit".to_string()));
@@ -1408,7 +1397,7 @@ mod tests {
 
     #[test]
     fn test_commit_allow_empty() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("commit".to_string()));
@@ -1427,7 +1416,7 @@ mod tests {
 
     #[test]
     fn test_push_to_local_bare() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_push_test.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1455,7 +1444,7 @@ mod tests {
 
     #[test]
     fn test_push_force() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_force_push.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1479,7 +1468,7 @@ mod tests {
 
     #[test]
     fn test_push_all() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create a second branch
         Command::new("git").args(["branch", "second-branch"]).current_dir(&base).output().unwrap();
 
@@ -1510,7 +1499,7 @@ mod tests {
 
     #[test]
     fn test_push_tags() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         Command::new("git").args(["tag", "v2.0"]).current_dir(&base).output().unwrap();
 
         let bare_path = format!("{}/bare_tags_push.git", base);
@@ -1540,7 +1529,7 @@ mod tests {
 
     #[test]
     fn test_push_set_upstream() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_upstream.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1569,7 +1558,7 @@ mod tests {
 
     #[test]
     fn test_commit_amend() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         fs::write(format!("{}/amend_file.txt", base), "amend content").unwrap();
         Command::new("git").args(["add", "amend_file.txt"]).current_dir(&base).output().unwrap();
         Command::new("git").args(["commit", "-m", "original message"]).current_dir(&base).output().unwrap();
@@ -1602,7 +1591,7 @@ mod tests {
     #[test]
     fn test_pull_basic() {
         // Setup: create bare repo as remote, clone to dest, make change in bare via push
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_pull_test.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1631,7 +1620,7 @@ mod tests {
 
     #[test]
     fn test_pull_rebase() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_rebase_pull.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1661,7 +1650,7 @@ mod tests {
 
     #[test]
     fn test_pull_ff_only() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_ff_pull.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1692,7 +1681,7 @@ mod tests {
     #[test]
     fn test_pull_no_commits() {
         // Pull when already up to date
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_uptodate.git", base);
         let _ = fs::remove_dir_all(&bare_path);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1719,7 +1708,7 @@ mod tests {
 
     #[test]
     fn test_merge_fast_forward() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         // Create branch from an earlier point, then add commits on master
         let branch_name = "ff_merge_branch";
         let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
@@ -1745,7 +1734,7 @@ mod tests {
 
     #[test]
     fn test_merge_no_ff() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let branch_name = "no_ff_branch";
         let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
         Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
@@ -1777,7 +1766,7 @@ mod tests {
 
     #[test]
     fn test_merge_squash() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let branch_name = "squash_branch";
         let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
         Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
@@ -1807,7 +1796,7 @@ mod tests {
 
     #[test]
     fn test_merge_conflict_and_abort() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let branch_name = "conflict_branch";
         let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
         Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
@@ -1846,7 +1835,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_custom_message() {
-        let base = setup_test_repo();
+        let (_temp, base) = setup_test_repo();
         let branch_name = "msg_merge_branch";
         let _ = Command::new("git").args(["branch", "-D", branch_name]).current_dir(&base).output();
         Command::new("git").args(["checkout", "-b", branch_name]).current_dir(&base).output().unwrap();
