@@ -16,6 +16,66 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// Tracks iteration budget for the agent loop, allowing refunds for final answers
+/// and a grace call for graceful termination.
+pub struct IterationBudget {
+    max: usize,
+    consumed: u32,
+    grace_called: bool,
+}
+
+impl IterationBudget {
+    pub fn new(max: usize) -> Self {
+        Self {
+            max,
+            consumed: 0,
+            grace_called: false,
+        }
+    }
+
+    /// Consume one unit from the budget. Returns false when exhausted (and grace not yet called).
+    pub fn consume(&mut self) -> bool {
+        if (self.consumed as usize) < self.max {
+            self.consumed += 1;
+            true
+        } else if !self.grace_called {
+            // Already exhausted, let grace_call decide
+            false
+        } else {
+            false
+        }
+    }
+
+    /// Give one unit back — used when the model produces a text-only final answer
+    /// (no tool calls), since it shouldn't count against the budget.
+    pub fn refund(&mut self) {
+        if self.consumed > 0 {
+            self.consumed -= 1;
+        }
+    }
+
+    /// Attempt a grace call — allows one extra API call after exhaustion for the
+    /// model to produce a final answer. Returns true if the grace call is granted.
+    pub fn grace_call(&mut self) -> bool {
+        if !self.grace_called {
+            self.grace_called = true;
+            self.consumed += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns remaining turns (for display purposes).
+    pub fn remaining(&self) -> usize {
+        if self.grace_called {
+            0
+        } else {
+            self.max.saturating_sub(self.consumed as usize)
+        }
+    }
+}
+
 /// Continue reason tracks why the agent loop is continuing (inspired by Claude Code's 7 continue reasons)
 #[derive(Debug, Clone, PartialEq, Default)]
 enum ContinueReason {
@@ -528,7 +588,7 @@ impl AgentLoop {
         _messages: &[serde_json::Value],
         tools: &[serde_json::Value],
     ) -> Result<String> {
-        let mut turn = 0;
+        let mut budget = IterationBudget::new(self.max_turns);
         let mut last_transition = Transition::None;
         let mut consecutive_stalls = 0;
         let mut context_errors = 0;
@@ -545,8 +605,7 @@ impl AgentLoop {
                 return Ok("[Interrupted by user]".to_string());
             }
 
-            turn += 1;
-            if turn > self.max_turns {
+            if !budget.consume() {
                 break;
             }
 
@@ -914,7 +973,8 @@ impl AgentLoop {
                         }
 
                     } else if !text.is_empty() {
-                        // Final response
+                        // Final response — text-only (no tool calls), refund the budget
+                        budget.refund();
                         return Ok(text);
                     } else {
                         // No text and no tool calls — could be a thinking-only response
@@ -924,6 +984,17 @@ impl AgentLoop {
                         if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
                             eprintln!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
                             return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
+                        }
+                        // When budget is exhausted but text is empty, grant a grace call
+                        // so the model gets one more chance to produce a final answer
+                        if !budget.consume() {
+                            if budget.grace_call() {
+                                eprintln!("\n[!] Budget exhausted, granting grace call for final answer...");
+                            } else {
+                                eprintln!("[!] No text/tool_use in response (attempt {}/{}), giving up...",
+                                    consecutive_empty_responses, MAX_EMPTY_RESPONSES);
+                                return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
+                            }
                         }
                         eprintln!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
                             consecutive_empty_responses, MAX_EMPTY_RESPONSES);
@@ -1037,8 +1108,8 @@ impl AgentLoop {
                     // Check for consecutive stalls
                     consecutive_stalls += 1;
                     if consecutive_stalls >= 3 {
-                        // If max turns reached, try for final summary
-                        if turn >= self.max_turns {
+                        // If budget exhausted, try for final summary
+                        if budget.remaining() == 0 {
                             eprintln!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
                             return self.request_final_summary(system_prompt, tools).await;
                         }
@@ -1767,4 +1838,98 @@ pub fn clean_exec_output(output: &str) -> String {
     }
 
     cleaned.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_consume() {
+        let mut budget = IterationBudget::new(3);
+        assert!(budget.consume()); // 1/3
+        assert!(budget.consume()); // 2/3
+        assert!(budget.consume()); // 3/3
+        assert!(!budget.consume()); // exhausted
+        assert_eq!(budget.remaining(), 0);
+    }
+
+    #[test]
+    fn test_refund() {
+        let mut budget = IterationBudget::new(3);
+        assert!(budget.consume()); // 1/3
+        assert!(budget.consume()); // 2/3
+        assert!(budget.consume()); // 3/3
+        assert!(!budget.consume()); // exhausted
+        budget.refund(); // back to 2/3
+        assert!(budget.consume()); // 3/3 again
+        assert!(!budget.consume()); // exhausted again
+    }
+
+    #[test]
+    fn test_grace_call_once() {
+        let mut budget = IterationBudget::new(2);
+        assert!(budget.consume()); // 1/2
+        assert!(budget.consume()); // 2/2
+        assert!(!budget.consume()); // exhausted
+
+        // Grace call should work once
+        assert!(budget.grace_call());
+        assert_eq!(budget.remaining(), 0);
+
+        // Second grace call should fail
+        assert!(!budget.grace_call());
+    }
+
+    #[test]
+    fn test_grace_call_then_exhausted() {
+        let mut budget = IterationBudget::new(1);
+        assert!(budget.consume()); // 1/1
+        assert!(!budget.consume()); // exhausted
+
+        // Grace call grants one more
+        assert!(budget.grace_call());
+        // Still can't consume after grace
+        assert!(!budget.consume());
+        // No more grace
+        assert!(!budget.grace_call());
+    }
+
+    #[test]
+    fn test_refund_does_not_restore_grace() {
+        let mut budget = IterationBudget::new(1);
+        assert!(budget.consume()); // 1/1
+        assert!(budget.grace_call()); // grace used
+        budget.refund(); // gives one back
+        assert!(!budget.consume()); // can consume again
+        assert!(!budget.grace_call()); // grace already called, can't be used again
+    }
+
+    #[test]
+    fn test_remaining() {
+        let mut budget = IterationBudget::new(5);
+        assert_eq!(budget.remaining(), 5);
+        budget.consume();
+        assert_eq!(budget.remaining(), 4);
+        budget.consume();
+        budget.refund();
+        assert_eq!(budget.remaining(), 4);
+        // Consume all remaining
+        budget.consume();
+        budget.consume();
+        budget.consume();
+        assert_eq!(budget.remaining(), 1);
+        budget.consume();
+        assert_eq!(budget.remaining(), 0);
+        budget.grace_call();
+        assert_eq!(budget.remaining(), 0); // grace_used means 0 remaining
+    }
+
+    #[test]
+    fn test_zero_max() {
+        let mut budget = IterationBudget::new(0);
+        assert!(!budget.consume()); // immediately exhausted
+        assert!(budget.grace_call()); // grace still works
+        assert!(!budget.grace_call()); // only once
+    }
 }
