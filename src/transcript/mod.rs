@@ -289,7 +289,8 @@ impl Transcript {
         self.write_entry(&Entry::summary(content))
     }
 
-    /// Read all entries from the transcript file
+    /// Read all entries from the transcript file.
+    /// Handles truncated last lines (from Ctrl+C / crash) by discarding them.
     pub fn read_all(&self) -> std::io::Result<Vec<Entry>> {
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -298,13 +299,21 @@ impl Transcript {
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
+        let mut last_bad_line: Option<String> = None;
 
         for line in reader.lines() {
             let line = line?;
             if let Ok(entry) = serde_json::from_str::<Entry>(&line) {
                 entries.push(entry);
+                last_bad_line = None;
+            } else {
+                // Keep the bad line in case it's the last one (truncated write)
+                last_bad_line = Some(line);
             }
         }
+        // If the last line was corrupt (truncated JSON from crash/Ctrl+C),
+        // it's safe to discard — it was an incomplete write.
+        let _ = last_bad_line;
 
         Ok(entries)
     }
