@@ -67,7 +67,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Priority: flags > env > .claude/settings.json > defaults
+    // Priority: flags > env > project .claude/settings.json > home ~/.claude/settings.json > defaults
     let mut cfg = Config::default();
 
     // Load from .claude/settings.json and .mcp.json
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
 
     // Validate: model is required
     if cfg.model.is_empty() {
-        eprintln!("[!] No model specified. Set it via --model flag, ANTHROPIC_MODEL env, or model in .claude/settings.json");
+        eprintln!("[!] No model specified. Set it via --model flag, ANTHROPIC_MODEL env, or model in .claude/settings.json (project or home)");
         std::process::exit(1);
     }
 
