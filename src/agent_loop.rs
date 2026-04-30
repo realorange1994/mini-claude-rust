@@ -691,11 +691,11 @@ impl AgentLoop {
                             let params: HashMap<String, serde_json::Value> =
                                 serde_json::from_str(&tc.arguments).unwrap_or_default();
 
-                            // Agent-controlled timeout — default 30s
+                            // Agent-controlled timeout — default 120s
                             let timeout_secs = params.get("timeout")
                                 .and_then(|v| v.as_i64())
-                                .map(|v| v.max(1).min(300) as u64)
-                                .unwrap_or(30);
+                                .map(|v| v.max(1).min(600) as u64)
+                                .unwrap_or(120);
 
                             let registry = self.registry.read().await;
                             let tool = registry.get(&tc.name);
