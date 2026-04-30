@@ -392,7 +392,9 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
 
         println!();
         let result = agent.run(user_input);
-        println!("{}", result);
+        if !agent.use_stream {
+            println!("{}", result);
+        }
         println!();
     }
 }
