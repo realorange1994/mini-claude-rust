@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
 
+use crate::agent_loop::tool_arg_summary;
 use crate::prompt_caching::cache_system_prompt;
 use crate::rate_limit::{parse_rate_limit_headers, RateLimitState};
 use crate::tools::truncate_at;
@@ -709,108 +710,6 @@ impl Default for TerminalHandler {
     }
 }
 
-pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
-    let input: std::collections::HashMap<String, serde_json::Value> =
-        serde_json::from_str(args_json).unwrap_or_default();
-
-    match tool_name {
-        "read_file" | "write_file" | "edit_file" | "multi_edit" | "fileops" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                if !path.is_empty() {
-                    return path.to_string();
-                }
-            }
-        }
-        "list_dir" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                if !path.is_empty() {
-                    return path.to_string();
-                }
-            }
-            return ".".to_string(); // Default to current directory
-        }
-        "exec" | "terminal" => {
-            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                if cmd.len() > 120 {
-                    return format!("{}...", truncate_at(cmd, 120));
-                }
-                return cmd.to_string();
-            }
-        }
-        "grep" => {
-            if let (Some(pattern), Some(path)) = (
-                input.get("pattern").and_then(|v| v.as_str()),
-                input.get("path").and_then(|v| v.as_str()),
-            ) {
-                return format!("\"{}\" in {}", pattern, path);
-            }
-            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
-                return pattern.to_string();
-            }
-        }
-        "glob" => {
-            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
-                return pattern.to_string();
-            }
-        }
-        "system" => {
-            if let Some(op) = input.get("operation").and_then(|v| v.as_str()) {
-                return op.to_string();
-            }
-        }
-        "git" => {
-            if let Some(args) = input.get("args").and_then(|v| v.as_str()) {
-                return format!("git {}", args);
-            }
-        }
-        "web_search" | "exa_search" => {
-            if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
-                return query.to_string();
-            }
-        }
-        "web_fetch" => {
-            if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
-                return url.to_string();
-            }
-        }
-        "process" => {
-            if let Some(name) = input.get("process_name").and_then(|v| v.as_str()) {
-                return name.to_string();
-            }
-            if let Some(pid) = input.get("pid").and_then(|v| v.as_i64()) {
-                return format!("PID {}", pid);
-            }
-        }
-        "runtime_info" => {
-            if let Some(show) = input.get("show").and_then(|v| v.as_str()) {
-                return show.to_string();
-            }
-        }
-        _ => {}
-    }
-
-    // Fallback: compact format
-    let parts: Vec<String> = input
-        .iter()
-        .filter_map(|(k, v)| {
-            let v_str = match v {
-                serde_json::Value::String(s) if !s.is_empty() => {
-                    truncate_at(s, 80).to_string()
-                }
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::String(_) | serde_json::Value::Null => return None,
-                _ => v.to_string(),
-            };
-            Some(format!("{}={}", k, v_str))
-        })
-        .collect();
-    if parts.is_empty() {
-        return String::new();
-    }
-    parts.join(" ")
-}
-
 /// StallDetector monitors streaming for stalls
 pub struct StallDetector {
     last_event: RwLock<Instant>,
@@ -1118,15 +1017,20 @@ pub async fn process_sse_events(
                 sse_detected = true;
             }
 
-            // Process bytes as SSE
+            // Process bytes as SSE — accumulate raw bytes to handle multi-byte UTF-8 correctly.
+            // Using `buf.push(b as char)` would corrupt multi-byte UTF-8 sequences (M-10).
+            let mut byte_buf: Vec<u8> = Vec::new();
             for b in bytes {
                 if b == b'\n' {
-                    let line = buf.trim().to_string();
-                    buf.clear();
+                    // Convert accumulated bytes to a string (handles multi-byte UTF-8)
+                    let line_bytes = byte_buf.trim_ascii().to_vec();
+                    byte_buf.clear();
 
-                    if line.is_empty() {
+                    if line_bytes.is_empty() {
                         continue;
                     }
+
+                    let line = String::from_utf8_lossy(&line_bytes).to_string();
 
                     // Parse SSE line: "data: <json>"
                     if let Some(data) = line.strip_prefix("data: ") {
@@ -1166,7 +1070,7 @@ pub async fn process_sse_events(
                         }
                     }
                 } else if b != b'\r' {
-                    buf.push(b as char);
+                    byte_buf.push(b);
                 }
             }
         }

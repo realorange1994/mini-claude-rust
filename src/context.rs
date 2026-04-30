@@ -115,6 +115,39 @@ impl Message {
         }
     }
 
+    /// Serialize any MessageContent to plain text for safe merging.
+    /// Used by fix_role_alternation to avoid silent content loss when
+    /// consecutive same-role messages have incompatible content types
+    /// (e.g., Summary followed by Text after truncation).
+    pub fn content_to_text(&self) -> String {
+        match &self.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Summary(s) => s.clone(),
+            MessageContent::ToolUseBlocks(blocks) => {
+                let parts: Vec<String> = blocks.iter()
+                    .map(|b| format!("[tool_use: {}({})]", b.name, b.id))
+                    .collect();
+                parts.join(" ")
+            }
+            MessageContent::ToolResultBlocks(blocks) => {
+                let parts: Vec<String> = blocks.iter()
+                    .map(|b| {
+                        let texts: Vec<String> = b.content.iter()
+                            .map(|c| match c {
+                                ToolResultContent::Text { text } => text.clone(),
+                            })
+                            .collect();
+                        format!("[tool_result: {}] {}", b.tool_use_id, texts.join(" "))
+                    })
+                    .collect();
+                parts.join(" ")
+            }
+            MessageContent::CompactBoundary { trigger, pre_compact_tokens } => {
+                format!("[compact boundary: {}, {} tokens]", trigger, pre_compact_tokens)
+            }
+        }
+    }
+
     /// Check if this message is a compact boundary
     pub fn is_compact_boundary(&self) -> bool {
         matches!(self.content, MessageContent::CompactBoundary { .. })
@@ -457,21 +490,45 @@ impl ConversationContext {
                                 a.push_str("\n\n");
                                 a.push_str(b);
                             } else {
-                                last.content = msg.content;
+                                // Type mismatch: serialize last content to text,
+                                // append new text (avoids silent content loss)
+                                let prev = last.content_to_text();
+                                last.content = MessageContent::Text(
+                                    format!("{}\n\n{}", prev, b),
+                                );
                             }
                         }
                         MessageContent::ToolUseBlocks(b) => {
                             if let MessageContent::ToolUseBlocks(a) = &mut last.content {
                                 a.extend(b.clone());
                             } else {
-                                last.content = msg.content;
+                                let prev = last.content_to_text();
+                                let tools: Vec<String> = b.iter()
+                                    .map(|t| format!("[tool_use: {}({})]", t.name, t.id))
+                                    .collect();
+                                last.content = MessageContent::Text(
+                                    format!("{}\n\n{}", prev, tools.join(" ")),
+                                );
                             }
                         }
                         MessageContent::ToolResultBlocks(b) => {
                             if let MessageContent::ToolResultBlocks(a) = &mut last.content {
                                 a.extend(b.clone());
                             } else {
-                                last.content = msg.content;
+                                let prev = last.content_to_text();
+                                let results: Vec<String> = b.iter()
+                                    .map(|r| {
+                                        let texts: Vec<String> = r.content.iter()
+                                            .map(|c| match c {
+                                                ToolResultContent::Text { text } => text.clone(),
+                                            })
+                                            .collect();
+                                        format!("[tool_result: {}] {}", r.tool_use_id, texts.join(" "))
+                                    })
+                                    .collect();
+                                last.content = MessageContent::Text(
+                                    format!("{}\n\n{}", prev, results.join(" ")),
+                                );
                             }
                         }
                         MessageContent::Summary(b) => {
@@ -479,11 +536,20 @@ impl ConversationContext {
                                 a.push_str("\n\n");
                                 a.push_str(b);
                             } else {
-                                last.content = msg.content;
+                                let prev = last.content_to_text();
+                                last.content = MessageContent::Text(
+                                    format!("{}\n\n{}", prev, b),
+                                );
                             }
                         }
                         _ => {
-                            last.content = msg.content;
+                            // Fallback: serialize both to text and concatenate
+                            // (handles CompactBoundary and any future types)
+                            let prev = last.content_to_text();
+                            let curr = msg.content_to_text();
+                            last.content = MessageContent::Text(
+                                format!("{}\n\n{}", prev, curr),
+                            );
                         }
                     }
                     continue;

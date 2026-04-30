@@ -132,7 +132,7 @@ impl FileHistory {
                 let ts = chrono::DateTime::parse_from_rfc3339(&disk_snap.timestamp)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
-                let checksum = format!("{:x}", md5_hash(&disk_snap.content));
+                let checksum = format!("{:x}", simple_hash(&disk_snap.content));
                 let snapshot = FileSnapshot {
                     path: file_path.clone(),
                     content: disk_snap.content,
@@ -237,7 +237,7 @@ impl FileHistory {
         }
 
         let content = fs::read_to_string(path)?;
-        let checksum = format!("{:x}", md5_hash(&content));
+        let checksum = format!("{:x}", simple_hash(&content));
 
         let mut snapshots = self.snapshots.write().unwrap();
         let file_snapshots = snapshots.entry(path.to_path_buf()).or_insert_with(Vec::new);
@@ -278,7 +278,7 @@ impl FileHistory {
         }
 
         let content = fs::read_to_string(path)?;
-        let checksum = format!("{:x}", md5_hash(&content));
+        let checksum = format!("{:x}", simple_hash(&content));
 
         let mut snapshots = self.snapshots.write().unwrap();
         let file_snapshots = snapshots.entry(path.to_path_buf()).or_insert_with(Vec::new);
@@ -1033,7 +1033,7 @@ fn compute_hunks(from_lines: &[&str], to_lines: &[&str], lcs: &[(usize, usize)])
     hunks
 }
 
-fn md5_hash(data: &str) -> u128 {
+fn simple_hash(data: &str) -> u128 {
     let mut hash: u128 = 0;
     for (i, byte) in data.bytes().enumerate() {
         hash = hash.wrapping_add((byte as u128).wrapping_mul(i as u128 + 1));

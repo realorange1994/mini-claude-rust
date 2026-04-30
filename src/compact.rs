@@ -166,6 +166,7 @@ impl ContextWindowTracker {
     }
 
     /// Check if compaction is needed
+    /// Returns true if the context should be compacted based on token usage.
     pub fn should_compact(&self, messages: &[Message]) -> bool {
         let tokens = estimate_total_tokens(messages);
         tokens >= self.compact_threshold()
@@ -781,6 +782,8 @@ pub struct Compactor {
     pub last_summary: Option<String>,
     /// Recent compaction savings ratios for anti-thrashing (A4)
     last_compact_savings: Vec<f64>,
+    /// Token count right after last successful compaction (cooldown tracking)
+    post_compact_tokens: Option<usize>,
 }
 
 impl Compactor {
@@ -794,6 +797,7 @@ impl Compactor {
             max_llm_compact_failures: 3,
             last_summary: None,
             last_compact_savings: Vec::with_capacity(2),
+            post_compact_tokens: None,
         }
     }
 
@@ -813,6 +817,29 @@ impl Compactor {
         self
     }
 
+    /// Check if compaction is needed based on token usage.
+    /// Includes cooldown protection: after a successful compaction, skip further
+    /// compaction until token count has grown by at least 25% from the post-compact level.
+    pub fn should_compact(&self, total_tokens: usize) -> bool {
+        let threshold = (self.max_tokens as f64 * self.compact_threshold) as usize;
+
+        if total_tokens < threshold {
+            return false;
+        }
+
+        // Cooldown: if we recently compacted, don't re-compact until context has grown
+        // significantly (25% above post-compact level). This prevents immediate re-compaction
+        // when the summary + a few new messages still exceeds the threshold.
+        if let Some(post_tokens) = self.post_compact_tokens {
+            let cooldown_threshold = post_tokens + (post_tokens / 4); // 25% growth
+            if total_tokens < cooldown_threshold {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Run compaction on context.
     /// Returns CompactStats with the result.
     /// If LLM compaction succeeds, replaces old messages with summary.
@@ -829,14 +856,8 @@ impl Compactor {
         let entries_before = context.len();
         let tokens_before = estimate_total_tokens(&messages);
 
-        let tracker = ContextWindowTracker::new(
-            model,
-            self.compact_threshold,
-            self.compact_buffer,
-        );
-
-        // Check if compaction is needed
-        if !tracker.should_compact(&messages) {
+        // Check if compaction is needed (includes cooldown protection)
+        if !self.should_compact(tokens_before) {
             return CompactStats {
                 phase: CompactPhase::None,
                 entries_before,
@@ -862,10 +883,11 @@ impl Compactor {
             };
         }
 
-        let usage = tracker.usage_info(&messages);
+        let effective_window = self.max_tokens.saturating_sub(20_000);
+        let percent_used = (tokens_before as f64 / effective_window as f64 * 100.0).min(100.0) as u32;
         eprintln!(
             "[Compaction] Triggered: {} tokens ({}% of effective window)",
-            usage.estimated_tokens, usage.percent_used
+            tokens_before, percent_used
         );
 
         // Try LLM compaction first (if we haven't failed too many times)
@@ -902,18 +924,46 @@ impl Compactor {
                     self.llm_compact_failed_count = 0;
                     self.phase = CompactPhase::None;
 
-                    // Replace context with boundary + summary
-                    context.replace_messages(vec![result.boundary, result.summary]);
+                    // Set cooldown: record post-compact token count
+                    self.post_compact_tokens = Some(result.post_compact_tokens);
+
+                    // Replace context with boundary + summary + recent tail messages.
+                    // This preserves the most recent conversation context while
+                    // replacing older messages with the summary, matching the
+                    // pattern used by hermes and the Go version.
+                    // Keep the last few messages as "tail" to maintain context
+                    // continuity after compaction.
+                    const TAIL_SIZE: usize = 4;
+                    let tail_start = messages.len().saturating_sub(TAIL_SIZE);
+                    let tail: Vec<Message> = messages[tail_start..].to_vec();
+
+                    let mut new_messages = vec![result.boundary, result.summary];
+                    new_messages.extend(tail);
+
+                    // Calculate post_compact_tokens from the actual combined messages
+                    // (boundary + summary + tail), not just boundary + summary.
+                    // Previously this only counted boundary + summary, underestimating
+                    // the token count and causing compaction thrashing when tail
+                    // messages added significant tokens.
+                    let post_tokens = estimate_total_tokens(&new_messages);
+
+                    context.replace_messages(new_messages);
+
+                    // After replacing messages, validate tool pairing and fix
+                    // role alternation to ensure API compatibility.
+                    context.validate_tool_pairing();
+                    context.fix_role_alternation();
+
+                    let entries_after = context.len();
+                    let tokens_after = estimate_total_tokens(context.messages());
 
                     return CompactStats {
                         phase: CompactPhase::None, // LLM compaction doesn't use legacy phases
                         entries_before,
-                        entries_after: context.len(),
-                        estimated_tokens_saved: tokens_before.saturating_sub(
-                            result.post_compact_tokens
-                        ),
+                        entries_after,
+                        estimated_tokens_saved: tokens_before.saturating_sub(tokens_after),
                         estimated_tokens_before: tokens_before,
-                        estimated_tokens_after: result.post_compact_tokens,
+                        estimated_tokens_after: tokens_after,
                     };
                 }
                 Err(e) => {
@@ -998,6 +1048,9 @@ impl Compactor {
         let tokens_after = estimate_total_tokens(context.messages());
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
 
+        // Set cooldown: record post-compact token count
+        self.post_compact_tokens = Some(tokens_after);
+
         CompactStats {
             phase,
             entries_before,
@@ -1021,6 +1074,7 @@ impl Compactor {
         self.llm_compact_failed_count = 0;
         self.last_summary = None;
         self.last_compact_savings.clear();
+        self.post_compact_tokens = None;
     }
 }
 
