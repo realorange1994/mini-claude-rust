@@ -719,6 +719,16 @@ impl AgentLoop {
                             });
                         }
 
+                        // Print all tool calls upfront (matching Go: "  [exec]: cmd" for exec, "  [tool] args" for others)
+                        for entry in &entries {
+                            let input_preview = format_tool_args(&entry.tc.name, &entry.params);
+                            if entry.tc.name == "exec" {
+                                eprintln!("  [{}]: {}", entry.tc.name, input_preview);
+                            } else {
+                                eprintln!("  [{}] {}", entry.tc.name, input_preview);
+                            }
+                        }
+
                         // Execute approved tool calls concurrently
                         let mut handles = Vec::new();
                         for entry in entries {
@@ -969,7 +979,10 @@ impl AgentLoop {
                             } else {
                                 // Print success result preview
                                 let preview = tool_result_preview(tool_name, output);
-                                if preview.is_empty() {
+                                if tool_name == "exec" {
+                                    // For exec, show result with tool name prefix (matching Go)
+                                    eprintln!("  [+] {}: {}", tool_name, preview);
+                                } else if preview.is_empty() {
                                     eprintln!("  [+] {}", tool_name);
                                 } else {
                                     eprintln!("  [+] {}: {}", tool_name, preview);
@@ -1248,6 +1261,27 @@ impl AgentLoop {
                         return Err(anyhow!("Request cancelled by user"));
                     }
 
+                    // 2013 error: tool pairing broken -- repair and rebuild messages before retry
+                    if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
+                        eprintln!("[!] Tool pairing error (2013) during stream, repairing context and rebuilding messages...");
+                        {
+                            let mut ctx = self.context.write().await;
+                            ctx.validate_tool_pairing();
+                            ctx.fix_role_alternation();
+                        }
+                        // Rebuild messages from repaired context so the fix takes effect on retry
+                        let rebuilt = self.entries_to_messages_async().await;
+                        // Retry with repaired messages instead of falling back to non-streaming
+                        match self.try_stream_once(system_prompt, &rebuilt, tools).await {
+                            Ok(result) => return Ok(result),
+                            Err(e2) => {
+                                eprintln!("[!] Stream still failed after 2013 repair: {}", e2);
+                                // Fall through to non-streaming with rebuilt messages
+                                return self.call_with_non_streaming_fallback(system_prompt, &rebuilt, tools).await;
+                            }
+                        }
+                    }
+
                     // Check if it's a transient error using rich classification
                     let classification = classify_error(&err_str, 0, 0);
                     if !classification.retryable {
@@ -1361,6 +1395,7 @@ impl AgentLoop {
         const MAX_BACKOFF_MS: u64 = 18000;
 
         let mut backoff_ms = INITIAL_BACKOFF_MS;
+        let mut current_messages: Vec<serde_json::Value> = messages.to_vec();
 
         for attempt in 0..MAX_RETRIES {
             // Check for interruption before each attempt
@@ -1368,7 +1403,7 @@ impl AgentLoop {
                 return Err(anyhow!("Request cancelled by user"));
             }
 
-            match self.call_api_non_streaming(system_prompt, messages, tools).await {
+            match self.call_api_non_streaming(system_prompt, &current_messages, tools).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     // Check if interrupted
@@ -1377,6 +1412,20 @@ impl AgentLoop {
                     }
 
                     let err_str = e.to_string();
+
+                    // 2013 error: tool pairing broken -- repair and rebuild messages before retry
+                    if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
+                        eprintln!("[!] Tool pairing error (2013) in non-streaming, repairing context...");
+                        {
+                            let mut ctx = self.context.write().await;
+                            ctx.validate_tool_pairing();
+                            ctx.fix_role_alternation();
+                        }
+                        // Rebuild messages from repaired context and retry
+                        current_messages = self.entries_to_messages_async().await;
+                        continue;
+                    }
+
                     let classification = classify_error(&err_str, 0, 0);
                     if !classification.retryable {
                         return Err(e);
@@ -1922,6 +1971,49 @@ pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
                 _ => return None,
             };
             Some(format!("{}={}", k, v_str))
+        })
+        .take(3)
+        .collect();
+
+    parts.join(", ")
+}
+
+/// Format tool call arguments for display (matching Go's formatToolArgs).
+fn format_tool_args(tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> String {
+    match tool_name {
+        "read_file" | "write_file" | "edit_file" | "list_dir" => {
+            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                return path.to_string();
+            }
+        }
+        "exec" => {
+            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                if cmd.len() > 120 {
+                    return format!("{}...", &cmd[..120]);
+                }
+                return cmd.to_string();
+            }
+        }
+        "grep" => {
+            if let Some(pattern) = params.get("pattern").and_then(|v| v.as_str()) {
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    return format!("{:?} in {}", pattern, path);
+                }
+                return format!("{:?}", pattern);
+            }
+        }
+        _ => {}
+    }
+
+    // Fallback: format as key=value pairs
+    let parts: Vec<String> = params.iter()
+        .filter_map(|(k, v)| {
+            match v {
+                serde_json::Value::String(s) => Some(format!("{}={}", k, if s.len() > 80 { format!("{}...", &s[..80]) } else { s.clone() })),
+                serde_json::Value::Number(n) => Some(format!("{}={}", k, n)),
+                serde_json::Value::Bool(b) => Some(format!("{}={}", k, b)),
+                _ => None,
+            }
         })
         .take(3)
         .collect();
