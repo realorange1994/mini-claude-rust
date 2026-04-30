@@ -352,8 +352,9 @@ fn summarize_args(input: &std::collections::HashMap<String, serde_json::Value>) 
         .take(3)
         .map(|(k, v)| {
             let val_str = v.to_string();
+            let truncated_val: String = val_str.chars().take(30).collect();
             if val_str.len() > 30 {
-                format!("{}={}", k, &val_str[..30])
+                format!("{}={}", k, truncated_val)
             } else {
                 format!("{}={}", k, val_str)
             }
@@ -476,7 +477,7 @@ pub fn redact_sensitive_text(text: &str) -> String {
                         + (after_key.len() - after_key.trim_start().len());
                     let value_end = value_start + 1 + 1 + end_offset; // colon + space + closing quote
                     result.replace_range(value_start..=value_end, ": \"[REDACTED]\"");
-                    break;
+                    // Continue the while loop to redact all occurrences, not just the first
                 } else {
                     break;
                 }
@@ -600,14 +601,14 @@ pub async fn compact_conversation(
         "system".to_string(),
         serde_json::json!([{"type": "text", "text": COMPACT_SYSTEM_PROMPT}]),
     );
-    payload.insert("messages".to_string(), serde_json::json!(api_messages));
 
-    // Add the summary prompt as the last message
-    let final_messages = vec![serde_json::json!({
+    // Append the summary prompt as the final user message after the conversation history
+    let mut all_messages = api_messages;
+    all_messages.push(serde_json::json!({
         "role": "user",
         "content": [{"type": "text", "text": user_prompt}]
-    })];
-    payload.insert("messages".to_string(), serde_json::json!(final_messages));
+    }));
+    payload.insert("messages".to_string(), serde_json::json!(all_messages));
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
 
@@ -1064,7 +1065,8 @@ impl PostCompactRestorer {
         for (path, content) in files.iter().take(self.max_files_to_restore) {
             let truncated = if estimate_tokens(content) > self.max_tokens_per_file {
                 let char_budget = self.max_tokens_per_file * 4;
-                format!("...[truncated]...\n{}", &content[..char_budget.min(content.len())])
+                let truncated_content: String = content.chars().take(char_budget).collect();
+                format!("...[truncated]...\n{}", truncated_content)
             } else {
                 content.to_string()
             };

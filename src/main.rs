@@ -386,7 +386,9 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     }
                     continue;
                 }
-                _ => unreachable!(),
+                _ => {
+                    println!("Unknown command: {}", cmd);
+                }
             }
         }
 

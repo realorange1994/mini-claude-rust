@@ -158,18 +158,22 @@ impl Tool for ExecTool {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        // Determine shell: powershell → bash → cmd on Windows (matching Go)
-        let (shell, flag) = if cfg!(target_os = "windows") {
-            if std::process::Command::new("powershell").output().is_ok() {
-                ("powershell", "-Command")
-            } else if std::process::Command::new("bash").output().is_ok() {
-                ("bash", "-c")
+        // Determine shell: powershell -> bash -> cmd on Windows (matching Go)
+        // Cached with OnceLock to avoid spawning a process every call
+        static SHELL_CACHE: OnceLock<(&'static str, &'static str)> = OnceLock::new();
+        let (shell, flag) = SHELL_CACHE.get_or_init(|| {
+            if cfg!(target_os = "windows") {
+                if std::process::Command::new("powershell").output().is_ok() {
+                    ("powershell", "-Command")
+                } else if std::process::Command::new("bash").output().is_ok() {
+                    ("bash", "-c")
+                } else {
+                    ("cmd", "/C")
+                }
             } else {
-                ("cmd", "/C")
+                ("bash", "-c")
             }
-        } else {
-            ("bash", "-c")
-        };
+        });
 
         let output_result = Command::new(shell)
             .arg(flag)

@@ -822,7 +822,29 @@ impl AgentLoop {
                                     let tool_result = tokio::time::timeout(tool_timeout, tokio::task::spawn_blocking(move || {
                                         let registry = registry_clone.blocking_read();
 
-                                        // Read-before-edit enforcement: file must be read and unmodified
+                                        // Path traversal protection: file tools must stay within project directory
+        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir"];
+        if path_tools.contains(&tool_name.as_str()) {
+            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    if let Err(e) = crate::tools::is_path_allowed(path) {
+                        return ToolResult::error(e);
+                    }
+                }
+            }
+            // Also check destination for fileops (ln, cp, mv)
+            if tool_name == "fileops" {
+                if let Some(dest) = params.get("destination").and_then(|v| v.as_str()) {
+                    if !dest.is_empty() {
+                        if let Err(e) = crate::tools::is_path_allowed(dest) {
+                            return ToolResult::error(e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Read-before-edit enforcement: file must be read and unmodified
                                         if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
                                             if let Some(path) = &snapshot_path {
                                                 if let Err(msg) = registry.check_file_stale(&path.to_string_lossy()) {
@@ -1567,6 +1589,27 @@ impl AgentLoop {
         let registry = self.registry.read().await;
 
         let tool = registry.get(name).ok_or_else(|| anyhow!("Tool not found: {}", name))?;
+
+        // Path traversal protection: file tools must stay within project directory
+        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir"];
+        if path_tools.contains(&name) {
+            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                if !path.is_empty() {
+                    if let Err(e) = crate::tools::is_path_allowed(path) {
+                        return Ok(ToolResult::error(e));
+                    }
+                }
+            }
+            if name == "fileops" {
+                if let Some(dest) = params.get("destination").and_then(|v| v.as_str()) {
+                    if !dest.is_empty() {
+                        if let Err(e) = crate::tools::is_path_allowed(dest) {
+                            return Ok(ToolResult::error(e));
+                        }
+                    }
+                }
+            }
+        }
 
         // Check permissions
         if let Some(result) = self.gate.check(tool.as_ref(), params.clone()) {

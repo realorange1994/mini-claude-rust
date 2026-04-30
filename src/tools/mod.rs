@@ -418,3 +418,22 @@ pub fn truncate_at(s: &str, max: usize) -> &str {
     }
     &s[..end]
 }
+
+/// Check that a resolved file path is within the working directory.
+/// Returns Ok(()) if allowed, or Err(error_message) if the path escapes the project.
+pub fn is_path_allowed(path: &str) -> Result<(), String> {
+    let resolved = expand_path(path);
+    let wd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
+
+    // Resolve symlinks on both sides for robustness
+    let abs_wd = std::fs::canonicalize(&wd).unwrap_or_else(|_| wd.clone());
+    let abs_resolved = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+
+    let rel = abs_resolved.strip_prefix(&abs_wd)
+        .map_err(|_| format!("path {:?} is outside the project directory", path))?;
+    if rel.as_os_str().is_empty() || rel.starts_with("..") {
+        Err(format!("path {:?} is outside the project directory", path))
+    } else {
+        Ok(())
+    }
+}
