@@ -124,7 +124,7 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Always initialize file history (with disk persistence) — shared Arc between tools and agent_loop
+    // Always initialize file history (with disk persistence) -- shared Arc between tools and agent_loop
     use miniclaudecode_rust::filehistory::FileHistory;
     use std::sync::Arc;
     let snapshots_dir = std::env::current_dir()
@@ -217,7 +217,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(0) => {
-                // EOF — stdin was closed
+                // EOF -- stdin was closed
                 println!("\nGoodbye!");
                 println!("To resume this session: --resume {}", agent.transcript_filename().trim_end_matches(".jsonl"));
                 agent.close();
@@ -251,7 +251,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
             continue;
         }
 
-        // Check for exact command match — only treat as command if the first
+        // Check for exact command match -- only treat as command if the first
         // word is a known command. Unknown /xxx is passed through as prompt text.
         let is_known_cmd = if user_input.starts_with('/') {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
@@ -322,13 +322,13 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                 }
                 "/help" => {
                     println!("Commands:");
-                    println!("  /help    — Show available commands");
-                    println!("  /compact — Force context compaction");
-                    println!("  /clear   — Clear conversation history");
-                    println!("  /mode    — Switch permission mode (ask|auto|plan)");
-                    println!("  /resume  — Resume a previous session");
-                    println!("  /tools   — List available tools");
-                    println!("  /quit    — Exit");
+                    println!("  /help    -- Show available commands");
+                    println!("  /compact -- Force context compaction");
+                    println!("  /clear   -- Clear conversation history");
+                    println!("  /mode    -- Switch permission mode (ask|auto|plan)");
+                    println!("  /resume  -- Resume a previous session");
+                    println!("  /tools   -- List available tools");
+                    println!("  /quit    -- Exit");
                     continue;
                 }
                 "/resume" => {

@@ -1,6 +1,6 @@
 //! Tool argument coercion (Hermes-style)
 //!
-//! LLMs frequently pass arguments with incorrect types — e.g., a string "42"
+//! LLMs frequently pass arguments with incorrect types -- e.g., a string "42"
 //! when the schema expects an integer 42. This module provides automatic
 //! type coercion to fix these common mistakes before tool execution.
 
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_coerce_invalid_string_to_integer() {
-        // "hello" cannot be coerced to integer — should remain unchanged
+        // "hello" cannot be coerced to integer -- should remain unchanged
         let mut schema = serde_json::Map::new();
         let mut props = serde_json::Map::new();
         props.insert("count".to_string(), json!({"type": "integer"}));
@@ -378,7 +378,7 @@ mod tests {
 
         let mut args = HashMap::from([("count".to_string(), json!("hello"))]);
         let result = coerce_arguments(&schema, &mut args);
-        // Should not be coerced — remains as string
+        // Should not be coerced -- remains as string
         assert_eq!(result.args["count"], json!("hello"));
         assert!(result.warnings.is_empty());
     }

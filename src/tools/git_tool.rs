@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn test_git_clone_no_dest() {
-        // Clone without specifying path — git clones to repo-name directory
+        // Clone without specifying path -- git clones to repo-name directory
         let (_temp, base) = setup_test_repo();
         let bare_path = format!("{}/bare_clone2.git", base);
         Command::new("git").args(["clone", "--bare", base.as_str(), bare_path.as_str()]).output().unwrap();
@@ -1389,7 +1389,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("commit".to_string()));
         params.insert("directory".to_string(), Value::String(base));
-        // No message — should error
+        // No message -- should error
         let result = tool.execute(params);
         assert!(result.is_error, "commit without message should fail");
         assert!(result.output.contains("message is required"));
@@ -1690,7 +1690,7 @@ mod tests {
         let _ = fs::remove_dir_all(&clone_dest);
         Command::new("git").args(["clone", bare_path.as_str(), clone_dest.as_str()]).output().unwrap();
 
-        // No new commits — should say "Already up to date"
+        // No new commits -- should say "Already up to date"
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("pull".to_string()));
@@ -1703,7 +1703,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Merge tests — extended
+    // Merge tests -- extended
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1789,7 +1789,7 @@ mod tests {
         let result = tool.execute(params);
         assert!(!result.is_error, "merge --squash failed: {}", result.output);
 
-        // Squash merge leaves changes staged but not committed — commit them
+        // Squash merge leaves changes staged but not committed -- commit them
         Command::new("git").args(["commit", "-m", "squashed merge"]).current_dir(&base).output().unwrap();
         assert!(fs::metadata(format!("{}/squash_file.txt", base)).is_ok());
     }
@@ -1813,7 +1813,7 @@ mod tests {
         Command::new("git").args(["add", "init.txt"]).current_dir(&base).output().unwrap();
         Command::new("git").args(["commit", "-m", "master change to init"]).current_dir(&base).output().unwrap();
 
-        // Try to merge — should conflict
+        // Try to merge -- should conflict
         let tool = GitTool::new();
         let mut params = HashMap::new();
         params.insert("operation".to_string(), Value::String("merge".to_string()));

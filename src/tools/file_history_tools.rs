@@ -96,7 +96,7 @@ impl Tool for FileHistoryTool {
                 };
 
                 // Detect if this is a "before" snapshot (same content as next version)
-                // These are pre-execution snapshots that didn't change content — merge display with next
+                // These are pre-execution snapshots that didn't change content -- merge display with next
                 let is_before = i + start + 1 < total
                     && snapshots[i + start].checksum == snapshots[i + start + 1].checksum;
 

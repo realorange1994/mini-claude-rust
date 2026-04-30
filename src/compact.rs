@@ -83,7 +83,7 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
                 total += 10; // type(1) + id(4) + name(3) + structure(2)
                 total += estimate_tokens_typed(&block.name);
                 if let Ok(json) = serde_json::to_string(&block.input) {
-                    // Tool inputs are JSON — use json ratio
+                    // Tool inputs are JSON -- use json ratio
                     total += (json.len() as f64 / 3.0).ceil() as usize;
                 }
             }
@@ -96,7 +96,7 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
                 for content in &block.content {
                     match content {
                         crate::context::ToolResultContent::Text { text } => {
-                            // Tool results are typically JSON/structured — use json ratio
+                            // Tool results are typically JSON/structured -- use json ratio
                             total += (text.len() as f64 / 3.0).ceil() as usize;
                         }
                     }
@@ -256,7 +256,7 @@ fn dedup_tool_results(messages: &mut Vec<Message>) {
                 let h = hash_content(&combined);
                 if let Some(original_id) = seen.get(&h) {
                     if *original_id != block.tool_use_id {
-                        // Duplicate found — replace content
+                        // Duplicate found -- replace content
                         block.content = vec![crate::context::ToolResultContent::Text {
                             text: format!(
                                 "[duplicate result, see tool_use_id {}]",
@@ -429,7 +429,7 @@ const COMPACT_USER_PROMPT: &str = r#"Summarize the following conversation histor
 2. Note key decisions made and discoveries found
 3. List files that were read, modified, or created
 4. Describe the current state of work and what remains
-5. Be concise but complete — the next AI should be able to continue seamlessly
+5. Be concise but complete -- the next AI should be able to continue seamlessly
 
 Do NOT include:
 - Individual tool call details or raw outputs
@@ -530,7 +530,7 @@ fn find_closing_quote(s: &str) -> Option<usize> {
 // --- LLM-driven compaction ---
 
 /// Compress messages using LLM summary generation.
-/// This is the primary compaction method — replaces older truncation-based approaches.
+/// This is the primary compaction method -- replaces older truncation-based approaches.
 /// If `last_summary` is provided, uses iterative update prompt.
 pub async fn compact_conversation(
     messages: &[Message],
@@ -1351,7 +1351,7 @@ mod tests {
             panic!("Expected ToolResultBlocks");
         }
 
-        // Second result: duplicate of first — replaced with reference
+        // Second result: duplicate of first -- replaced with reference
         if let MessageContent::ToolResultBlocks(blocks) = &messages[1].content {
             if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
                 assert!(text.contains("[duplicate result, see tool_use_id tool-1]"));
@@ -1698,7 +1698,7 @@ mod tests {
     fn test_compactor_anti_thrashing() {
         let mut compactor = Compactor::new();
 
-        // Initially no savings recorded — should not skip
+        // Initially no savings recorded -- should not skip
         assert!(compactor.last_compact_savings.is_empty());
 
         // Record low savings

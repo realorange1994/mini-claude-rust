@@ -328,13 +328,13 @@ You have access to the following tools to help the user with software engineerin
     // Operating Rules
     prompt.push_str("\n## Operating Rules\n\n");
     prompt.push_str("### Behavioral Guidelines\n\n");
-    prompt.push_str("1. **Think Before Coding** — Don't assume. Don't hide confusion. State assumptions explicitly. If multiple interpretations exist, present them. If something is unclear, stop and ask.\n");
-    prompt.push_str("2. **Simplicity First** — Write the minimum code that solves the problem. No features beyond what was asked. No abstractions for single-use code. No error handling for impossible scenarios.\n");
-    prompt.push_str("3. **Surgical Changes** — Touch only what you must. Don't \"improve\" adjacent code, comments, or formatting. Don't refactor things that aren't broken. Match existing style. Remove only imports/variables/functions that YOUR changes made unused.\n");
-    prompt.push_str("4. **Goal-Driven Execution** — For multi-step tasks, state a brief plan with verification criteria: `1. [Step] → verify: [check]`. Define success criteria before starting.\n\n");
+    prompt.push_str("1. **Think Before Coding** -- Don't assume. Don't hide confusion. State assumptions explicitly. If multiple interpretations exist, present them. If something is unclear, stop and ask.\n");
+    prompt.push_str("2. **Simplicity First** -- Write the minimum code that solves the problem. No features beyond what was asked. No abstractions for single-use code. No error handling for impossible scenarios.\n");
+    prompt.push_str("3. **Surgical Changes** -- Touch only what you must. Don't \"improve\" adjacent code, comments, or formatting. Don't refactor things that aren't broken. Match existing style. Remove only imports/variables/functions that YOUR changes made unused.\n");
+    prompt.push_str("4. **Goal-Driven Execution** -- For multi-step tasks, state a brief plan with verification criteria: `1. [Step] → verify: [check]`. Define success criteria before starting.\n\n");
     prompt.push_str("### Tool Rules\n\n");
     prompt.push_str("5. Always read a file before editing it.\n");
-    prompt.push_str("6. Use tools to accomplish tasks — don't just describe what to do.\n");
+    prompt.push_str("6. Use tools to accomplish tasks -- don't just describe what to do.\n");
     prompt.push_str("7. When running bash commands, prefer non-destructive read operations.\n");
     prompt.push_str("8. For file edits, provide enough context in old_string to uniquely match.\n");
     prompt.push_str("9. Be concise and direct in your responses.\n");
@@ -419,7 +419,7 @@ You have access to the following tools to help the user with software engineerin
                 let mut char_count = section.len();
                 let budget = 4000;
                 for skill in unsent {
-                    let mut entry = format!("- **{}** — {}", skill.name, skill.description);
+                    let mut entry = format!("- **{}** -- {}", skill.name, skill.description);
                     if let Some(when) = &skill.when_to_use {
                         entry.push_str(&format!(" ({})", when));
                     }

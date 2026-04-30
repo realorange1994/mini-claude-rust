@@ -1,4 +1,4 @@
-//! Retry utilities — jittered backoff for decorrelated retries.
+//! Retry utilities -- jittered backoff for decorrelated retries.
 //!
 //! Replaces fixed exponential backoff with jittered delays to prevent
 //! thundering-herd retry spikes when multiple sessions hit the same

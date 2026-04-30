@@ -227,7 +227,7 @@ impl Registry {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // File was deleted — not a staleness issue for new file creation
+                // File was deleted -- not a staleness issue for new file creation
                 Ok(())
             }
             Err(e) => {

@@ -265,7 +265,7 @@ fn collect_handler_error_chunk_is_no_op() {
 #[test]
 fn collect_handler_tool_argument_without_tool_call_is_ignored() {
     let h = CollectHandler::new();
-    // ToolArgument without a preceding ToolCall — last_mut() returns None
+    // ToolArgument without a preceding ToolCall -- last_mut() returns None
     h.handle(StreamChunk {
         chunk_type: ChunkType::ToolArgument,
         content: r#"{"path":"/x"}"#.into(),
@@ -577,7 +577,7 @@ fn parse_anthropic_message_tool_use_missing_id_ignored() {
 #[test]
 fn stall_detector_initial_state_not_stalled() {
     let sd = StallDetector::new();
-    // Just created — stall_timeout is 90s, startup_timeout is 120s
+    // Just created -- stall_timeout is 90s, startup_timeout is 120s
     assert!(sd.check_stall().is_none());
 }
 
@@ -1167,7 +1167,7 @@ fn collect_handler_has_partial_tool_call_no_args() {
         name: Some("exec".into()),
         usage: None,
     });
-    // Tool call started but no arguments — stream cut off
+    // Tool call started but no arguments -- stream cut off
     assert!(h.has_partial_tool_call());
 }
 
@@ -1309,7 +1309,7 @@ fn collect_handler_has_truncated_tool_args_empty_args_ignored() {
         name: Some("read_file".into()),
         usage: None,
     });
-    // Tool call started but no arguments yet — not truncated
+    // Tool call started but no arguments yet -- not truncated
     assert!(!h.has_truncated_tool_args());
 }
 

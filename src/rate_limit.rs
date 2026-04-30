@@ -279,7 +279,7 @@ pub fn format_rate_limit_display(state: &RateLimitState) -> String {
     drop(guard);
 
     let Some(captured_at) = captured_at else {
-        return "No rate limit data yet — make an API request first.".to_string();
+        return "No rate limit data yet -- make an API request first.".to_string();
     };
 
     let age = captured_at.elapsed();
@@ -324,7 +324,7 @@ pub fn format_rate_limit_display(state: &RateLimitState) -> String {
         .filter(|(_, b)| b.limit > 0 && b.usage_pct() >= 80.0)
         .map(|(label, b)| {
             format!(
-                "  [!] {} at {:.0}% — resets in {}",
+                "  [!] {} at {:.0}% -- resets in {}",
                 label,
                 b.usage_pct(),
                 fmt_seconds(b.remaining_seconds_now())

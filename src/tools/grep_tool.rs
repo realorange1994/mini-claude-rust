@@ -289,7 +289,7 @@ fn rg_search(
     let combined = format!("{}{}", stdout, stderr);
     let text = combined.trim().to_string();
     if text.is_empty() {
-        // rg exits with code 1 when no matches found — not a real error
+        // rg exits with code 1 when no matches found -- not a real error
         if is_error {
             return ToolResult::error(format!("Error running rg: {}", stderr.trim()));
         }

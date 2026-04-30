@@ -14,20 +14,20 @@ pub enum AgentError {
     Transient { source: TransientError },
     /// Non-retryable generic error
     NonRetryable { message: String },
-    /// Context window exceeded — compress before retry
+    /// Context window exceeded -- compress before retry
     ContextOverflow {
         current_tokens: usize,
         max_tokens: usize,
     },
     /// Orphaned tool_call/result pairs detected (API error 2013)
     ToolPairing { orphaned_ids: Vec<String> },
-    /// Rate limited (429) — backoff + retry
+    /// Rate limited (429) -- backoff + retry
     RateLimit { retry_after: Duration },
-    /// Billing failure (402 / credit exhausted) — rotate key or fallback
+    /// Billing failure (402 / credit exhausted) -- rotate key or fallback
     Billing { message: String },
-    /// Model not found — fallback to different model
+    /// Model not found -- fallback to different model
     ModelNotFound { model: String },
-    /// Payload too large (413) — compress context before retry
+    /// Payload too large (413) -- compress context before retry
     PayloadTooLarge { message: String },
     /// Provider overloaded (503/529)
     Overloaded { message: String },
@@ -41,7 +41,7 @@ pub enum AgentError {
     ThinkingSig { message: String },
     /// Long context tier rate limit (429 + "extra usage" / "long context")
     LongContextTier { retry_after: Duration },
-    /// Unclassifiable — retry with backoff
+    /// Unclassifiable -- retry with backoff
     Unknown { message: String },
     /// Model hit max output tokens (incomplete response)
     MaxOutputTokens { partial_text: String },
@@ -372,7 +372,7 @@ pub fn classify_error(err_msg: &str, approx_tokens: usize, context_length: usize
 
     // ── Message pattern matching (no status code) ──
 
-    // Context overflow — not retryable without compression
+    // Context overflow -- not retryable without compression
     if matches_any(&lower, CONTEXT_OVERFLOW_PATTERNS) {
         return with_hints(
             AgentError::ContextOverflow { current_tokens: approx_tokens, max_tokens: context_length },
@@ -448,12 +448,12 @@ pub fn classify_error(err_msg: &str, approx_tokens: usize, context_length: usize
         return result(AgentError::Timeout { source: TransientError::Timeout });
     }
 
-    // Network errors — retryable (check AFTER timeout to avoid "connection timed out" misclass)
+    // Network errors -- retryable (check AFTER timeout to avoid "connection timed out" misclass)
     if matches_any(&lower, NETWORK_ERROR_PATTERNS) && !lower.contains("timeout") && !lower.contains("timed out") {
         return result(AgentError::Transient { source: TransientError::ConnectionLost });
     }
 
-    // Server errors without status code — retryable
+    // Server errors without status code -- retryable
     if matches_any(&lower, SERVER_ERROR_PATTERNS) {
         return result(AgentError::Transient { source: TransientError::ServerError(0) });
     }
@@ -473,7 +473,7 @@ pub fn classify_error(err_msg: &str, approx_tokens: usize, context_length: usize
     )
 }
 
-/// Classify 402 (Payment Required) errors — billing vs transient usage limit.
+/// Classify 402 (Payment Required) errors -- billing vs transient usage limit.
 fn classify_402(lower: &str, err_msg: &str, status_code: u16) -> ClassifyResult {
     if matches_any(lower, USAGE_LIMIT_PATTERNS) && matches_any(lower, USAGE_LIMIT_TRANSIENT_SIGNALS) {
         return ClassifyResult {
@@ -493,7 +493,7 @@ fn classify_402(lower: &str, err_msg: &str, status_code: u16) -> ClassifyResult 
     }
 }
 
-/// Classify 400 (Bad Request) errors — context overflow, model not found, or format error.
+/// Classify 400 (Bad Request) errors -- context overflow, model not found, or format error.
 fn classify_400(
     lower: &str, err_msg: &str,
     approx_tokens: usize, context_length: usize,
@@ -623,7 +623,7 @@ mod tests {
         let r = classify_error("prompt is too long: context_length_exceeded", 150_000, 200_000);
         assert_eq!(r.error.category(), "context_overflow");
         assert!(r.hints.compress);
-        assert!(r.retryable); // retryable — compress and retry
+        assert!(r.retryable); // retryable -- compress and retry
     }
 
     #[test]

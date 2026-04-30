@@ -48,7 +48,7 @@ impl IterationBudget {
         }
     }
 
-    /// Give one unit back — used when the model produces a text-only final answer
+    /// Give one unit back -- used when the model produces a text-only final answer
     /// (no tool calls), since it shouldn't count against the budget.
     pub fn refund(&mut self) {
         if self.consumed > 0 {
@@ -56,7 +56,7 @@ impl IterationBudget {
         }
     }
 
-    /// Attempt a grace call — allows one extra API call after exhaustion for the
+    /// Attempt a grace call -- allows one extra API call after exhaustion for the
     /// model to produce a final answer. Returns true if the grace call is granted.
     pub fn grace_call(&mut self) -> bool {
         if !self.grace_called {
@@ -571,7 +571,7 @@ impl AgentLoop {
                         vec![serde_json::json!({"type": "text", "text": text})])
                     }
                     MessageContent::CompactBoundary { .. } => {
-                        // Skip compact boundaries in API messages — they're metadata only
+                        // Skip compact boundaries in API messages -- they're metadata only
                         return None;
                     }
                 };
@@ -691,7 +691,7 @@ impl AgentLoop {
                             let params: HashMap<String, serde_json::Value> =
                                 serde_json::from_str(&tc.arguments).unwrap_or_default();
 
-                            // Agent-controlled timeout — default 600s
+                            // Agent-controlled timeout -- default 600s
                             let timeout_secs = params.get("timeout")
                                 .and_then(|v| v.as_i64())
                                 .map(|v| v.max(1).min(600) as u64)
@@ -807,7 +807,7 @@ impl AgentLoop {
                                     };
 
                                     // Auto-snapshot before write/edit tools (captures pre-modification state)
-                                    // No description prefix — the post-execution snapshot carries the operation description
+                                    // No description prefix -- the post-execution snapshot carries the operation description
                                     if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
                                         if let Some(path) = snapshot_path.as_ref() {
                                             let _ = file_history.snapshot(path);
@@ -817,7 +817,7 @@ impl AgentLoop {
                                     // Clone snapshot_path for use both inside and after spawn_blocking
                                     let snapshot_path_post = snapshot_path.clone();
 
-                                    // Execute tool on blocking thread pool — ensures synchronous
+                                    // Execute tool on blocking thread pool -- ensures synchronous
                                     // syscalls don't block the async runtime's core threads.
                                     let tool_result = tokio::time::timeout(tool_timeout, tokio::task::spawn_blocking(move || {
                                         let registry = registry_clone.blocking_read();
@@ -1027,11 +1027,11 @@ impl AgentLoop {
                         }
 
                     } else if !text.is_empty() {
-                        // Final response — text-only (no tool calls), refund the budget
+                        // Final response -- text-only (no tool calls), refund the budget
                         budget.refund();
                         return Ok(text);
                     } else {
-                        // No text and no tool calls — could be a thinking-only response
+                        // No text and no tool calls -- could be a thinking-only response
                         // This happens when the model uses extended thinking but hasn't produced text yet.
                         // Continue the loop to let the model produce more output.
                         consecutive_empty_responses += 1;
@@ -1062,7 +1062,7 @@ impl AgentLoop {
                 Err(e) => {
                     let err_str = e.to_string();
 
-                    // Max output tokens hit — resume directly without truncation
+                    // Max output tokens hit -- resume directly without truncation
                     if err_str.contains("maximum output length")
                         || err_str.contains("max_tokens")
                         || (err_str.contains("400") && err_str.contains("output")) {
@@ -1076,7 +1076,7 @@ impl AgentLoop {
                             );
                             let mut ctx = self.context.write().await;
                             ctx.add_user_message(
-                                "Output token limit reached. Resume directly — no apology, no recap. \
+                                "Output token limit reached. Resume directly -- no apology, no recap. \
                                 Pick up mid-thought and break remaining work into smaller pieces.".to_string(),
                             );
                             continue;
@@ -1099,7 +1099,7 @@ impl AgentLoop {
                         continue;
                     }
 
-                    // 2013 error: tool_result doesn't follow tool_call — repair pairing before retry
+                    // 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
                     if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
                         eprintln!("[!] Tool pairing error (2013), repairing context...");
                         let mut ctx = self.context.write().await;
@@ -1229,7 +1229,7 @@ impl AgentLoop {
 
         let mut backoff_ms = INITIAL_BACKOFF_MS;
 
-        // Always try streaming first — it's more reliable across different
+        // Always try streaming first -- it's more reliable across different
         // API/proxy configurations. Non-streaming can hang on some proxies
         // that don't flush the response until the entire body is ready.
         for attempt in 0..MAX_RETRIES {

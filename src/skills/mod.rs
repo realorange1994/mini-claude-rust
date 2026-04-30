@@ -184,7 +184,7 @@ impl Loader {
         for name in skill_names {
             if let Some(info) = skill_index.get(name) {
                 if info.available {
-                    output.push_str(&format!("- **{}** (always-on) — {}", info.name, info.description));
+                    output.push_str(&format!("- **{}** (always-on) -- {}", info.name, info.description));
                     if let Some(when) = &info.when_to_use {
                         output.push_str(&format!(" {}", when));
                     }
@@ -210,7 +210,7 @@ impl Loader {
                 continue; // already listed in Active Skills
             }
             let status = if skill.available { "" } else { " (unavailable)" };
-            output.push_str(&format!("- **{}**{} — {}", skill.name, status, skill.description));
+            output.push_str(&format!("- **{}**{} -- {}", skill.name, status, skill.description));
             if let Some(when) = &skill.when_to_use {
                 output.push_str(&format!(" {}", when));
             }

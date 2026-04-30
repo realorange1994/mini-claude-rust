@@ -1,4 +1,4 @@
-//! @ Context References — expand @file, @folder, @diff, @staged, @git:N, @url in user messages.
+//! @ Context References -- expand @file, @folder, @diff, @staged, @git:N, @url in user messages.
 //!
 //! When a user types `@file:main.go` or `@diff`, the reference is expanded
 //! into a context block attached to the message. Token budget guardrails
@@ -272,7 +272,7 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
         );
     }
 
-    // Check file size — reject files over 10MB
+    // Check file size -- reject files over 10MB
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
     if metadata.len() > MAX_FILE_SIZE {
         return (String::new(), format!(
@@ -374,7 +374,7 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
         let mut hint = format!(" (lines {}-{}, file has {} lines)", line_start, actual_end.min(total_lines), total_lines);
         if let Some(requested_end) = ref_item.line_end {
             if requested_end > total_lines {
-                hint = format!(" (lines {}-{}, file has {} lines — requested end {} adjusted)", line_start, total_lines, total_lines, requested_end);
+                hint = format!(" (lines {}-{}, file has {} lines -- requested end {} adjusted)", line_start, total_lines, total_lines, requested_end);
             }
         }
 
@@ -424,7 +424,7 @@ fn expand_folder_reference(ref_item: &ContextReference, cwd: &Path) -> (String, 
 
     if is_empty {
         return (
-            format!("## @folder:{} (0 tokens)\n(empty directory — no files or subdirectories)", ref_item.target),
+            format!("## @folder:{} (0 tokens)\n(empty directory -- no files or subdirectories)", ref_item.target),
             String::new(),
         );
     }
@@ -453,7 +453,7 @@ fn expand_git_reference(
     match git_check {
         Ok(output) if !output.status.success() => {
             return (String::new(), format!(
-                "{}: not a git repository — git references require a git repo", label
+                "{}: not a git repository -- git references require a git repo", label
             ));
         }
         Err(_) => {
@@ -466,7 +466,7 @@ fn expand_git_reference(
 
     let output = match Command::new("git").args(args).current_dir(cwd).output() {
         Ok(o) => o,
-        Err(e) => return (String::new(), format!("{}: git command failed — {}", label, e)),
+        Err(e) => return (String::new(), format!("{}: git command failed -- {}", label, e)),
     };
 
     if !output.status.success() {
@@ -478,8 +478,8 @@ fn expand_git_reference(
     let (content, is_empty) = if content.is_empty() {
         // Provide context-specific empty messages so the model understands what "empty" means
         let empty_msg = match label {
-            "@diff" => "(working tree is clean — no unstaged changes)",
-            "@staged" => "(nothing staged — no staged changes to commit)",
+            "@diff" => "(working tree is clean -- no unstaged changes)",
+            "@staged" => "(nothing staged -- no staged changes to commit)",
             s if s.starts_with("@git:") => "(no commits found in this repository)",
             _ => "(no output)",
         };
@@ -504,7 +504,7 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return (String::new(), format!(
-            "{}: invalid URL — must start with http:// or https://", ref_item.raw
+            "{}: invalid URL -- must start with http:// or https://", ref_item.raw
         ));
     }
 
@@ -522,7 +522,7 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
     {
         Ok(o) => o,
         Err(e) => return (String::new(), format!(
-            "{}: curl not available — {}", ref_item.raw, e
+            "{}: curl not available -- {}", ref_item.raw, e
         )),
     };
 
@@ -536,7 +536,7 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
             ""
         };
         return (String::new(), format!(
-            "{}: fetch failed — {}{}", ref_item.raw, if stderr.is_empty() { "unknown error" } else { &stderr }, hint
+            "{}: fetch failed -- {}{}", ref_item.raw, if stderr.is_empty() { "unknown error" } else { &stderr }, hint
         ));
     }
 
@@ -559,7 +559,7 @@ fn expand_url_reference(ref_item: &ContextReference) -> (String, String) {
         let status_hint = match http_code.as_str() {
             "401" | "403" => " (authentication required or access denied)",
             "404" => " (page not found)",
-            "429" => " (rate limited — too many requests)",
+            "429" => " (rate limited -- too many requests)",
             s if s.starts_with('5') => " (server error)",
             _ => "",
         };
@@ -743,7 +743,7 @@ fn ensure_path_allowed(path: &Path, cwd: &Path) -> Option<String> {
             Err(_) => path.to_path_buf(),
         }
     } else {
-        // File doesn't exist yet — resolve relative to cwd manually
+        // File doesn't exist yet -- resolve relative to cwd manually
         let mut resolved = abs_cwd.clone();
         for component in path.components() {
             match component {

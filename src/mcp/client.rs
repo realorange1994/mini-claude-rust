@@ -340,14 +340,14 @@ impl Client {
             let resp: JsonRpcResponse = serde_json::from_str(&line)
                 .map_err(|e| format!("parse: {} (raw: {})", e, &line[..line.len().min(200)]))?;
 
-            // Skip notifications (no id field) — e.g. notifications/progress, notifications/message
+            // Skip notifications (no id field) -- e.g. notifications/progress, notifications/message
             if resp.id.is_none() {
                 continue;
             }
 
             // Validate response ID matches our request ID
             if resp.id != Some(id) {
-                // ID mismatch — this shouldn't happen with atomic write+read,
+                // ID mismatch -- this shouldn't happen with atomic write+read,
                 // but handle defensively by skipping stale responses
                 continue;
             }

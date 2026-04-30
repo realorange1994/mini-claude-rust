@@ -740,7 +740,7 @@ impl FileHistory {
         let snapshots = self.snapshots.read().unwrap();
         let file_snapshots = snapshots.get(path)?;
 
-        // Build non-deleted view — this is what users see as "v1, v2, v3..."
+        // Build non-deleted view -- this is what users see as "v1, v2, v3..."
         let active: Vec<&FileSnapshot> = file_snapshots.iter().filter(|s| !s.deleted).collect();
         let total = active.len();
         if total == 0 {

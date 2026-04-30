@@ -206,7 +206,7 @@ impl CollectHandler {
         if calls.is_empty() {
             return false;
         }
-        // Last tool call has no arguments — stream cut off during tool_use block
+        // Last tool call has no arguments -- stream cut off during tool_use block
         let last = calls.last().unwrap();
         last.arguments.is_empty()
     }
@@ -241,6 +241,20 @@ impl CollectHandler {
         text.clear();
     }
 
+    /// Clear all accumulated state (text, tool_calls, thinking).
+    /// Used before stream retries where the API will send a completely
+    /// new response -- old collected data would have mismatched IDs.
+    pub fn clear_all(&self) {
+        let mut text = self.text.write().unwrap();
+        text.clear();
+        drop(text);
+        let mut calls = self.tool_calls.write().unwrap();
+        calls.clear();
+        drop(calls);
+        let mut thinking = self.thinking.write().unwrap();
+        thinking.clear();
+    }
+
     /// Get usage info
     #[allow(dead_code)]
     pub fn usage(&self) -> Option<Usage> {
@@ -272,11 +286,11 @@ const ANSI_RESET: &str = "\x1b[0m";
 /// Thinking content is shown in a dimmed style; tag markers are stripped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkFilterState {
-    /// Normal text — pass through as-is
+    /// Normal text -- pass through as-is
     Normal,
     /// Detected `<` that might start `<thinking>` or `<think>`; consuming tag
     InThinkOpenTag,
-    /// Inside a thinking block — output content with ANSI dim styling
+    /// Inside a thinking block -- output content with ANSI dim styling
     InThinkBlock,
     /// Detected `<` that might start `</thinking>` or `</think>`; consuming tag
     InThinkCloseTag,
@@ -612,7 +626,7 @@ impl TerminalHandler {
                         eprint!("{}", ch);
                     }
                     ThinkFilterAction::Suppress => {
-                        // Part of a tag — do not print
+                        // Part of a tag -- do not print
                     }
                     ThinkFilterAction::FlushNormal(flushed) => {
                         // False alarm: replay buffered characters as normal text
@@ -631,14 +645,14 @@ impl TerminalHandler {
                         eprint!("{}", flushed);
                     }
                     ThinkFilterAction::EnterThink => {
-                        // Entering thinking block — open dim styling
+                        // Entering thinking block -- open dim styling
                         if !*dim {
                             eprint!("{}", ANSI_DIM);
                             *dim = true;
                         }
                     }
                     ThinkFilterAction::ExitThink => {
-                        // Exiting thinking block — close dim styling
+                        // Exiting thinking block -- close dim styling
                         if *dim {
                             eprint!("{}", ANSI_RESET);
                             *dim = false;
@@ -654,7 +668,7 @@ impl TerminalHandler {
             buf.clear();
             match *state {
                 ThinkFilterState::InThinkOpenTag => {
-                    // Partial open tag at end of stream — treat as normal text
+                    // Partial open tag at end of stream -- treat as normal text
                     if *dim {
                         eprint!("{}", ANSI_RESET);
                         *dim = false;
@@ -663,7 +677,7 @@ impl TerminalHandler {
                     *state = ThinkFilterState::Normal;
                 }
                 ThinkFilterState::InThinkCloseTag => {
-                    // Partial close tag inside thinking block — treat as thinking text
+                    // Partial close tag inside thinking block -- treat as thinking text
                     if !*dim {
                         eprint!("{}", ANSI_DIM);
                         *dim = true;
@@ -737,7 +751,7 @@ impl StallDetector {
         let mut stall = self.stall_timeout.write().unwrap();
         let mut startup = self.startup_timeout.write().unwrap();
         if is_local {
-            // Local providers can be very slow on cold start — use very long timeouts
+            // Local providers can be very slow on cold start -- use very long timeouts
             *stall = Duration::from_secs(300);
             *startup = Duration::from_secs(600);
         } else if context_tokens > 100_000 {
@@ -894,10 +908,10 @@ pub async fn process_sse_events(
                                 retry += 1;
                                 eprintln!("[!] Stream connection failed (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
                                 stall.reset();
-                                // Before retry: clear any partial tool call to avoid duplicates
-                                if matches!(deltas_state, DeltasState::ToolInFlight(_)) {
-                                    collect.clear_partial_tool_call();
-                                }
+                                // Clear accumulated state before retry -- the API will send
+                                // a completely new response with new tool IDs on reconnect,
+                                // so old collected data would have mismatched IDs.
+                                collect.clear_all();
                                 continue;
                             }
                             // Non-transient or retries exhausted
@@ -949,12 +963,10 @@ pub async fn process_sse_events(
                         eprintln!("[!] Stream stalled for {:?}, reconnecting (attempt {}/{})...",
                             timeout_dur, retry, MAX_STREAM_RETRIES);
                         stall.reset();
-                        // Drop the stream to close connection
+                        // Clear accumulated state before retry -- the API will send
+                        // a completely new response with new tool IDs on reconnect.
+                        collect.clear_all();
                         drop(stream);
-                        // Before retry: clear partial tool if in-flight
-                        if matches!(deltas_state, DeltasState::ToolInFlight(_)) {
-                            collect.clear_partial_tool_call();
-                        }
                         break; // retry outer loop
                     }
                     // Retries exhausted, return partial
@@ -971,19 +983,21 @@ pub async fn process_sse_events(
                         retry += 1;
                         stall.reset();
 
+                        // Clear accumulated state before retry -- the API will send
+                        // a completely new response with new tool IDs on reconnect.
+                        collect.clear_all();
+
                         // Decide retry strategy based on what was already sent
                         match &deltas_state {
                             DeltasState::None => {
-                                // Nothing sent yet — clean retry
+                                // Nothing sent yet -- clean retry
                                 eprintln!("[!] Stream error (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
                             }
                             DeltasState::ToolInFlight(_) => {
-                                // Tool call started but incomplete — clear partial, retry
                                 eprintln!("\n  [!] Connection dropped mid-tool-call; reconnecting (attempt {}/{})...", retry, MAX_STREAM_RETRIES);
-                                collect.clear_partial_tool_call();
                             }
                             DeltasState::TextOnly => {
-                                // Text already streamed to user — can't retry without duplication
+                                // Text already streamed to user -- can't retry without duplication
                                 eprintln!("\n  [!] Stream interrupted after text output, returning partial result...");
                                 return partial_result(collect, false);
                             }
@@ -1017,7 +1031,7 @@ pub async fn process_sse_events(
                 sse_detected = true;
             }
 
-            // Process bytes as SSE — accumulate raw bytes to handle multi-byte UTF-8 correctly.
+            // Process bytes as SSE -- accumulate raw bytes to handle multi-byte UTF-8 correctly.
             // Using `buf.push(b as char)` would corrupt multi-byte UTF-8 sequences (M-10).
             let mut byte_buf: Vec<u8> = Vec::new();
             for b in bytes {
@@ -1050,7 +1064,7 @@ pub async fn process_sse_events(
                                 // Track delta state: what type of content was delivered
                                 match &chunk.chunk_type {
                                     ChunkType::ToolCall => {
-                                        // A tool call started — track it as in-flight
+                                        // A tool call started -- track it as in-flight
                                         deltas_state = DeltasState::ToolInFlight(chunk.id.clone());
                                     }
                                     ChunkType::Text if matches!(deltas_state, DeltasState::None) => {
@@ -1093,9 +1107,9 @@ pub async fn process_sse_events(
 /// whether a retry is safe or would cause text duplication.
 #[derive(Debug, Clone)]
 enum DeltasState {
-    /// No deltas sent yet — clean retry is safe
+    /// No deltas sent yet -- clean retry is safe
     None,
-    /// Text was already streamed — retry would duplicate text
+    /// Text was already streamed -- retry would duplicate text
     TextOnly,
     /// A tool call started with this ID but may be incomplete
     ToolInFlight(Option<String>),
@@ -1133,7 +1147,7 @@ fn is_local_endpoint(base_url: &str) -> bool {
 
 /// Build a StreamResult from the CollectHandler.
 /// `completed` is true when the stream ended normally, false when partial results
-/// are returned after a failure — this lets the agent loop distinguish success from failure.
+/// are returned after a failure -- this lets the agent loop distinguish success from failure.
 fn partial_result(collect: &CollectHandler, completed: bool) -> Result<StreamResult> {
     Ok(StreamResult {
         tool_calls: collect.tool_calls(),
@@ -1377,7 +1391,7 @@ mod tests {
     fn test_stream_progress_zero_tokens() {
         let progress = StreamProgress::new();
 
-        // No chunks recorded — elapsed may be 0 or near-0, tokens_per_second should be 0.0
+        // No chunks recorded -- elapsed may be 0 or near-0, tokens_per_second should be 0.0
         // because tokens_received is 0
         let tps = progress.tokens_per_second();
         assert_eq!(tps, 0.0, "tokens_per_second should be 0.0 with no tokens recorded, got {}", tps);

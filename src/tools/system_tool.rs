@@ -372,7 +372,7 @@ impl SystemTool {
 
     #[cfg(target_os = "macos")]
     fn unix_free(&self) -> ToolResult {
-        // macOS doesn't have `free` — use vm_stat + sysctl
+        // macOS doesn't have `free` -- use vm_stat + sysctl
         let page_size = Command::new("sysctl")
             .args(["-n", "hw.pagesize"])
             .output()

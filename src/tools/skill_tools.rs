@@ -114,7 +114,7 @@ impl Tool for ListSkillsTool {
                 String::new()
             };
             output.push_str(&format!(
-                "  {} [{}{}] — {}",
+                "  {} [{}{}] -- {}",
                 skill.name, status, always, skill.description
             ));
             if let Some(when) = &skill.when_to_use {

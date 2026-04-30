@@ -84,7 +84,7 @@ pub enum MessageContent {
     ToolUseBlocks(Vec<ToolUseBlock>),
     /// Tool result blocks (role: user)
     ToolResultBlocks(Vec<ToolResultBlock>),
-    /// Compact boundary marker (role: system) — signals that messages before this point
+    /// Compact boundary marker (role: system) -- signals that messages before this point
     /// have been summarized and should not be sent to the API
     CompactBoundary {
         trigger: CompactTrigger,
@@ -336,7 +336,7 @@ impl ConversationContext {
                 let first = self.messages[..1].to_vec();
                 let recent = self.messages[self.messages.len() - keep..].to_vec();
 
-                // Merge and ensure role alternation — remove consecutive same-role entries
+                // Merge and ensure role alternation -- remove consecutive same-role entries
                 let mut merged: Vec<Message> = Vec::with_capacity(first.len() + recent.len());
                 for entry in first.into_iter().chain(recent) {
                     if merged.last().is_none_or(|last| last.role != entry.role) {
@@ -451,9 +451,9 @@ impl ConversationContext {
                     let removed = blocks.len() - kept.len();
                     if removed > 0 {
                         if kept.is_empty() {
-                            // Entire message was orphaned — replace with placeholder
+                            // Entire message was orphaned -- replace with placeholder
                             self.messages[i].content = MessageContent::Text(
-                                "(tool call removed — result was truncated)".to_string(),
+                                "(tool call removed -- result was truncated)".to_string(),
                             );
                         } else {
                             self.messages[i].content = MessageContent::ToolUseBlocks(kept);
@@ -474,7 +474,7 @@ impl ConversationContext {
 
         let mut merged: Vec<Message> = Vec::with_capacity(self.messages.len());
         for msg in self.messages.drain(..) {
-            // Skip system messages (compact boundaries, etc.) — they are
+            // Skip system messages (compact boundaries, etc.) -- they are
             // filtered out by entries_to_messages_from_ctx anyway.
             if msg.role == MessageRole::System {
                 merged.push(msg);

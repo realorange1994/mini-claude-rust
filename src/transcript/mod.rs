@@ -312,7 +312,7 @@ impl Transcript {
             }
         }
         // If the last line was corrupt (truncated JSON from crash/Ctrl+C),
-        // it's safe to discard — it was an incomplete write.
+        // it's safe to discard -- it was an incomplete write.
         let _ = last_bad_line;
 
         Ok(entries)
