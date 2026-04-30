@@ -192,8 +192,8 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     }
 
     // Fallback: load from home directory ~/.claude/settings.json
-    // Only fills in values that are still empty/default after project-level loading
-    if cfg.api_key.is_none() && cfg.base_url.is_none() && cfg.model.is_empty() {
+    // Fill in values that are still empty/default after project-level loading
+    if cfg.api_key.is_none() || cfg.base_url.is_none() || cfg.model.is_empty() {
         if let Some(home_claude) = home_claude_dir() {
             let home_settings_path = home_claude.join("settings.json");
             if let Ok(data) = std::fs::read_to_string(&home_settings_path) {
@@ -249,7 +249,9 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     }
 
     // Fallback: load MCP config from home directory ~/.claude/.mcp.json
-    if cfg.mcp_manager.is_none() {
+    // Only if no MCP servers were loaded from project-level config
+    let has_mcp_servers = cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty());
+    if !has_mcp_servers {
         if let Some(home_claude) = home_claude_dir() {
             let home_mcp_path = home_claude.join(".mcp.json");
             if let Ok(data) = std::fs::read_to_string(&home_mcp_path) {
