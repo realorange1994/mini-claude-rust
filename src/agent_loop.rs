@@ -21,25 +21,27 @@ use tokio_util::sync::CancellationToken;
 /// Build a reqwest client with API key headers.
 /// Returns None if the API key contains invalid header characters.
 fn build_http_client(api_key: &str) -> Option<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(key_val) = api_key.parse::<reqwest::header::HeaderValue>() {
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            key_val,
+        );
+    } else {
+        eprintln!("[WARN] API key contains invalid characters for HTTP header");
+    }
+    let bearer = format!("Bearer {}", api_key);
+    if let Ok(bearer_val) = bearer.parse::<reqwest::header::HeaderValue>() {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            bearer_val,
+        );
+    } else {
+        eprintln!("[WARN] Bearer token contains invalid characters for HTTP header");
+    }
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
-        .default_headers({
-            let mut headers = reqwest::header::HeaderMap::new();
-            if let Ok(key_val) = api_key.parse::<reqwest::header::HeaderValue>() {
-                headers.insert(
-                    reqwest::header::HeaderName::from_static("x-api-key"),
-                    key_val,
-                );
-            }
-            let bearer = format!("Bearer {}", api_key);
-            if let Ok(bearer_val) = bearer.parse::<reqwest::header::HeaderValue>() {
-                headers.insert(
-                    reqwest::header::AUTHORIZATION,
-                    bearer_val,
-                );
-            }
-            headers
-        })
+        .default_headers(headers)
         .build()
         .ok()
 }
@@ -148,7 +150,7 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
-    pub fn new(config: Config, registry: Registry, use_stream: bool) -> Self {
+    pub fn new(config: Config, registry: Registry, use_stream: bool) -> Result<Self> {
         let api_key = config.api_key.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
                 .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
@@ -156,15 +158,15 @@ impl AgentLoop {
         });
 
         if api_key.is_empty() {
-            eprintln!("Error: ANTHROPIC_API_KEY environment variable is not set (or use --api-key)");
-            std::process::exit(1);
+            return Err(anyhow!("ANTHROPIC_API_KEY environment variable is not set (or use --api-key)"));
         }
 
         let base_url = config.base_url.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
         });
 
-        let client = build_http_client(&api_key).unwrap_or_default();
+        let client = build_http_client(&api_key)
+            .ok_or_else(|| anyhow!("failed to build HTTP client (invalid API key?)"))?;
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
@@ -193,9 +195,9 @@ impl AgentLoop {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
 
-        Self {
+        Ok(Self {
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
             gate,
@@ -213,7 +215,7 @@ impl AgentLoop {
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
-        }
+        })
     }
 
     /// Create agent from existing transcript (resume session)
@@ -238,7 +240,8 @@ impl AgentLoop {
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
         });
 
-        let client = build_http_client(&api_key).unwrap_or_default();
+        let client = build_http_client(&api_key)
+            .ok_or_else(|| anyhow!("failed to build HTTP client (invalid API key?)"))?;
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
@@ -279,7 +282,7 @@ impl AgentLoop {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
 
         Ok(Self {
             config: gate.config.clone(),
@@ -1452,8 +1455,6 @@ impl AgentLoop {
         let response = tokio::select! {
             resp = self.client
                 .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("Authorization", format!("Bearer {}", &self.api_key))
                 .header("Content-Type", "application/json")
                 .header("anthropic-version", "2023-06-01")
                 .json(&payload)

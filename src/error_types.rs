@@ -553,9 +553,22 @@ fn matches_any(text: &str, patterns: &[&str]) -> bool {
 }
 
 fn extract_http_status(err_msg: &str) -> u16 {
-    for code in [401, 402, 403, 404, 413, 429, 400, 500, 502, 503, 529, 504] {
-        if err_msg.contains(&code.to_string()) {
-            return code;
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?:status|HTTP|http)\s*[:=]?\s*(\d{3})").ok()
+    });
+    let re = match re {
+        Some(r) => r,
+        None => return 0,
+    };
+    if let Some(caps) = re.captures(err_msg) {
+        if let Ok(code) = caps[1].parse::<u16>() {
+            if (400..600).contains(&code) {
+                return code;
+            }
         }
     }
     0

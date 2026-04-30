@@ -88,30 +88,40 @@ impl Tool for ExecTool {
             }
         }
 
-        // Check for .git directory destruction
-        let git_harmful = [
-            r"rm\s+-rf.*\.git",
-            r"rm\s+-r.*\.git",
-            r"rmdir.*\.git",
-            r"del.*\.git",
-            r"rmrf.*\.git",
-        ];
-        for pattern in &git_harmful {
-            if Regex::new(pattern).unwrap().is_match(&lower) {
+        // Check for .git directory destruction (cached regexes)
+        static GIT_HARMFUL: OnceLock<Vec<Regex>> = OnceLock::new();
+        let git_harmful = GIT_HARMFUL.get_or_init(|| {
+            [
+                r"rm\s+-rf.*\.git",
+                r"rm\s+-r.*\.git",
+                r"rmdir.*\.git",
+                r"del.*\.git",
+                r"rmrf.*\.git",
+            ].iter()
+            .map(|p| Regex::new(p).unwrap())
+            .collect()
+        });
+        for re in git_harmful {
+            if re.is_match(&lower) {
                 return Some(ToolResult::error("Command would destroy .git directory"));
             }
         }
 
-        // Check for home directory destruction
-        let home_harmful = [
-            r"rm\s+-rf\s*~",
-            r"rm\s+-rf\s+/home",
-            r"rm\s+-rf\s+/",
-            r"rm\s+-rf\s+C:\\Users",
-            r"del\s+/[fq]\s+\w+\\.*",
-        ];
-        for pattern in &home_harmful {
-            if Regex::new(pattern).unwrap().is_match(&lower) {
+        // Check for home directory destruction (cached regexes)
+        static HOME_HARMFUL: OnceLock<Vec<Regex>> = OnceLock::new();
+        let home_harmful = HOME_HARMFUL.get_or_init(|| {
+            [
+                r"rm\s+-rf\s*~",
+                r"rm\s+-rf\s+/home",
+                r"rm\s+-rf\s+/",
+                r"rm\s+-rf\s+C:\\Users",
+                r"del\s+/[fq]\s+\w+\\.*",
+            ].iter()
+            .map(|p| Regex::new(p).unwrap())
+            .collect()
+        });
+        for re in home_harmful {
+            if re.is_match(&lower) {
                 return Some(ToolResult::error("Command would destroy home directory or system root"));
             }
         }
@@ -231,6 +241,7 @@ impl Tool for ExecTool {
             if !result.is_empty() {
                 result.push('\n');
             }
+            result.push_str("[stderr]\n");
             result.push_str(&stderr);
         }
 

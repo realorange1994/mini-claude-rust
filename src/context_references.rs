@@ -47,10 +47,21 @@ const SENSITIVE_DIRS: &[&str] = &[
 ];
 
 /// File content cache to avoid re-reading the same file.
+/// Maximum entries before eviction kicks in.
+const MAX_FILE_CACHE_ENTRIES: usize = 100;
+
 static FILE_CACHE: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
 
 fn get_file_cache() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, String>>> {
-    FILE_CACHE.lock().unwrap()
+    FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Evict oldest half of the cache when it exceeds the limit.
+fn evict_file_cache(cache: &mut std::collections::HashMap<String, String>) {
+    let to_remove = cache.len() / 2;
+    for key in cache.keys().take(to_remove).cloned().collect::<Vec<_>>() {
+        cache.remove(&key);
+    }
 }
 
 /// Parse @ references from a user message.
@@ -324,6 +335,9 @@ fn expand_file_reference(ref_item: &ContextReference, cwd: &Path) -> (String, St
                 *cache = Some(std::collections::HashMap::new());
             }
             if let Some(map) = cache.as_mut() {
+                if map.len() >= MAX_FILE_CACHE_ENTRIES {
+                    evict_file_cache(map);
+                }
                 map.insert(cache_key.clone(), text.clone());
             }
         }

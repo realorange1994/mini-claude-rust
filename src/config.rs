@@ -256,7 +256,7 @@ impl CachedSystemPrompt {
         skill_tracker: Option<&SkillTracker>,
     ) -> String {
         if !self.dirty.load(std::sync::atomic::Ordering::SeqCst) {
-            if let Some(cached) = self.cached.read().unwrap().as_ref() {
+            if let Some(cached) = self.cached.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
                 return cached.clone();
             }
         }
@@ -267,7 +267,7 @@ impl CachedSystemPrompt {
         );
 
         // Cache it
-        *self.cached.write().unwrap() = Some(prompt.clone());
+        *self.cached.write().unwrap_or_else(|e| e.into_inner()) = Some(prompt.clone());
         self.dirty.store(false, std::sync::atomic::Ordering::SeqCst);
 
         prompt

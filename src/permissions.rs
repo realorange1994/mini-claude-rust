@@ -119,6 +119,16 @@ fn read_key(prompt: &str) -> Option<char> {
     ch
 }
 
+/// Check if a string contains shell metacharacters that could be used for
+/// command injection (e.g., `git status; rm -rf /` after `git status `).
+fn contains_shell_metacharacters(s: &str) -> bool {
+    s.contains('&') || s.contains('|') || s.contains(';') || s.contains('`') ||
+    s.contains('$') || s.contains('(') || s.contains(')') || s.contains('{') ||
+    s.contains('}') || s.contains('[') || s.contains(']') || s.contains('<') ||
+    s.contains('>') || s.contains('!') || s.contains('#') || s.contains('~') ||
+    s.contains('\n') || s.contains('\r')
+}
+
 /// PermissionGate checks if tool execution is allowed
 pub struct PermissionGate {
     pub config: crate::config::Config,
@@ -134,8 +144,15 @@ impl PermissionGate {
         let cmd = command.trim().to_lowercase();
         for allowed in &self.config.allowed_commands {
             let allowed_lower = allowed.to_lowercase();
-            if cmd == allowed_lower || cmd.starts_with(&format!("{} ", allowed_lower)) {
+            if cmd == allowed_lower {
                 return true;
+            }
+            let prefix = format!("{} ", allowed_lower);
+            if cmd.starts_with(&prefix) {
+                let remainder = &cmd[prefix.len()..];
+                if !contains_shell_metacharacters(remainder) {
+                    return true;
+                }
             }
         }
         false

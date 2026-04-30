@@ -154,11 +154,11 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("[!] Failed to resume: {}. Starting new session.", e);
-                agent_loop::AgentLoop::new(cfg, registry, args.stream)
+                agent_loop::AgentLoop::new(cfg, registry, args.stream)?
             }
         }
     } else {
-        agent_loop::AgentLoop::new(cfg, registry, args.stream)
+        agent_loop::AgentLoop::new(cfg, registry, args.stream)?
     };
 
     // One-shot mode

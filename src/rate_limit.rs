@@ -76,11 +76,11 @@ struct RateLimitStateInner {
 
 impl RateLimitState {
     pub fn has_data(&self) -> bool {
-        self.inner.lock().unwrap().captured_at.is_some()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).captured_at.is_some()
     }
 
     pub fn age(&self) -> Duration {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match guard.captured_at {
             Some(t) => t.elapsed(),
             None => Duration::from_secs(u64::MAX),
@@ -89,7 +89,7 @@ impl RateLimitState {
 
     /// Returns the bucket with highest usage percentage.
     pub fn most_constrained(&self) -> Option<(String, RateLimitBucket)> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         [
             ("requests/min", &guard.requests_min),
             ("requests/hr", &guard.requests_hour),
@@ -105,7 +105,7 @@ impl RateLimitState {
     /// Estimate delay before retry based on rate limit state.
     /// Returns None if no rate limit data or if retry should be safe now.
     pub fn retry_delay(&self) -> Option<Duration> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let buckets = [
             &guard.requests_min,
             &guard.requests_hour,
@@ -130,7 +130,7 @@ impl RateLimitState {
     /// Merge new rate limit data into the state.
     pub fn update(&self, new: &RateLimitState) {
         let new_guard = new.inner.lock().unwrap();
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         if new_guard.requests_min.limit > 0 {
             guard.requests_min = new_guard.requests_min.clone();

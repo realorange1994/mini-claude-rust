@@ -245,7 +245,11 @@ impl Registry {
 /// Normalize a file path for consistent comparison (lowercase on Windows, forward slashes)
 fn normalize_file_path(path: &str) -> String {
     let p = path.replace('\\', "/");
-    p.to_lowercase()
+    #[cfg(target_os = "windows")]
+    let normalized = p.to_lowercase();
+    #[cfg(not(target_os = "windows"))]
+    let normalized = p;
+    normalized
 }
 
 impl Default for Registry {
@@ -427,7 +431,21 @@ pub fn is_path_allowed(path: &str) -> Result<(), String> {
 
     // Resolve symlinks on both sides for robustness
     let abs_wd = std::fs::canonicalize(&wd).unwrap_or_else(|_| wd.clone());
-    let abs_resolved = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    let abs_resolved = match std::fs::canonicalize(&resolved) {
+        Ok(p) => p,
+        Err(_) => {
+            // File doesn't exist yet - check parent directory instead
+            if let Some(parent) = resolved.parent() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    canonical_parent.join(resolved.file_name().unwrap_or_default())
+                } else {
+                    resolved.clone()
+                }
+            } else {
+                resolved.clone()
+            }
+        }
+    };
 
     let rel = abs_resolved.strip_prefix(&abs_wd)
         .map_err(|_| format!("path {:?} is outside the project directory", path))?;
