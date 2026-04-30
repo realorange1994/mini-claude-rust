@@ -439,7 +439,7 @@ fn expand_folder_reference(ref_item: &ContextReference, cwd: &Path) -> (String, 
 }
 
 fn expand_git_reference(
-    ref_item: &ContextReference,
+    _ref_item: &ContextReference,
     cwd: &Path,
     args: &[&str],
     label: &str,
@@ -827,10 +827,6 @@ fn strip_quotes(value: &str) -> String {
     value.to_string()
 }
 
-fn is_binary_content(content: &[u8]) -> bool {
-    let check_len = content.len().min(4096);
-    content[..check_len].iter().any(|&b| b == 0)
-}
 
 fn code_fence_language(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
@@ -1034,7 +1030,7 @@ mod tests {
         assert_eq!(start, Some(42));
         assert_eq!(end, None);
 
-        let (path, start, end) = parse_file_target("main.go");
+        let (path, start, _end) = parse_file_target("main.go");
         assert_eq!(path, "main.go");
         assert!(start.is_none());
     }

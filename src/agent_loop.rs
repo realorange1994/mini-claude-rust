@@ -6,7 +6,7 @@ use crate::permissions::PermissionGate;
 use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
-use crate::error_types::{classify_error, ClassifyResult};
+use crate::error_types::classify_error;
 use crate::rate_limit::RateLimitState;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
@@ -17,6 +17,32 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+/// Build a reqwest client with API key headers.
+/// Returns None if the API key contains invalid header characters.
+fn build_http_client(api_key: &str) -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Ok(key_val) = api_key.parse::<reqwest::header::HeaderValue>() {
+                headers.insert(
+                    reqwest::header::HeaderName::from_static("x-api-key"),
+                    key_val,
+                );
+            }
+            let bearer = format!("Bearer {}", api_key);
+            if let Ok(bearer_val) = bearer.parse::<reqwest::header::HeaderValue>() {
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    bearer_val,
+                );
+            }
+            headers
+        })
+        .build()
+        .ok()
+}
 
 /// Tracks iteration budget for the agent loop, allowing refunds for final answers
 /// and a grace call for graceful termination.
@@ -87,7 +113,6 @@ enum ContinueReason {
     PromptTooLong,
     MaxOutputTokens,
     ModelConfused,
-    ContextOverflow,
 }
 
 /// Transition tracking for context management (kept for tool->text transition tracking)
@@ -139,24 +164,7 @@ impl AgentLoop {
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
         });
 
-        let client_builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                // Set both x-api-key (Anthropic native) and Bearer (OpenAI-compatible)
-                // to support both native Anthropic API and third-party proxy APIs
-                headers.insert(
-                    reqwest::header::HeaderName::from_static("x-api-key"),
-                    api_key.parse().unwrap(),
-                );
-                headers.insert(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {}", api_key).parse().unwrap(),
-                );
-                headers
-            });
-
-        let client = client_builder.build().unwrap_or_default();
+        let client = build_http_client(&api_key).unwrap_or_default();
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
@@ -230,22 +238,7 @@ impl AgentLoop {
             std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
         });
 
-        let client_builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    reqwest::header::HeaderName::from_static("x-api-key"),
-                    api_key.parse().unwrap(),
-                );
-                headers.insert(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {}", api_key).parse().unwrap(),
-                );
-                headers
-            });
-
-        let client = client_builder.build().unwrap_or_default();
+        let client = build_http_client(&api_key).unwrap_or_default();
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
@@ -326,36 +319,26 @@ impl AgentLoop {
         for entry in entries {
             match entry.type_.as_str() {
                 TYPE_USER => {
-                    // Flush any pending tool results first
                     if !pending_tool_results.is_empty() {
-                        context.add_tool_results(pending_tool_results.clone());
-                        pending_tool_results.clear();
+                        context.add_tool_results(std::mem::take(&mut pending_tool_results));
                     }
-                    // Flush any pending tool uses (shouldn't happen before user, but handle it)
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
                     context.add_user_message(entry.content.clone());
                 }
                 TYPE_ASSISTANT => {
-                    // Flush pending items first
                     if !pending_tool_results.is_empty() {
-                        context.add_tool_results(pending_tool_results.clone());
-                        pending_tool_results.clear();
+                        context.add_tool_results(std::mem::take(&mut pending_tool_results));
                     }
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
-                    // Add assistant text if present
                     if !entry.content.is_empty() {
                         context.add_assistant_text(entry.content.clone());
                     }
                 }
                 TYPE_TOOL_USE => {
-                    // Accumulate tool_use blocks - they will be flushed when we see
-                    // a tool_result, user, or assistant entry
                     if let (Some(name), Some(id)) = (&entry.tool_name, &entry.tool_id) {
                         let input: HashMap<String, serde_json::Value> = entry.tool_args
                             .clone()
@@ -368,12 +351,9 @@ impl AgentLoop {
                     }
                 }
                 TYPE_TOOL_RESULT => {
-                    // Flush pending tool uses first (create assistant message with all tool calls)
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
-                    // Accumulate tool_result blocks
                     if let Some(id) = &entry.tool_id {
                         pending_tool_results.push(ToolResultBlock {
                             tool_use_id: id.clone(),
@@ -383,28 +363,21 @@ impl AgentLoop {
                     }
                 }
                 TYPE_SYSTEM | TYPE_ERROR => {
-                    // Flush pending items before system/error
                     if !pending_tool_results.is_empty() {
-                        context.add_tool_results(pending_tool_results.clone());
-                        pending_tool_results.clear();
+                        context.add_tool_results(std::mem::take(&mut pending_tool_results));
                     }
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
                     // Skip system and error entries
                 }
                 TYPE_COMPACT => {
-                    // Flush pending items before compact boundary
                     if !pending_tool_results.is_empty() {
-                        context.add_tool_results(pending_tool_results.clone());
-                        pending_tool_results.clear();
+                        context.add_tool_results(std::mem::take(&mut pending_tool_results));
                     }
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
-                    // Re-add compact boundary marker
                     let pre_tokens = entry.content
                         .split_whitespace()
                         .find(|s| s.chars().all(|c| c.is_ascii_digit()))
@@ -413,16 +386,12 @@ impl AgentLoop {
                     context.add_compact_boundary(crate::context::CompactTrigger::Auto, pre_tokens);
                 }
                 TYPE_SUMMARY => {
-                    // Flush pending items before summary
                     if !pending_tool_results.is_empty() {
-                        context.add_tool_results(pending_tool_results.clone());
-                        pending_tool_results.clear();
+                        context.add_tool_results(std::mem::take(&mut pending_tool_results));
                     }
                     if !pending_tool_uses.is_empty() {
-                        context.add_assistant_tool_calls(pending_tool_uses.clone());
-                        pending_tool_uses.clear();
+                        context.add_assistant_tool_calls(std::mem::take(&mut pending_tool_uses));
                     }
-                    // Re-add summary
                     context.add_summary(entry.content.clone());
                 }
                 _ => {
@@ -721,7 +690,8 @@ impl AgentLoop {
 
                         // Print all tool calls upfront (matching Go: "  [exec]: cmd" for exec, "  [tool] args" for others)
                         for entry in &entries {
-                            let input_preview = format_tool_args(&entry.tc.name, &entry.params);
+                            let args_json = serde_json::to_string(&entry.params).unwrap_or_default();
+                            let input_preview = tool_arg_summary(&entry.tc.name, &args_json);
                             if entry.tc.name == "exec" {
                                 eprintln!("  [{}]: {}", entry.tc.name, input_preview);
                             } else {
@@ -1971,49 +1941,6 @@ pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
                 _ => return None,
             };
             Some(format!("{}={}", k, v_str))
-        })
-        .take(3)
-        .collect();
-
-    parts.join(", ")
-}
-
-/// Format tool call arguments for display (matching Go's formatToolArgs).
-fn format_tool_args(tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> String {
-    match tool_name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" => {
-            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                return path.to_string();
-            }
-        }
-        "exec" => {
-            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                if cmd.len() > 120 {
-                    return format!("{}...", &cmd[..120]);
-                }
-                return cmd.to_string();
-            }
-        }
-        "grep" => {
-            if let Some(pattern) = params.get("pattern").and_then(|v| v.as_str()) {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    return format!("{:?} in {}", pattern, path);
-                }
-                return format!("{:?}", pattern);
-            }
-        }
-        _ => {}
-    }
-
-    // Fallback: format as key=value pairs
-    let parts: Vec<String> = params.iter()
-        .filter_map(|(k, v)| {
-            match v {
-                serde_json::Value::String(s) => Some(format!("{}={}", k, if s.len() > 80 { format!("{}...", &s[..80]) } else { s.clone() })),
-                serde_json::Value::Number(n) => Some(format!("{}={}", k, n)),
-                serde_json::Value::Bool(b) => Some(format!("{}={}", k, b)),
-                _ => None,
-            }
         })
         .take(3)
         .collect();

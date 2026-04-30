@@ -943,7 +943,6 @@ pub async fn process_sse_events(
         }
 
         let mut stream = response.bytes_stream();
-        let mut buf = String::new();
         let mut sse_detected = false;
 
         // Stream processing loop with stall timeout

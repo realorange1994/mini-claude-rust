@@ -288,7 +288,7 @@ fn context_window_tracker_should_compact() {
 
     // Create enough messages to trigger compaction
     let mut messages = Vec::new();
-    for i in 0..5000 {
+    for _i in 0..5000 {
         messages.push(Message::new(
             MessageRole::User,
             MessageContent::Text("A".repeat(100)), // ~25 tokens each

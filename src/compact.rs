@@ -571,9 +571,8 @@ pub async fn compact_conversation(
             MessageContent::ToolResultBlocks(blocks) => {
                 for block in blocks {
                     for content in &mut block.content {
-                        if let crate::context::ToolResultContent::Text { text } = content {
-                            *text = redact_sensitive_text(text);
-                        }
+                        let crate::context::ToolResultContent::Text { text } = content;
+                        *text = redact_sensitive_text(text);
                     }
                 }
             }
@@ -945,7 +944,7 @@ impl Compactor {
                     // Previously this only counted boundary + summary, underestimating
                     // the token count and causing compaction thrashing when tail
                     // messages added significant tokens.
-                    let post_tokens = estimate_total_tokens(&new_messages);
+                    let _post_tokens = estimate_total_tokens(&new_messages);
 
                     context.replace_messages(new_messages);
 
@@ -1342,33 +1341,24 @@ mod tests {
 
         // First result: original, unchanged
         if let MessageContent::ToolResultBlocks(blocks) = &messages[0].content {
-            if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
-                assert_eq!(text, "same content here");
-            } else {
-                panic!("Expected Text content");
-            }
+            let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0];
+            assert_eq!(text, "same content here");
         } else {
             panic!("Expected ToolResultBlocks");
         }
 
         // Second result: duplicate of first -- replaced with reference
         if let MessageContent::ToolResultBlocks(blocks) = &messages[1].content {
-            if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
-                assert!(text.contains("[duplicate result, see tool_use_id tool-1]"));
-            } else {
-                panic!("Expected Text content");
-            }
+            let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0];
+            assert!(text.contains("[duplicate result, see tool_use_id tool-1]"));
         } else {
             panic!("Expected ToolResultBlocks");
         }
 
         // Third result: unique content, unchanged
         if let MessageContent::ToolResultBlocks(blocks) = &messages[2].content {
-            if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
-                assert_eq!(text, "different content");
-            } else {
-                panic!("Expected Text content");
-            }
+            let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0];
+            assert_eq!(text, "different content");
         } else {
             panic!("Expected ToolResultBlocks");
         }
@@ -1406,9 +1396,8 @@ mod tests {
             // Both blocks should still have original content
             assert_eq!(blocks.len(), 2);
             for block in blocks {
-                if let crate::context::ToolResultContent::Text { text } = &block.content[0] {
-                    assert_eq!(text, "content");
-                }
+                let crate::context::ToolResultContent::Text { text } = &block.content[0];
+                assert_eq!(text, "content");
             }
         }
     }
@@ -1455,12 +1444,9 @@ mod tests {
 
         // The tool result (messages[1]) should be summarized
         if let MessageContent::ToolResultBlocks(blocks) = &messages[1].content {
-            if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
-                assert!(text.starts_with("[read_file] -> ok,"));
-                assert!(text.contains("3 lines"));
-            } else {
-                panic!("Expected Text content");
-            }
+            let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0];
+            assert!(text.starts_with("[read_file] -> ok,"));
+            assert!(text.contains("3 lines"));
         } else {
             panic!("Expected ToolResultBlocks");
         }
@@ -1497,10 +1483,9 @@ mod tests {
         summarize_old_tool_results(&mut messages);
 
         if let MessageContent::ToolResultBlocks(blocks) = &messages[1].content {
-            if let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0] {
-                assert!(text.contains("[exec] -> error"));
-                assert!(text.contains("2 lines"));
-            }
+            let crate::context::ToolResultContent::Text { text } = &blocks[0].content[0];
+            assert!(text.contains("[exec] -> error"));
+            assert!(text.contains("2 lines"));
         }
     }
 

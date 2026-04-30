@@ -292,14 +292,8 @@ pub fn build_system_prompt(
     skill_loader: Option<&SkillLoader>,
     skill_tracker: Option<&SkillTracker>,
 ) -> String {
-    // Get Rust compiler version (matching Go's runtime.Version())
-    let rust_version = std::process::Command::new("rustc")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| format!("rustc/{}", env!("CARGO_PKG_VERSION")));
+    // Use compile-time version (avoids spawning rustc on every API call)
+    let rust_version = concat!("rustc ", env!("CARGO_PKG_VERSION"));
 
     let mut prompt = format!(
         r#"You are miniClaudeCode, a lightweight AI coding assistant that operates in the terminal.

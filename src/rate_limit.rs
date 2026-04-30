@@ -17,7 +17,6 @@
 //!   x-ratelimit-reset-tokens            seconds until minute token window resets
 //!   x-ratelimit-reset-tokens-1h         seconds until hour token window resets
 
-use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

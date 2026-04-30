@@ -2,7 +2,7 @@
 
 use miniclaudecode_rust::config::Config;
 use miniclaudecode_rust::context::{
-    ConversationContext, ConversationEntry, Message, MessageContent, MessageRole,
+    ConversationContext, Message, MessageContent, MessageRole,
     ToolUseBlock, ToolResultBlock, ToolResultContent,
 };
 use std::collections::HashMap;

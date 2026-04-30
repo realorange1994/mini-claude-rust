@@ -2,7 +2,7 @@
 
 use miniclaudecode_rust::skills::Loader;
 use miniclaudecode_rust::tools::skill_tools::SearchSkillTool;
-use miniclaudecode_rust::tools::{Tool, ToolResult};
+use miniclaudecode_rust::tools::Tool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;

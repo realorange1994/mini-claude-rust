@@ -10,9 +10,10 @@
 //! - process_sse_events: end-to-end SSE stream with wiremock
 
 use miniclaudecode_rust::streaming::{
-    parse_anthropic_message, parse_sse_event, tool_arg_summary, ChunkType, CollectHandler,
-    StallDetector, StreamChunk, TerminalHandler, ToolCallInfo, Usage,
+    parse_anthropic_message, parse_sse_event, ChunkType, CollectHandler,
+    StallDetector, StreamChunk, TerminalHandler, Usage,
 };
+use miniclaudecode_rust::agent_loop::tool_arg_summary;
 use miniclaudecode_rust::rate_limit::RateLimitState;
 use std::time::Duration;
 
