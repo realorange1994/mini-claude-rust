@@ -81,6 +81,8 @@ const SAFE_EXEC_PREFIXES: &[&str] = &[
     "git --version", "gh --version",
     // Environment
     "env", "printenv", "whoami", "hostname", "uname", "date", "uptime",
+    // Echo (safe output, but command substitution is caught by dangerous patterns)
+    "echo",
     // Process listing
     "ps", "top", "htop",
     // Network inspection (read-only)
@@ -108,6 +110,8 @@ const DANGEROUS_EXEC_PATTERNS: &[&str] = &[
     "start-bitstransfer",
     // Dangerous redirects
     "> /etc/", "> /usr/", "> /tmp/", ">> /etc/", ">> /usr/", ">> /tmp/",
+    // Command substitution (prevents echo $(malicious) bypass)
+    "$(", "`",
     // Unix destructive commands
     "rm ", "rm\t", "chmod ", "chown ", "mkfs", "dd if=",
     "sudo ", "su ", "exec ",
@@ -132,22 +136,125 @@ fn has_dangerous_patterns(command: &str) -> bool {
 }
 
 /// Check if an exec command is safe based on prefix matching.
-/// Returns true if the command starts with a known safe prefix AND has no dangerous patterns.
+/// For combined commands (&& / || / ;), each segment is checked independently.
 fn is_safe_exec_command(command: &str) -> bool {
     let cmd = command.trim();
     if cmd.is_empty() {
         return false;
     }
-    // Always reject dangerous patterns
     if has_dangerous_patterns(cmd) {
         return false;
     }
-    for prefix in SAFE_EXEC_PREFIXES {
-        if cmd == *prefix || cmd.starts_with(&format!("{} ", prefix)) {
+    // Split on && / || / ; to check each command independently
+    for seg in split_shell_commands(cmd) {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if has_dangerous_patterns(seg) {
+            return false;
+        }
+        if !matches_safe_prefix(seg) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a single command matches a safe prefix.
+fn matches_safe_prefix(cmd: &str) -> bool {
+    for &prefix in SAFE_EXEC_PREFIXES {
+        if cmd == prefix || cmd.starts_with(&format!("{} ", prefix)) {
             return true;
         }
     }
     false
+}
+
+/// Split a command on && / || / ; while preserving content inside quotes.
+fn split_shell_commands(cmd: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped {
+            current.push(c as char);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if c == b'\\' {
+            current.push(c as char);
+            escaped = true;
+            i += 1;
+            continue;
+        }
+        if c == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            current.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            current.push(c as char);
+            i += 1;
+            continue;
+        }
+        if in_single_quote || in_double_quote || depth > 0 {
+            current.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'(' {
+            depth += 1;
+            current.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b')' {
+            depth -= 1;
+            current.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'&' && i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+            segments.push(current.clone());
+            current.clear();
+            i += 2; // skip both operator chars
+            continue;
+        }
+        if c == b'|' && i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+            segments.push(current.clone());
+            current.clear();
+            i += 2; // skip both operator chars
+            continue;
+        }
+        if c == b';' {
+            segments.push(current.clone());
+            current.clear();
+            i += 1;
+            continue;
+        }
+        current.push(c as char);
+        i += 1;
+    }
+
+    let rest = current.trim().to_string();
+    if !rest.is_empty() {
+        segments.push(rest);
+    }
+    if segments.is_empty() {
+        return vec![cmd.to_string()];
+    }
+    segments
 }
 
 /// Process operations that are read-only and safe to auto-allow.
