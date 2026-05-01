@@ -5,7 +5,7 @@ use miniclaudecode_rust::config::{load_config_from_file, Config};
 use miniclaudecode_rust::permissions::PermissionMode;
 use miniclaudecode_rust::tools;
 use miniclaudecode_rust::work_task;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -246,13 +246,12 @@ fn main() -> Result<()> {
     if let Some(message) = args.message {
         let prompt = message.join(" ");
         let result = agent.run(&prompt);
-        // When streaming is enabled and stdout is a terminal, TerminalHandler
-        // already displayed the text via stderr. Printing again would duplicate it.
-        // NOTE: We use stdout().is_terminal() specifically (not console::user_attended()
-        // which checks stdin AND stdout on Windows, causing false negatives when stdin is piped).
-        let stdout_is_term = io::stdout().is_terminal();
+        // When streaming was used, TerminalHandler already displayed the text
+        // via stderr (eprint! calls). Printing the same text again to stdout
+        // would cause duplication (e.g., "hellohello" when redirected with 2>&1).
+        // Only print to stdout when streaming was NOT used (non-streaming mode).
         let last_was_streaming = agent.last_call_was_streaming.load(std::sync::atomic::Ordering::SeqCst);
-        if !last_was_streaming || !stdout_is_term {
+        if !last_was_streaming {
             println!("{}", result);
         }
         agent.close();
@@ -267,13 +266,6 @@ fn main() -> Result<()> {
 fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore) {
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
-
-    // Check if stdout is a terminal (used to suppress duplicate output in streaming mode)
-    // When stdout is NOT a terminal (piped), we always print the result to stdout
-    // even in streaming mode, so the caller gets the complete output.
-    // NOTE: We use stdout().is_terminal() specifically (not console::user_attended()
-    // which checks stdin AND stdout on Windows, causing false negatives when stdin is piped).
-    let stdout_is_term = io::stdout().is_terminal();
 
     // Clone MCP manager for use in signal handler (to stop servers on double-Ctrl+C)
     // The agent.close() method takes &self and accesses this Arc<McpManager>.
@@ -519,12 +511,12 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
 
         println!();
         let result = agent.run(user_input);
-        // In streaming mode, TerminalHandler displays output on stderr.
-        // When stdout is a terminal, skip printing to avoid duplication.
-        // When stdout is piped (not a terminal), always print so the
-        // result is available on stdout for programmatic consumption.
+        // When streaming was used, TerminalHandler already displayed the text
+        // via stderr (eprint! calls). Printing the same text again to stdout
+        // would cause duplication (e.g., "hellohello" when redirected with 2>&1).
+        // Only print to stdout when streaming was NOT used (non-streaming mode).
         let last_was_streaming = agent.last_call_was_streaming.load(std::sync::atomic::Ordering::SeqCst);
-        if !last_was_streaming || !stdout_is_term {
+        if !last_was_streaming {
             println!("{}", result);
         }
         println!();

@@ -138,6 +138,8 @@ impl AutoModeClassifier {
     }
 
     /// Make an LLM API call to classify the tool action.
+    /// Uses the Anthropic tool_use feature to force structured JSON output,
+    /// avoiding unreliable text parsing.
     fn call_classifier(
         &self,
         tool_name: &str,
@@ -168,12 +170,35 @@ impl AutoModeClassifier {
             }
         ]);
 
-        // Build the request body
+        // Build the request body with tool_use for structured output
         let body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 128,
+            "max_tokens": 256,
             "system": AUTO_CLASSIFIER_SYSTEM_PROMPT,
             "messages": messages,
+            "tools": [{
+                "name": "classify_action",
+                "description": "Classify whether the tool action should be allowed or blocked",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "decision": {
+                            "type": "string",
+                            "enum": ["allow", "block"],
+                            "description": "Whether to allow or block this action"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief reason for the decision"
+                        }
+                    },
+                    "required": ["decision", "reason"]
+                }
+            }],
+            "tool_choice": {
+                "type": "tool",
+                "name": "classify_action"
+            }
         });
 
         // Build the URL
@@ -193,6 +218,27 @@ impl AutoModeClassifier {
             Ok(resp) => {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text() {
+                        // Try to parse tool_use response first (Anthropic structured output)
+                        if let Some(result) = parse_tool_use_response(&text) {
+                            let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
+                            eprintln!(
+                                "  [auto-classifier] {}: {} ({})",
+                                status, action_desc, result.reason
+                            );
+                            return result;
+                        }
+                        // Extract text content from Anthropic-style response
+                        let text_content = extract_text_from_response(&text);
+                        // Try to parse the extracted text as classifier JSON
+                        if let Some(result) = parse_classifier_response(&text_content) {
+                            let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
+                            eprintln!(
+                                "  [auto-classifier] {}: {} ({})",
+                                status, action_desc, result.reason
+                            );
+                            return result;
+                        }
+                        // Fallback: try parsing the raw response text as JSON
                         if let Some(result) = parse_classifier_response(&text) {
                             let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
                             eprintln!(
@@ -212,7 +258,7 @@ impl AutoModeClassifier {
                         reason: "classifier returned unparseable response; action allowed by default".to_string(),
                     }
                 } else {
-                    // API returned an error: fail-closed
+                    // API returned an error: fail-open
                     let status = resp.status();
                     let error_text = resp.text().unwrap_or_default();
                     eprintln!(
@@ -220,21 +266,21 @@ impl AutoModeClassifier {
                         status, &error_text[..error_text.len().min(200)]
                     );
                     ClassifierResult {
-                        allow: false,
+                        allow: true,
                         reason: format!(
-                            "classifier unavailable (API error {}); action requires manual approval",
+                            "classifier unavailable (API error {}); action allowed by default",
                             status
                         ),
                     }
                 }
             }
             Err(err) => {
-                // Network error: fail-closed
+                // Network error: fail-open
                 eprintln!("  [auto-classifier] API error: {}", err);
                 ClassifierResult {
-                    allow: false,
+                    allow: true,
                     reason: format!(
-                        "classifier unavailable ({}); action requires manual approval",
+                        "classifier unavailable ({}); action allowed by default",
                         err
                     ),
                 }
@@ -403,7 +449,70 @@ fn format_action_for_classifier(
     format!("Tool: {}\nParams: {}", tool_name, parts.join(", "))
 }
 
-/// Parse the JSON response from the classifier.
+/// Extract text content from an Anthropic API response.
+/// Handles both the tool_use and text block formats.
+fn extract_text_from_response(text: &str) -> String {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(content) = parsed.get("content").and_then(|c| c.as_array()) {
+            let mut all_text = String::new();
+            for block in content {
+                if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
+                    match block_type {
+                        "text" => {
+                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                all_text.push_str(t);
+                            }
+                        }
+                        "tool_use" => {
+                            if let Some(input) = block.get("input") {
+                                all_text.push_str(&input.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return all_text;
+        }
+    }
+    text.to_string()
+}
+
+/// Parse a tool_use response from the Anthropic API.
+/// Returns the classifier result if a classify_action tool_use block is found.
+fn parse_tool_use_response(text: &str) -> Option<ClassifierResult> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+
+    let content = parsed.get("content")?.as_array()?;
+
+    for block in content {
+        let block_type = block.get("type")?.as_str()?;
+        if block_type == "tool_use" {
+            let name = block.get("name")?.as_str()?;
+            if name == "classify_action" {
+                let input = block.get("input")?;
+                let decision = input.get("decision")?.as_str()?;
+                let reason = input.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+                return Some(ClassifierResult {
+                    allow: decision.eq_ignore_ascii_case("allow"),
+                    reason: if reason.is_empty() {
+                        if decision.eq_ignore_ascii_case("allow") {
+                            "classified as safe".to_string()
+                        } else {
+                            "classified as potentially unsafe".to_string()
+                        }
+                    } else {
+                        reason.to_string()
+                    },
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Parse the JSON response from the classifier (fallback text parsing).
 fn parse_classifier_response(text: &str) -> Option<ClassifierResult> {
     let text = text.trim();
 
@@ -414,20 +523,43 @@ fn parse_classifier_response(text: &str) -> Option<ClassifierResult> {
         text
     };
 
-    let resp: ClassifierResponse = serde_json::from_str(json_str).ok()?;
-
-    let allow = resp.decision.eq_ignore_ascii_case("allow");
-    let reason = if resp.reason.is_empty() {
-        if allow {
-            "classified as safe".to_string()
+    // Try to parse as ClassifierResponse JSON
+    if let Ok(resp) = serde_json::from_str::<ClassifierResponse>(json_str) {
+        let allow = resp.decision.eq_ignore_ascii_case("allow");
+        let reason = if resp.reason.is_empty() {
+            if allow {
+                "classified as safe".to_string()
+            } else {
+                "classified as potentially unsafe".to_string()
+            }
         } else {
-            "classified as potentially unsafe".to_string()
-        }
-    } else {
-        resp.reason
-    };
+            resp.reason
+        };
+        return Some(ClassifierResult { allow, reason });
+    }
 
-    Some(ClassifierResult { allow, reason })
+    // Fallback: keyword-based classification when JSON parsing fails
+    // (e.g., when model returns reasoning text with embedded keywords)
+    let lower = text.to_lowercase();
+    if lower.contains("\"allow\"") || lower.contains("\"decision\": \"allow\"")
+        || lower.contains("decision: allow") || lower.contains("allow this action")
+    {
+        return Some(ClassifierResult {
+            allow: true,
+            reason: "classified as safe (keyword-based)".to_string(),
+        });
+    }
+    if lower.contains("\"block\"") || lower.contains("\"decision\": \"block\"")
+        || lower.contains("decision: block") || lower.contains("block this action")
+        || lower.contains("unsafe") || lower.contains("dangerous")
+    {
+        return Some(ClassifierResult {
+            allow: false,
+            reason: "classified as potentially unsafe (keyword-based)".to_string(),
+        });
+    }
+
+    None
 }
 
 #[derive(Debug, Deserialize)]

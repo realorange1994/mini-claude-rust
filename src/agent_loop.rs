@@ -839,13 +839,17 @@ impl AgentLoop {
                         }
 
                         // Print all tool calls upfront (matching Go: "  [exec]: cmd" for exec, "  [tool] args" for others)
-                        for entry in &entries {
-                            let args_json = serde_json::to_string(&entry.params).unwrap_or_default();
-                            let input_preview = tool_arg_summary(&entry.tc.name, &args_json);
-                            if entry.tc.name == "exec" {
-                                eprintln!("  [{}]: {}", entry.tc.name, input_preview);
-                            } else {
-                                eprintln!("  [{}] {}", entry.tc.name, input_preview);
+                        // Skip if streaming already displayed them via TerminalHandler.
+                        let was_streaming = self.last_call_was_streaming.load(std::sync::atomic::Ordering::SeqCst);
+                        if !was_streaming {
+                            for entry in &entries {
+                                let args_json = serde_json::to_string(&entry.params).unwrap_or_default();
+                                let input_preview = tool_arg_summary(&entry.tc.name, &args_json);
+                                if entry.tc.name == "exec" {
+                                    eprintln!("  [{}]: {}", entry.tc.name, input_preview);
+                                } else {
+                                    eprintln!("  [{}] {}", entry.tc.name, input_preview);
+                                }
                             }
                         }
 
