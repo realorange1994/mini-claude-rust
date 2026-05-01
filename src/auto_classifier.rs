@@ -137,6 +137,13 @@ fn is_safe_exec_command(command: &str) -> bool {
     false
 }
 
+/// Process operations that are read-only and safe to auto-allow.
+/// Destructive operations (kill, pkill, terminate) are NOT listed here
+/// and will go through the classifier.
+const SAFE_PROCESS_OPERATIONS: &[&str] = &[
+    "list", "pgrep", "top", "pstree", "ps",
+];
+
 /// Check if the tool call should be auto-allowed without classifier evaluation.
 /// For most tools this is a name-only check. For "git" and "exec", it also checks
 /// the specific operation/command — only safe operations are auto-allowed.
@@ -148,6 +155,12 @@ pub fn is_auto_allowlisted(tool_name: &str, tool_input: &HashMap<String, serde_j
     if tool_name == "git" {
         if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
             return SAFE_GIT_OPERATIONS.contains(&op);
+        }
+    }
+    // Process: operation-level granularity — list/pgrep safe, kill/pkill go through classifier
+    if tool_name == "process" {
+        if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
+            return SAFE_PROCESS_OPERATIONS.contains(&op);
         }
     }
     // Exec: command-level granularity — safe commands auto-allowed
