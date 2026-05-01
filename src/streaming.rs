@@ -508,6 +508,8 @@ pub struct TerminalHandler {
     think_filter_buf: RwLock<String>,
     /// Whether ANSI dim styling is currently active (to avoid duplicate escape codes)
     think_dim_active: RwLock<bool>,
+    /// Whether thinking was already printed to avoid double-print in Done
+    thinking_printed: RwLock<bool>,
 }
 
 impl TerminalHandler {
@@ -520,6 +522,7 @@ impl TerminalHandler {
             think_filter_state: RwLock::new(ThinkFilterState::Normal),
             think_filter_buf: RwLock::new(String::new()),
             think_dim_active: RwLock::new(false),
+            thinking_printed: RwLock::new(false),
         }
     }
 
@@ -540,6 +543,9 @@ impl TerminalHandler {
                     if !buf.is_empty() {
                         let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
                         eprintln!("\n[THINK] {}", preview);
+                        drop(buf);
+                        let mut printed = self.thinking_printed.write().unwrap();
+                        *printed = true;
                     }
                 }
                 let mut buf = self.thinking_buf.write().unwrap();
@@ -576,8 +582,12 @@ impl TerminalHandler {
                     let mut buf = self.think_filter_buf.write().unwrap();
                     buf.clear();
                 }
+                // Flush buffered thinking if no tool call was seen and not already printed
                 let seen = self.seen_tool_call.read().unwrap();
-                if !*seen {
+                let printed = self.thinking_printed.read().unwrap();
+                if !*seen && !*printed {
+                    drop(seen);
+                    drop(printed);
                     let buf = self.thinking_buf.read().unwrap();
                     if !buf.is_empty() {
                         let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
@@ -588,6 +598,20 @@ impl TerminalHandler {
             ChunkType::Text => {
                 // Flush any pending tool call before text
                 self.flush_tool_call();
+                // Flush buffered thinking if any (thinking arrives before text in stream)
+                {
+                    let buf = self.thinking_buf.read().unwrap();
+                    if !buf.is_empty() {
+                        let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
+                        eprintln!("\n[THINK] {}", preview);
+                        drop(buf);
+                        let mut buf = self.thinking_buf.write().unwrap();
+                        buf.clear();
+                        drop(buf);
+                        let mut printed = self.thinking_printed.write().unwrap();
+                        *printed = true;
+                    }
+                }
                 // Run text through the think filter state machine
                 self.filter_and_print(&chunk.content);
             }

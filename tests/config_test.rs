@@ -81,6 +81,7 @@ fn config_custom_values() {
         post_compact_max_total_skill_chars: 25_000,
         post_compact_history_snip_count: 3,
         session_memory: None,
+        reactive_compact_threshold: 5000,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));

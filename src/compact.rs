@@ -14,6 +14,35 @@ use regex::Regex;
 use crate::context::{
     CompactTrigger, ConversationContext, Message, MessageContent, MessageRole,
 };
+use crate::session_memory::SessionMemory;
+
+/// Direction for partial compaction.
+/// - `UpTo`: Compact everything before the pivot index (keeps recent context)
+/// - `From`: Compact everything after the pivot index (keeps early + recent context)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialCompactDirection {
+    UpTo,
+    From,
+}
+
+impl std::fmt::Display for PartialCompactDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PartialCompactDirection::UpTo => write!(f, "up_to"),
+            PartialCompactDirection::From => write!(f, "from"),
+        }
+    }
+}
+
+/// Result from partial compaction
+pub struct PartialCompactionResult {
+    pub boundary: Message,
+    pub summary: Message,
+    pub entries_before: usize,
+    pub entries_after: usize,
+    pub pre_compact_tokens: usize,
+    pub post_compact_tokens: usize,
+}
 
 // --- Token estimation ---
 
@@ -221,6 +250,10 @@ pub struct CompactStats {
     pub estimated_tokens_saved: usize,
     pub estimated_tokens_before: usize,
     pub estimated_tokens_after: usize,
+    /// Token count of the kept messages (summary + boundary + tail)
+    pub tokens_after: usize,
+    /// Token count of the post-compact result (boundary + summary + tail)
+    pub post_compact_tokens: usize,
 }
 
 // --- 3-pass pre-pruning (A1) ---
@@ -812,6 +845,213 @@ fn message_to_api(msg: &Message) -> Option<serde_json::Value> {
     }
 }
 
+// --- SM-compact (session memory compaction without API call) ---
+
+/// Attempt SM-compact: use session memory as the compaction summary
+/// instead of calling the LLM API. Returns Some(result) if session memory
+/// exists and has content, None otherwise.
+///
+/// This follows the official Claude Code approach: when session-memory.md
+/// contains extracted context, use it directly as the summary, skipping
+/// the expensive LLM compaction call entirely.
+pub fn try_sm_compact(
+    context: &mut ConversationContext,
+    session_memory: Option<&SessionMemory>,
+    trigger: CompactTrigger,
+) -> Option<CompactStats> {
+    // Check if session memory is available and has content
+    let mem = session_memory?;
+    let mem_content = mem.format_for_prompt();
+    if mem_content.is_empty() {
+        return None;
+    }
+
+    let messages = context.messages().to_vec();
+    let entries_before = context.len();
+    let tokens_before = estimate_total_tokens(&messages);
+
+    eprintln!("[sm-compact] Using session memory as summary (skipping LLM API call)");
+
+    // Build the compact boundary marker
+    let boundary = Message::new(
+        MessageRole::System,
+        MessageContent::CompactBoundary {
+            trigger,
+            pre_compact_tokens: tokens_before,
+        },
+    );
+
+    // Format the session memory as a summary message
+    let summary_content = format!(
+        "[Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}",
+        tokens_before, mem_content
+    );
+    let summary = Message::new(
+        MessageRole::User,
+        MessageContent::Summary(summary_content),
+    );
+
+    // Keep the last few messages as tail to maintain context continuity
+    const TAIL_SIZE: usize = 4;
+    let tail_start = messages.len().saturating_sub(TAIL_SIZE);
+    let tail: Vec<Message> = messages[tail_start..].to_vec();
+
+    let mut new_messages = vec![boundary, summary];
+    new_messages.extend(tail);
+
+    let post_tokens = estimate_total_tokens(&new_messages);
+    let tokens_saved = tokens_before.saturating_sub(post_tokens);
+
+    context.replace_messages(new_messages);
+    context.validate_tool_pairing();
+    context.fix_role_alternation();
+
+    let entries_after = context.len();
+    let tokens_after = estimate_total_tokens(context.messages());
+
+    Some(CompactStats {
+        phase: CompactPhase::None,
+        entries_before,
+        entries_after,
+        tokens_after,
+        estimated_tokens_saved: tokens_saved,
+        estimated_tokens_before: tokens_before,
+        estimated_tokens_after: tokens_after,
+        post_compact_tokens: post_tokens,
+    })
+}
+
+// --- Partial compact (directional compaction) ---
+
+/// Perform partial compaction in the specified direction around a pivot index.
+///
+/// - `UpTo`: Compact messages 0..pivot, keeping messages pivot..end.
+///   Useful when a specific recent message is the focus point.
+/// - `From`: Compact messages pivot..end, keeping messages 0..pivot.
+///   Preserves early context (initial instructions, setup) while
+///   summarizing the middle/large portion. The very last N messages
+///   are always preserved to maintain recent context.
+///
+/// This is a lightweight, non-LLM version of partial compaction that
+/// summarizes old tool results in the targeted range (matching the
+/// 3-pass pre-pruning approach).
+pub fn partial_compact(
+    context: &mut ConversationContext,
+    direction: PartialCompactDirection,
+    pivot_index: usize,
+) -> PartialCompactionResult {
+    let messages = context.messages().to_vec();
+    let entries_before = context.len();
+    let tokens_before = estimate_total_tokens(&messages);
+
+    let pivot = pivot_index.min(messages.len());
+
+    let (summary_range, keep_range) = match direction {
+        PartialCompactDirection::UpTo => {
+            // Summarize 0..pivot, keep pivot..end
+            let summary: Vec<Message> = messages[..pivot].to_vec();
+            let keep: Vec<Message> = messages[pivot..].to_vec();
+            (summary, keep)
+        }
+        PartialCompactDirection::From => {
+            // Keep 0..pivot + last N, summarize pivot..(end-N)
+            const KEEP_LAST: usize = 3;
+            let last_keep_start = messages.len().saturating_sub(KEEP_LAST);
+            if last_keep_start <= pivot {
+                // Nothing to summarize -- keep everything
+                return PartialCompactionResult {
+                    boundary: Message::new(
+                        MessageRole::System,
+                        MessageContent::CompactBoundary {
+                            trigger: CompactTrigger::Manual,
+                            pre_compact_tokens: tokens_before,
+                        },
+                    ),
+                    summary: Message::new(MessageRole::User, MessageContent::Summary(
+                        format!("[No messages to summarize, {} tokens]", tokens_before),
+                    )),
+                    entries_before,
+                    entries_after: entries_before,
+                    pre_compact_tokens: tokens_before,
+                    post_compact_tokens: tokens_before,
+                };
+            }
+            let mut keep: Vec<Message> = messages[..pivot].to_vec();
+            keep.extend(messages[last_keep_start..].to_vec());
+            let summary: Vec<Message> = messages[pivot..last_keep_start].to_vec();
+            (summary, keep)
+        }
+    };
+
+    // Generate a lightweight summary from the range
+    // Use token count and message count as the summary content
+    let summary_tokens = estimate_total_tokens(&summary_range);
+    let summary_msg_count = summary_range.len();
+
+    // Count tool calls in the summary range for more informative summary
+    let mut tool_calls: Vec<String> = Vec::new();
+    for msg in &summary_range {
+        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+            for block in blocks {
+                tool_calls.push(block.name.clone());
+            }
+        }
+    }
+
+    let tool_summary = if tool_calls.is_empty() {
+        String::new()
+    } else {
+        format!("\nTool calls made: {}", tool_calls.join(", "))
+    };
+
+    let summary_text = format!(
+        "[Partial compact ({}): {} messages, ~{} tokens compressed{}] ",
+        direction, summary_msg_count, summary_tokens, tool_summary
+    );
+
+    eprintln!(
+        "[partial-compact {}] Summarized {} messages ({} tokens), keeping {} messages",
+        direction, summary_msg_count, summary_tokens, keep_range.len()
+    );
+
+    // Build the result
+    let boundary = Message::new(
+        MessageRole::System,
+        MessageContent::CompactBoundary {
+            trigger: CompactTrigger::Manual,
+            pre_compact_tokens: tokens_before,
+        },
+    );
+
+    let summary = Message::new(
+        MessageRole::User,
+        MessageContent::Summary(format!(
+            "[Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}",
+            tokens_before, direction, summary_text
+        )),
+    );
+
+    let mut new_messages = vec![boundary.clone(), summary.clone()];
+    new_messages.extend(keep_range);
+
+    context.replace_messages(new_messages);
+    context.validate_tool_pairing();
+    context.fix_role_alternation();
+
+    let entries_after = context.len();
+    let post_tokens = estimate_total_tokens(context.messages());
+
+    PartialCompactionResult {
+        boundary,
+        summary,
+        entries_before,
+        entries_after,
+        pre_compact_tokens: tokens_before,
+        post_compact_tokens: post_tokens,
+    }
+}
+
+
 // --- Round-based legacy compaction ---
 
 /// Find tool-use round boundaries (assistant tool_use + user tool_result pairs)
@@ -835,7 +1075,7 @@ pub fn find_round_boundaries(messages: &[Message]) -> Vec<(usize, usize)> {
 
 // --- Compactor struct (main entry point) ---
 
-/// Compactor handles context compaction with LLM-based and fallback strategies
+/// Compactor handles context compaction with LLM-based, SM-based, and fallback strategies
 pub struct Compactor {
     phase: CompactPhase,
     max_tokens: usize,
@@ -849,6 +1089,12 @@ pub struct Compactor {
     last_compact_savings: Vec<f64>,
     /// Token count right after last successful compaction (cooldown tracking)
     post_compact_tokens: Option<usize>,
+    /// Session memory for SM-compact (skip LLM API call when memory has content)
+    session_memory: Option<std::sync::Arc<SessionMemory>>,
+    /// Token count from the previous turn, for reactive compact detection
+    prev_turn_tokens: Option<usize>,
+    /// Threshold for reactive compact (token delta that triggers proactive compaction)
+    reactive_compact_threshold: usize,
 }
 
 impl Compactor {
@@ -863,6 +1109,9 @@ impl Compactor {
             last_summary: None,
             last_compact_savings: Vec::with_capacity(2),
             post_compact_tokens: None,
+            session_memory: None,
+            prev_turn_tokens: None,
+            reactive_compact_threshold: 5000, // default: 5000 token delta
         }
     }
 
@@ -880,6 +1129,62 @@ impl Compactor {
     pub fn with_buffer(mut self, buffer: usize) -> Self {
         self.compact_buffer = buffer;
         self
+    }
+
+    /// Set session memory for SM-compact support.
+    /// When session memory has content, compaction uses it directly as the summary
+    /// instead of calling the LLM API.
+    pub fn with_session_memory(mut self, memory: Option<std::sync::Arc<SessionMemory>>) -> Self {
+        self.session_memory = memory;
+        self
+    }
+
+    /// Set the reactive compact threshold (token delta that triggers proactive compaction).
+    pub fn with_reactive_threshold(mut self, threshold: usize) -> Self {
+        self.reactive_compact_threshold = threshold;
+        self
+    }
+
+    /// Get the compact threshold (for saving/restoring in reactive compact).
+    pub fn get_compact_threshold(&self) -> f64 {
+        self.compact_threshold
+    }
+
+    /// Set the compact threshold (for temporarily overriding in reactive compact).
+    pub fn set_compact_threshold(&mut self, threshold: f64) {
+        self.compact_threshold = threshold;
+    }
+
+    /// Check if reactive compact should be triggered due to a token spike.
+    /// Compares current token count to the previous turn's count.
+    /// If the delta exceeds the threshold, returns true (trigger compaction).
+    /// Only triggers if not already planning to compact (i.e., `should_compact` is false).
+    pub fn should_reactive_compact(&self, current_tokens: usize) -> bool {
+        // If we're already above the normal threshold, no need for reactive detection
+        if self.should_compact(current_tokens) {
+            return false;
+        }
+
+        let Some(prev) = self.prev_turn_tokens else {
+            return false;
+        };
+
+        let delta = current_tokens.saturating_sub(prev);
+        if delta > self.reactive_compact_threshold {
+            eprintln!(
+                "[reactive-compact] Token spike detected: {} -> {} (+{} tokens, threshold: {})",
+                prev, current_tokens, delta, self.reactive_compact_threshold
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Update the previous turn token count. Call this after each turn to
+    /// track token growth for reactive compact detection.
+    pub fn update_prev_turn_tokens(&mut self, tokens: usize) {
+        self.prev_turn_tokens = Some(tokens);
     }
 
     /// Check if compaction is needed based on token usage.
@@ -930,6 +1235,8 @@ impl Compactor {
                 estimated_tokens_saved: 0,
                 estimated_tokens_before: tokens_before,
                 estimated_tokens_after: tokens_before,
+                tokens_after: tokens_before,
+                post_compact_tokens: tokens_before,
             };
         }
 
@@ -945,6 +1252,8 @@ impl Compactor {
                 estimated_tokens_saved: 0,
                 estimated_tokens_before: tokens_before,
                 estimated_tokens_after: tokens_before,
+                tokens_after: tokens_before,
+                post_compact_tokens: tokens_before,
             };
         }
 
@@ -954,6 +1263,43 @@ impl Compactor {
             "[Compaction] Triggered: {} tokens ({}% of effective window)",
             tokens_before, percent_used
         );
+
+        // Try SM-compact first (Feature 1): use session memory as summary, skipping LLM API call.
+        // This is the preferred path when session memory is available and has content,
+        // following the official Claude Code approach in sessionMemoryCompact.ts.
+        if let Some(sm_stats) = try_sm_compact(context, self.session_memory.as_deref(), CompactTrigger::Auto) {
+            eprintln!(
+                "[sm-compact] {}: {} -> {} entries, ~{} tokens saved",
+                "auto",
+                sm_stats.entries_before, sm_stats.entries_after, sm_stats.estimated_tokens_saved
+            );
+            // Store a lightweight summary from session memory for iterative updates
+            if let Some(ref mem) = self.session_memory {
+                let mem_content = mem.format_for_prompt();
+                if !mem_content.is_empty() {
+                    self.last_summary = Some(format!("[SM-compact summary] {}", &mem_content[..mem_content.len().min(2000)]));
+                }
+            }
+            // Reset LLM failure count on successful SM-compact
+            self.llm_compact_failed_count = 0;
+            self.phase = CompactPhase::None;
+
+            // Record savings for anti-thrashing
+            let savings = if sm_stats.estimated_tokens_before > 0 {
+                sm_stats.estimated_tokens_saved as f64 / sm_stats.estimated_tokens_before as f64
+            } else {
+                0.0
+            };
+            self.last_compact_savings.push(savings);
+            if self.last_compact_savings.len() > 2 {
+                self.last_compact_savings.remove(0);
+            }
+
+            // Set cooldown from post-compact tokens
+            self.post_compact_tokens = Some(sm_stats.tokens_after);
+
+            return sm_stats;
+        }
 
         // Try LLM compaction first (if we haven't failed too many times)
         if self.llm_compact_failed_count < self.max_llm_compact_failures {
@@ -1032,6 +1378,8 @@ impl Compactor {
                         estimated_tokens_saved: tokens_before.saturating_sub(tokens_after),
                         estimated_tokens_before: tokens_before,
                         estimated_tokens_after: tokens_after,
+                        tokens_after,
+                        post_compact_tokens: tokens_after,
                     };
                 }
                 Err(e) => {
@@ -1126,6 +1474,8 @@ impl Compactor {
             estimated_tokens_saved: tokens_saved,
             estimated_tokens_before: tokens_before,
             estimated_tokens_after: tokens_after,
+            tokens_after,
+            post_compact_tokens: tokens_after,
         }
     }
 
@@ -1143,6 +1493,7 @@ impl Compactor {
         self.last_summary = None;
         self.last_compact_savings.clear();
         self.post_compact_tokens = None;
+        self.prev_turn_tokens = None;
     }
 }
 

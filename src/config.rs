@@ -44,6 +44,8 @@ pub struct Config {
     pub post_compact_history_snip_count: usize,
     // Session memory (Phase 4)
     pub session_memory: Option<Arc<SessionMemory>>,
+    // Reactive compact: trigger compaction when token delta exceeds this threshold
+    pub reactive_compact_threshold: usize,
 }
 
 impl Default for Config {
@@ -107,6 +109,7 @@ impl Default for Config {
             post_compact_max_total_skill_chars: 25_000,
             post_compact_history_snip_count: 3,
             session_memory: None,
+            reactive_compact_threshold: 5000,
         }
     }
 }

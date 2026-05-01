@@ -133,6 +133,10 @@ pub struct AgentLoop {
     context: Arc<RwLock<ConversationContext>>,
     client: reqwest::Client,
     pub use_stream: bool,
+    /// Tracks whether the LAST API call actually used streaming (set by the async agent loop).
+    /// Differs from `use_stream` which is the intended mode — when streaming fails and falls
+    /// back to non-streaming, this field is set to false so main.rs knows to print the result.
+    pub last_call_was_streaming: std::sync::atomic::AtomicBool,
     max_tool_chars: usize,
     max_turns: usize,
     base_url: String,
@@ -183,11 +187,14 @@ impl AgentLoop {
         let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode));
 
         // Initialize compactor with config values
+        let session_memory = config.session_memory.clone();
         let compactor = RwLock::new(
             Compactor::new()
                 .with_threshold(config.auto_compact_threshold)
                 .with_buffer(config.auto_compact_buffer)
                 .with_max_tokens(crate::compact::model_context_window(&gate.config.model))
+                .with_session_memory(session_memory)
+                .with_reactive_threshold(config.reactive_compact_threshold)
         );
 
         // Create multi-thread tokio runtime for this agent
@@ -215,6 +222,7 @@ impl AgentLoop {
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
+            last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -272,11 +280,14 @@ impl AgentLoop {
             t
         };
 
+        let session_memory = config.session_memory.clone();
         let compactor = RwLock::new(
             Compactor::new()
                 .with_threshold(config.auto_compact_threshold)
                 .with_buffer(config.auto_compact_buffer)
                 .with_max_tokens(crate::compact::model_context_window(&config.model))
+                .with_session_memory(session_memory)
+                .with_reactive_threshold(config.reactive_compact_threshold)
         );
 
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -302,6 +313,7 @@ impl AgentLoop {
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
+            last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -604,9 +616,23 @@ impl AgentLoop {
             }
 
             if self.config.auto_compact_enabled {
-                {
+                // Feature 3: Reactive compact — trigger compaction when token count spikes
+                // Check before regular compaction to handle sudden context growth
+                let reactive_triggered = {
+                    let ctx = self.context.read().await;
+                    let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
+                    let mut compactor = self.compactor.write().await;
+                    compactor.should_reactive_compact(current_tokens)
+                };
+
+                // If reactive compact triggered, force the compaction threshold check
+                // by temporarily lowering the threshold to ensure compaction runs
+                if reactive_triggered {
                     let mut ctx = self.context.write().await;
                     let mut compactor = self.compactor.write().await;
+                    // Save original threshold, force compaction, then restore
+                    let saved_threshold = compactor.get_compact_threshold();
+                    compactor.set_compact_threshold(0.0); // Force should_compact to return true
                     let stats = compactor.compact(
                         &mut ctx,
                         &self.client,
@@ -614,34 +640,59 @@ impl AgentLoop {
                         &self.api_key,
                         &self.base_url,
                     ).await;
+                    compactor.set_compact_threshold(saved_threshold);
                     if stats.phase != crate::compact::CompactPhase::None {
-                        eprintln!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
-                            stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
-                        // Log compaction event to transcript
+                        eprintln!("[reactive-compact] Triggered: {} -> {} entries, ~{} tokens saved",
+                            stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
                         let _ = self.transcript.add_compact(
-                            format!("{:?}", stats.phase),
+                            format!("reactive-{:?}", stats.phase),
                             stats.estimated_tokens_saved,
                         );
-
-                        // Phase 2: Post-compact recovery — re-inject critical context
                         let recovered_paths = self.post_compact_recovery().await;
-
-                        // Phase 3: History snip — preserve recent messages verbatim
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
-                }
+                } else {
+                    // Regular auto-compaction (token threshold based)
+                    {
+                        let mut ctx = self.context.write().await;
+                        let mut compactor = self.compactor.write().await;
+                        let stats = compactor.compact(
+                            &mut ctx,
+                            &self.client,
+                            &self.config.model,
+                            &self.api_key,
+                            &self.base_url,
+                        ).await;
+                        if stats.phase != crate::compact::CompactPhase::None {
+                            eprintln!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
+                                stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
+                            // Log compaction event to transcript
+                            let _ = self.transcript.add_compact(
+                                format!("{:?}", stats.phase),
+                                stats.estimated_tokens_saved,
+                            );
 
-                // Log summary to transcript if one was added
-                {
-                    let ctx = self.context.read().await;
-                    if let Some(idx) = ctx.last_compact_boundary_index() {
-                        // Check if a summary follows the compact boundary
-                        if idx + 1 < ctx.len() {
-                            let summary_msg = &ctx.messages()[idx + 1];
-                            if summary_msg.is_summary() {
-                                if let Some(text) = summary_msg.text_content() {
-                                    let _ = self.transcript.add_summary(text.to_string());
+                            // Phase 2: Post-compact recovery — re-inject critical context
+                            let recovered_paths = self.post_compact_recovery().await;
+
+                            // Phase 3: History snip — preserve recent messages verbatim
+                            let snip_count = self.config.post_compact_history_snip_count;
+                            ctx.add_history_snip(snip_count, &recovered_paths);
+                        }
+                    }
+
+                    // Log summary to transcript if one was added
+                    {
+                        let ctx = self.context.read().await;
+                        if let Some(idx) = ctx.last_compact_boundary_index() {
+                            // Check if a summary follows the compact boundary
+                            if idx + 1 < ctx.len() {
+                                let summary_msg = &ctx.messages()[idx + 1];
+                                if summary_msg.is_summary() {
+                                    if let Some(text) = summary_msg.text_content() {
+                                        let _ = self.transcript.add_summary(text.to_string());
+                                    }
                                 }
                             }
                         }
@@ -1031,6 +1082,14 @@ impl AgentLoop {
                         let mut ctx = self.context.write().await;
                         ctx.add_assistant_tool_calls(tool_use_blocks);
                         ctx.add_tool_results(tool_result_blocks);
+
+                        // Update prev_turn_tokens for reactive compact detection
+                        let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
+                        drop(ctx);
+                        {
+                            let mut compactor = self.compactor.write().await;
+                            compactor.update_prev_turn_tokens(current_tokens);
+                        }
 
                         // Check for interruption after tool execution
                         if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1961,6 +2020,8 @@ impl AgentLoop {
                 estimated_tokens_saved: 0,
                 estimated_tokens_before: 0,
                 estimated_tokens_after: 0,
+                tokens_after: 0,
+                post_compact_tokens: 0,
             };
         }
 
@@ -1973,6 +2034,8 @@ impl AgentLoop {
                 estimated_tokens_saved: 0,
                 estimated_tokens_before: tokens_before,
                 estimated_tokens_after: tokens_before,
+                tokens_after: tokens_before,
+                post_compact_tokens: tokens_before,
             };
         }
 
@@ -2001,6 +2064,8 @@ impl AgentLoop {
             estimated_tokens_saved: saved,
             estimated_tokens_before: tokens_before,
             estimated_tokens_after: tokens_after,
+            tokens_after,
+            post_compact_tokens: tokens_after,
         }
     }
 
