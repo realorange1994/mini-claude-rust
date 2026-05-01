@@ -25,7 +25,7 @@ pub mod file_history_tools;
 pub mod memory_tool;
 pub mod task_tool;
 pub mod agent_tool;
-pub mod bash_task_tools;
+// bash_task_tools merged into exec_tool
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
@@ -413,17 +413,17 @@ pub fn register_bash_task_tools(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Register task_stop tool
-    registry.register(bash_task_tools::TaskStopTool::new(
-        bash_task_tools::make_task_stop_func(Arc::clone(&task_store)),
+    registry.register(exec_tool::TaskStopTool::new(
+        exec_tool::make_task_stop_func(Arc::clone(&task_store)),
     ));
 
     // Register task_output tool
-    registry.register(bash_task_tools::TaskOutputTool::new(
-        bash_task_tools::make_task_output_func(Arc::clone(&task_store)),
+    registry.register(exec_tool::TaskOutputTool::new(
+        exec_tool::make_task_output_func(Arc::clone(&task_store)),
     ));
 
     // Register exec tool with background callback
-    let callback = bash_task_tools::make_bash_bg_callback(task_store, tx);
+    let callback = exec_tool::make_bash_bg_callback(task_store, tx);
     registry.register(exec_tool::ExecTool::with_background_callback(callback));
 
     rx
