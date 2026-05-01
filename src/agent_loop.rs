@@ -266,7 +266,7 @@ impl AgentLoop {
         let entries = transcript.read_all()
             .map_err(|e| anyhow!("Failed to read transcript: {}", e))?;
 
-        let context = Self::rebuild_context_from_transcript(&entries, config.clone());
+        let mut context = Self::rebuild_context_from_transcript(&entries, config.clone());
 
         // Create transcript writer: continue original file or start new session
         let new_transcript = if continue_transcript {
@@ -287,14 +287,34 @@ impl AgentLoop {
         };
 
         let session_memory = config.session_memory.clone();
-        let compactor = RwLock::new(
-            Compactor::new()
-                .with_threshold(config.auto_compact_threshold)
-                .with_buffer(config.auto_compact_buffer)
-                .with_max_tokens(crate::compact::model_context_window(&config.model))
-                .with_session_memory(session_memory)
-                .with_reactive_threshold(config.reactive_compact_threshold)
-        );
+        let mut compactor = Compactor::new()
+            .with_threshold(config.auto_compact_threshold)
+            .with_buffer(config.auto_compact_buffer)
+            .with_max_tokens(crate::compact::model_context_window(&config.model))
+            .with_session_memory(session_memory)
+            .with_reactive_threshold(config.reactive_compact_threshold);
+
+        // Preflight compression for resumed sessions: if the restored context
+        // is too large (>100K estimated tokens), compact it synchronously
+        // before starting the agent loop.
+        const PREFLIGHT_TOKEN_THRESHOLD: usize = 100_000;
+        const PREFLIGHT_MAX_ATTEMPTS: usize = 3;
+        for _ in 0..PREFLIGHT_MAX_ATTEMPTS {
+            let estimated = crate::compact::estimate_total_tokens(context.messages());
+            if estimated <= PREFLIGHT_TOKEN_THRESHOLD {
+                break;
+            }
+            let stats = compactor.compact_preflight(&mut context);
+            if stats.phase == crate::compact::CompactPhase::None {
+                break;
+            }
+            eprintln!(
+                "[preflight-compact] {} -> {} entries, ~{} tokens saved",
+                stats.entries_before, stats.entries_after, stats.estimated_tokens_saved
+            );
+        }
+
+        let compactor = RwLock::new(compactor);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1266,7 +1286,7 @@ impl AgentLoop {
     async fn request_final_summary(
         &self,
         system_prompt: &str,
-        tools: &[serde_json::Value],
+        _tools: &[serde_json::Value],  // ignore tools - force text-only response
     ) -> Result<String> {
         // Add a hint message asking for summary
         {
@@ -1281,8 +1301,11 @@ impl AgentLoop {
         // Get updated messages (async)
         let messages = self.entries_to_messages_async().await;
 
+        // Force text-only response by passing empty tools list
+        let empty_tools: Vec<serde_json::Value> = vec![];
+
         // Try one more non-streaming call
-        match self.call_api_non_streaming(system_prompt, &messages, tools).await {
+        match self.call_api_non_streaming(system_prompt, &messages, &empty_tools).await {
             Ok((_, text)) => {
                 if !text.is_empty() {
                     let mut ctx = self.context.write().await;
@@ -1434,6 +1457,12 @@ impl AgentLoop {
         // with a fresh connection. This prevents the agent loop from acting on
         // incomplete tool calls.
         if !stream_result.completed {
+            // When text was already streamed to the terminal before the failure,
+            // return the text as-is (it was already shown) to avoid duplication.
+            if stream_result.text_already_streamed {
+                eprintln!("[!] Stream failed after text was already delivered; returning partial text");
+                return Ok((tool_calls, text));
+            }
             eprintln!("[!] Stream returned partial results, retrying with fresh connection");
             return Err(anyhow!("stream returned partial result (partial delivery)"));
         }

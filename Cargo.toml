@@ -73,6 +73,9 @@ ctrlc = "3.4"
 # Cancellation token
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# Home directory detection
+dirs = "5"
+
 [dev-dependencies]
 tempfile = "3.8"
 wiremock = "0.6"

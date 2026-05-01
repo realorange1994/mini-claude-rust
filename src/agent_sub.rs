@@ -215,9 +215,9 @@ pub fn build_child_config(parent_config: &Config, model_override: &str) -> Confi
     }
     // Limit child agent turns
     let max_turns = if child_config.max_turns > 0 {
-        child_config.max_turns.min(50) // Cap sub-agents at 50 turns
+        child_config.max_turns.min(child_config.sub_agent_max_turns as usize)
     } else {
-        50 // sensible default for sub-agents
+        child_config.sub_agent_max_turns as usize // default for sub-agents
     };
     child_config.max_turns = max_turns;
     // Sub-agents don't need session memory
@@ -299,6 +299,18 @@ pub fn spawn_sub_agent_sync(
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
 ) -> (String, String, String, usize, u64) {
     let start = std::time::Instant::now();
+
+    // Check if sub-agents are enabled in config
+    if !parent_config.sub_agent_enabled {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        return (
+            String::new(),
+            String::new(),
+            "Sub-agents are disabled by configuration (sub_agent_enabled=false)".to_string(),
+            0,
+            duration_ms,
+        );
+    }
 
     let agent_id = generate_agent_id();
 

@@ -186,6 +186,116 @@ pub fn get_git_context_for_prompt() -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Security helpers for dangerous-operation detection & permission checks
+// ---------------------------------------------------------------------------
+
+/// Returns (true, reason) if the given git operation with flags is dangerous.
+fn is_dangerous_git_operation(operation: &str, flags: &[String]) -> (bool, String) {
+    match operation {
+        "push" => {
+            if flags.iter().any(|f| f == "--force" || f == "-f" || f == "--force-with-lease") {
+                return (true, "Force push detected".to_string());
+            }
+            (false, String::new())
+        }
+        "reset" => {
+            if flags.iter().any(|f| f == "--hard") {
+                return (true, "git reset --hard will discard uncommitted changes".to_string());
+            }
+            (false, String::new())
+        }
+        "clean" => {
+            let has_force = flags.iter().any(|f| f == "-f" || f == "--force");
+            let has_recursive = flags.iter().any(|f| f == "-d" || f == "-fd" || f == "-xdf" || f.contains('d'));
+            if has_force && has_recursive {
+                return (true, "git clean -fd will delete untracked files and directories".to_string());
+            }
+            (false, String::new())
+        }
+        "commit" => {
+            if flags.iter().any(|f| f == "--amend") {
+                return (true, "Commit --amend rewrites history".to_string());
+            }
+            (false, String::new())
+        }
+        "rebase" => {
+            if flags.iter().any(|f| f == "--interactive" || f == "-i") {
+                return (true, "Interactive rebase rewrites history".to_string());
+            }
+            (false, String::new())
+        }
+        _ => (false, String::new()),
+    }
+}
+
+/// Validate that all flags are allowed for the given operation.
+/// Returns Some(error_message) if a flag is not allowed, None if all OK.
+fn validate_git_flags(operation: &str, flags: &[String]) -> Option<String> {
+    let allowed: Vec<&str> = match operation {
+        "status" => vec![],
+        "diff" => vec!["--cached", "--staged", "--stat", "--name-only", "--name-status", "--stat-width"],
+        "log" => vec!["--oneline", "--graph", "--all", "--decorate", "--simplify-by-decoration"],
+        "push" => vec!["--force", "-f", "--force-with-lease", "--set-upstream", "-u", "--dry-run", "--verbose"],
+        "pull" => vec!["--rebase", "--ff-only", "--no-ff", "--squash", "--verbose"],
+        "commit" => vec!["--amend", "--no-edit", "--allow-empty", "--signoff", "-a"],
+        "branch" => vec!["-d", "-D", "-m", "-M", "-a", "-r", "--list", "-v", "--merged", "--no-merged"],
+        "checkout" => vec!["-b", "-B", "--force", "-f", "--detach"],
+        "merge" => vec!["--no-ff", "--squash", "--abort", "--continue", "--no-commit"],
+        "rebase" => vec!["--interactive", "-i", "--continue", "--abort", "--skip", "--hard", "--soft", "--mixed"],
+        "stash" => vec!["-u", "--include-untracked", "--all", "--keep-index"],
+        "clean" => vec!["-f", "-d", "-x", "-df", "-xdf", "--dry-run"],
+        "reset" => vec!["--soft", "--mixed", "--hard", "--merge", "--keep"],
+        "tag" => vec!["-d", "-f", "-a", "-m", "-s", "-l", "--list", "--sort"],
+        "fetch" => vec!["--all", "--prune", "--tags", "--dry-run"],
+        "revert" => vec!["--no-commit", "--continue", "--abort", "--mainline"],
+        "cherry-pick" => vec!["--continue", "--abort", "--skip", "--no-commit", "--mainline"],
+        _ => vec![],
+    };
+
+    if allowed.is_empty() {
+        return None; // no validated flag list means accept everything (safe ops)
+    }
+
+    for flag in flags {
+        if !allowed.contains(&flag.as_str()) {
+            return Some(format!(
+                "Flag '{}' is not allowed for '{}'. Allowed flags: {}",
+                flag,
+                operation,
+                allowed.join(", ")
+            ));
+        }
+    }
+    None
+}
+
+/// Check flags permission; returns Some(ToolResult::error) if disallowed.
+fn check_git_flags_permission(operation: &str, flags: &[String]) -> Option<ToolResult> {
+    // Dangerous-operation check
+    let (dangerous, reason) = is_dangerous_git_operation(operation, flags);
+    if dangerous {
+        return Some(ToolResult::error(format!(
+            "Permission denied: {} (operation: {})",
+            reason, operation
+        )));
+    }
+    // Per-operation flag allowlist
+    if let Some(msg) = validate_git_flags(operation, flags) {
+        return Some(ToolResult::error(format!("Permission denied: {}", msg)));
+    }
+    None
+}
+
+/// Returns true if the gh subcommand is considered dangerous.
+fn is_gh_repo_dangerous(subcmd: &str, _flags: &[String]) -> bool {
+    match subcmd {
+        "pr_merge" | "pr_close" | "pr_comment" | "issue_close" | "issue_comment"
+        | "release_delete" | "release_edit" | "repo_delete" | "repo_edit" => true,
+        _ => false,
+    }
+}
+
 pub struct GitTool;
 
 impl GitTool {
@@ -212,7 +322,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Execute Git version control operations. Supports clone, init, add, rm, mv, restore, switch, commit, push, pull, fetch, branch, checkout, merge, rebase, cherry-pick, revert, stash, clean, reset, tag, status, diff, log, shortlog, blame, reflog, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations, and use operation='info' to get current repository state (branch, commit, dirty status, default branch, git root)."
+        "Execute Git version control operations. Supports clone, init, add, rm, mv, restore, switch, commit, push, pull, fetch, branch, checkout, merge, rebase, cherry-pick, revert, stash, clean, reset, tag, status, diff, log, shortlog, blame, reflog, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations, and use operation='info' to get current repository state (branch, commit, dirty status, default branch, git root). Also supports operation='gh' for read-only GitHub CLI (gh) operations: pr view/list/diff/checks/status, issue view/list/status, run list/view, auth status, release list/view, search repos/issues/prs."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -222,10 +332,10 @@ impl Tool for GitTool {
                 "operation": {
                     "type": "string",
                     "description": "Git operation to perform",
-                    "enum": ["clone", "init", "add", "rm", "mv", "restore", "switch", "commit", "push", "pull", "fetch", 
+                    "enum": ["clone", "init", "add", "rm", "mv", "restore", "switch", "commit", "push", "pull", "fetch",
                              "branch", "checkout", "merge", "rebase", "cherry-pick", "revert", "stash", "clean",
                              "reset", "tag", "status", "diff", "log", "shortlog", "blame", "reflog",
-                             "remote", "show", "describe", "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree", "info"]
+                             "remote", "show", "describe", "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree", "info", "gh"]
                 },
                 "repo": {
                     "type": "string",
@@ -332,14 +442,74 @@ impl Tool for GitTool {
                 "proxy": {
                     "type": "string",
                     "description": "HTTP/SOCKS proxy URL for git operations (e.g. 'http://127.0.0.1:7890', 'socks5://127.0.0.1:1080'). Sets https_proxy and http_proxy environment variables for the git command."
+                },
+                "gh_subcommand": {
+                    "type": "string",
+                    "description": "GitHub CLI (gh) subcommand (for operation='gh'): pr, issue, run, auth, release, search",
+                    "enum": ["pr", "issue", "run", "auth", "release", "search"]
+                },
+                "pr_number": {
+                    "type": "integer",
+                    "description": "Pull request number for gh pr view/diff/checks operations"
+                },
+                "issue_number": {
+                    "type": "integer",
+                    "description": "Issue number for gh issue view/status operations"
+                },
+                "gh_flags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Additional flags for gh CLI commands (for operation='gh')"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query for gh search repos/issues/prs operations"
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Tag name for gh release view/list operations"
                 }
             },
             "required": ["operation"]
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
+        let operation = params.get("operation")?.as_str()?;
+
+        // Handle gh operations via is_gh_repo_dangerous
+        if operation == "gh" {
+            let subcmd = params.get("gh_subcommand")?.as_str()?;
+            let flags: Vec<String> = params
+                .get("gh_flags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if is_gh_repo_dangerous(subcmd, &flags) {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: gh {} is a write/destructive operation",
+                    subcmd
+                )));
+            }
+            return None;
+        }
+
+        // For git operations, check flags
+        let flags: Vec<String> = params
+            .get("flags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        check_git_flags_permission(operation, &flags)
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -355,7 +525,11 @@ impl Tool for GitTool {
         let work_dir = if operation == "clone" {
             params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
         } else if operation == "blame" {
-            params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
+            // For blame: directory is the working directory. If not set, fall back to path.
+            params.get("directory")
+                .and_then(|v| v.as_str())
+                .or_else(|| params.get("path").and_then(|v| v.as_str()))
+                .map(PathBuf::from)
         } else {
             params.get("directory")
                 .and_then(|v| v.as_str())
@@ -453,7 +627,10 @@ impl Tool for GitTool {
         }
         let args = args.unwrap();
 
-        let mut cmd = Command::new("git");
+        // Determine binary name: "gh" for operation="gh", "git" otherwise
+        let command_name = if operation == "gh" { "gh" } else { "git" };
+
+        let mut cmd = Command::new(command_name);
         cmd.args(&args);
 
         if let Some(proxy) = params.get("proxy").and_then(|v| v.as_str()) {
@@ -490,7 +667,7 @@ impl Tool for GitTool {
                 // Check exit code and provide detailed error on failure
                 if !output.status.success() {
                     let exit_code = output.status.code().unwrap_or(-1);
-                    let cmd_str = format!("git {}", args.join(" "));
+                    let cmd_str = format!("{} {}", command_name, args.join(" "));
                     let err_msg = if result.is_empty() || result == "(no output)" {
                         format!("Error: '{}' failed with exit code {}", cmd_str, exit_code)
                     } else {
@@ -506,8 +683,8 @@ impl Tool for GitTool {
                 }
             }
             Err(e) => {
-                let cmd_str = format!("git {}", args.join(" "));
-                ToolResult::error(format!("Error executing '{}': {}. Make sure git is installed and accessible.", cmd_str, e))
+                let cmd_str = format!("{} {}", command_name, args.join(" "));
+                ToolResult::error(format!("Error executing '{}': {}. Make sure {} is installed and accessible.", cmd_str, e, command_name))
             }
         }
     }
@@ -778,14 +955,15 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         }
         "blame" => {
             args.push("blame".to_string());
-            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                args.push(path.to_string());
-            } else if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
+            // Prefer 'files' param for blame file paths; 'path' may be the working directory
+            if let Some(files) = params.get("files").and_then(|v| v.as_array()) {
                 for f in files {
                     if let Some(s) = f.as_str() {
                         args.push(s.to_string());
                     }
                 }
+            } else if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                args.push(path.to_string());
             } else {
                 return Err("path or files is required for blame (file path)".to_string());
             }
@@ -861,6 +1039,116 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
                 }
             } else {
                 args.push("list".to_string());
+            }
+        }
+        "gh" => {
+            // GitHub CLI (gh) read-only operations
+            let subcmd = params.get("gh_subcommand")
+                .and_then(|v| v.as_str())
+                .ok_or("gh_subcommand is required for operation='gh'")?;
+
+            match subcmd {
+                "pr" => {
+                    args.push("pr".to_string());
+                    let pr_num = params.get("pr_number").and_then(|v| v.as_i64());
+                    // Determine pr sub-action from gh_flags
+                    let pr_action = params.get("gh_flags")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+                        .unwrap_or("list");
+                    match pr_action {
+                        "view" => {
+                            args.push("view".to_string());
+                            if let Some(n) = pr_num { args.push(n.to_string()); }
+                        }
+                        "list" => { args.push("list".to_string()); }
+                        "diff" => {
+                            args.push("diff".to_string());
+                            if let Some(n) = pr_num { args.push(n.to_string()); }
+                        }
+                        "checks" => {
+                            args.push("checks".to_string());
+                            if let Some(n) = pr_num { args.push(n.to_string()); }
+                        }
+                        "status" => { args.push("status".to_string()); }
+                        other => return Err(format!("unknown gh pr sub-action: {}", other)),
+                    }
+                }
+                "issue" => {
+                    args.push("issue".to_string());
+                    let issue_num = params.get("issue_number").and_then(|v| v.as_i64());
+                    let issue_action = params.get("gh_flags")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+                        .unwrap_or("list");
+                    match issue_action {
+                        "view" => {
+                            args.push("view".to_string());
+                            if let Some(n) = issue_num { args.push(n.to_string()); }
+                        }
+                        "list" => { args.push("list".to_string()); }
+                        "status" => { args.push("status".to_string()); }
+                        other => return Err(format!("unknown gh issue sub-action: {}", other)),
+                    }
+                }
+                "run" => {
+                    args.push("run".to_string());
+                    let run_action = params.get("gh_flags")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+                        .unwrap_or("list");
+                    match run_action {
+                        "list" => { args.push("list".to_string()); }
+                        "view" => {
+                            args.push("view".to_string());
+                            // target param can hold the run ID
+                            if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
+                                args.push(t.to_string());
+                            }
+                        }
+                        other => return Err(format!("unknown gh run sub-action: {}", other)),
+                    }
+                }
+                "auth" => {
+                    args.push("auth".to_string());
+                    args.push("status".to_string());
+                }
+                "release" => {
+                    args.push("release".to_string());
+                    let release_action = params.get("gh_flags")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+                        .unwrap_or("list");
+                    match release_action {
+                        "list" => { args.push("list".to_string()); }
+                        "view" => {
+                            args.push("view".to_string());
+                            if let Some(tag) = params.get("tag").and_then(|v| v.as_str()) {
+                                args.push(tag.to_string());
+                            }
+                        }
+                        other => return Err(format!("unknown gh release sub-action: {}", other)),
+                    }
+                }
+                "search" => {
+                    args.push("search".to_string());
+                    let search_target = params.get("gh_flags")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+                        .unwrap_or("repos");
+                    match search_target {
+                        "repos" | "issues" | "prs" => {
+                            args.push(search_target.to_string());
+                        }
+                        other => return Err(format!("unknown gh search target: {}", other)),
+                    }
+                    if let Some(q) = params.get("query").and_then(|v| v.as_str()) {
+                        args.push(q.to_string());
+                    } else {
+                        return Err("query is required for gh search".to_string());
+                    }
+                }
+                other => return Err(format!("unknown gh_subcommand: {}", other)),
             }
         }
         _ => return Err(format!("unknown operation: {}", operation)),
@@ -2161,6 +2449,148 @@ mod tests {
         fs::write(format!("{}/new_status.txt", base), "new").unwrap();
         let status = get_git_status(&base).unwrap();
         assert!(!status.is_empty(), "Should have status after adding file");
+    }
+
+    // ---- Tests for new security helpers ----
+
+    #[test]
+    fn test_is_dangerous_git_operation() {
+        // Force push is dangerous
+        let (dangerous, reason) = is_dangerous_git_operation("push", &["--force".to_string()]);
+        assert!(dangerous, "Force push should be dangerous");
+        assert!(reason.contains("Force push"), "Reason should mention force push");
+
+        // Normal push is not dangerous
+        let (dangerous, _) = is_dangerous_git_operation("push", &[]);
+        assert!(!dangerous, "Normal push should not be dangerous");
+
+        // reset --hard is dangerous
+        let (dangerous, reason) = is_dangerous_git_operation("reset", &["--hard".to_string()]);
+        assert!(dangerous, "reset --hard should be dangerous");
+        assert!(reason.contains("--hard"), "Reason should mention --hard");
+
+        // reset --soft is not dangerous
+        let (dangerous, _) = is_dangerous_git_operation("reset", &["--soft".to_string()]);
+        assert!(!dangerous, "reset --soft should not be dangerous");
+
+        // clean -fd is dangerous
+        let (dangerous, reason) = is_dangerous_git_operation("clean", &["-f".to_string(), "-d".to_string()]);
+        assert!(dangerous, "clean -fd should be dangerous");
+        assert!(reason.contains("clean"), "Reason should mention clean");
+
+        // commit --amend is dangerous
+        let (dangerous, reason) = is_dangerous_git_operation("commit", &["--amend".to_string()]);
+        assert!(dangerous, "commit --amend should be dangerous");
+        assert!(reason.contains("amend"), "Reason should mention amend");
+
+        // rebase -i is dangerous
+        let (dangerous, reason) = is_dangerous_git_operation("rebase", &["--interactive".to_string()]);
+        assert!(dangerous, "rebase --interactive should be dangerous");
+        assert!(reason.contains("rebase"), "Reason should mention rebase");
+
+        // Safe operations
+        let (dangerous, _) = is_dangerous_git_operation("status", &[]);
+        assert!(!dangerous, "status should not be dangerous");
+        let (dangerous, _) = is_dangerous_git_operation("log", &[]);
+        assert!(!dangerous, "log should not be dangerous");
+    }
+
+    #[test]
+    fn test_validate_git_flags() {
+        // Valid flags for diff
+        assert!(validate_git_flags("diff", &["--cached".to_string()]).is_none());
+        assert!(validate_git_flags("diff", &["--stat".to_string()]).is_none());
+
+        // Invalid flag for diff
+        let err = validate_git_flags("diff", &["--dangerous".to_string()]);
+        assert!(err.is_some(), "Invalid diff flag should be rejected");
+        assert!(err.unwrap().contains("--dangerous"), "Error should mention the invalid flag");
+
+        // Valid flags for push
+        assert!(validate_git_flags("push", &["--set-upstream".to_string()]).is_none());
+
+        // Invalid flag for push
+        let err = validate_git_flags("push", &["--delete".to_string()]);
+        assert!(err.is_some(), "Invalid push flag should be rejected");
+
+        // No validation for unlisted operations (accept all)
+        assert!(validate_git_flags("status", &["--anything".to_string()]).is_none());
+    }
+
+    #[test]
+    fn test_check_git_flags_permission() {
+        // Dangerous operation returns error
+        let result = check_git_flags_permission("push", &["--force".to_string()]);
+        assert!(result.is_some(), "Force push should be permission-denied");
+        assert!(result.unwrap().is_error, "Should be an error result");
+
+        // Valid operation with valid flags returns None
+        let result = check_git_flags_permission("diff", &["--cached".to_string()]);
+        assert!(result.is_none(), "Valid diff --cached should be allowed");
+
+        // Invalid flag returns error
+        let result = check_git_flags_permission("diff", &["--invalid-flag".to_string()]);
+        assert!(result.is_some(), "Invalid flag should be rejected");
+    }
+
+    #[test]
+    fn test_is_gh_repo_dangerous() {
+        assert!(is_gh_repo_dangerous("pr_merge", &[]), "pr_merge should be dangerous");
+        assert!(is_gh_repo_dangerous("pr_close", &[]), "pr_close should be dangerous");
+        assert!(is_gh_repo_dangerous("issue_close", &[]), "issue_close should be dangerous");
+        assert!(is_gh_repo_dangerous("repo_delete", &[]), "repo_delete should be dangerous");
+
+        assert!(!is_gh_repo_dangerous("pr", &[]), "pr should not be dangerous");
+        assert!(!is_gh_repo_dangerous("issue", &[]), "issue should not be dangerous");
+        assert!(!is_gh_repo_dangerous("auth", &[]), "auth should not be dangerous");
+        assert!(!is_gh_repo_dangerous("release", &[]), "release should not be dangerous");
+        assert!(!is_gh_repo_dangerous("run", &[]), "run should not be dangerous");
+        assert!(!is_gh_repo_dangerous("search", &[]), "search should not be dangerous");
+    }
+
+    #[test]
+    fn test_check_permissions_gh_dangerous() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("gh".to_string()));
+        params.insert("gh_subcommand".to_string(), Value::String("pr_merge".to_string()));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "gh pr_merge should be permission-denied");
+        assert!(result.unwrap().is_error, "Should be an error result");
+    }
+
+    #[test]
+    fn test_check_permissions_gh_safe() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("gh".to_string()));
+        params.insert("gh_subcommand".to_string(), Value::String("pr".to_string()));
+        params.insert("gh_flags".to_string(), Value::Array(vec![Value::String("list".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_none(), "gh pr list should be allowed");
+    }
+
+    #[test]
+    fn test_check_permissions_git_dangerous() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--force".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git push --force should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_git_safe() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("status".to_string()));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_none(), "git status should be allowed");
     }
 
 }

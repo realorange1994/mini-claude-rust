@@ -1210,6 +1210,51 @@ impl Compactor {
         true
     }
 
+    /// Preflight compaction for resumed sessions (synchronous, no LLM call).
+    /// Uses simple truncation: keep the first entry (initial user message) plus
+    /// the most recent entries. This is designed to be called before the agent
+    /// loop starts, when the resumed transcript is too large.
+    pub fn compact_preflight(&mut self, context: &mut ConversationContext) -> CompactStats {
+        let messages = context.messages().to_vec();
+        let entries_before = context.len();
+        let tokens_before = estimate_total_tokens(&messages);
+
+        if entries_before <= 12 {
+            return CompactStats {
+                phase: CompactPhase::None,
+                entries_before,
+                entries_after: entries_before,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: tokens_before,
+                estimated_tokens_after: tokens_before,
+                tokens_after: tokens_before,
+                post_compact_tokens: tokens_before,
+            };
+        }
+
+        // Truncation: keep first entry + last 10 entries
+        let keep = 10;
+        let first = messages[0..1].to_vec();
+        let tail = messages[entries_before - keep..].to_vec();
+        let new_messages: Vec<Message> = first.into_iter().chain(tail).collect();
+
+        let tokens_after = estimate_total_tokens(&new_messages);
+        let saved = tokens_before.saturating_sub(tokens_after);
+
+        context.replace_messages(new_messages);
+
+        CompactStats {
+            phase: CompactPhase::Truncated,
+            entries_before,
+            entries_after: context.len(),
+            estimated_tokens_saved: saved,
+            estimated_tokens_before: tokens_before,
+            estimated_tokens_after: tokens_after,
+            tokens_after,
+            post_compact_tokens: tokens_after,
+        }
+    }
+
     /// Run compaction on context.
     /// Returns CompactStats with the result.
     /// If LLM compaction succeeds, replaces old messages with summary.

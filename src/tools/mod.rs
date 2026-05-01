@@ -11,7 +11,7 @@ mod fileops;
 mod glob_tool;
 mod grep_tool;
 mod list_dir;
-mod git_tool;
+pub mod git_tool;
 mod system_tool;
 mod process;
 mod runtime_info;

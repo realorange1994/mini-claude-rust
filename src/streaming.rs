@@ -77,6 +77,9 @@ pub struct StreamResult {
     /// - "tool_use": model yielded to tool use
     /// - None: stream ended abnormally (error, stall, interrupt)
     pub finish_reason: Option<String>,
+    /// True when text was already streamed to the terminal before a failure.
+    /// Used by the agent loop to avoid re-delivering text on retry.
+    pub text_already_streamed: bool,
 }
 
 /// Detect transient errors that are safe to retry (matching hermes-agent patterns).
@@ -891,7 +894,7 @@ pub async fn process_sse_events(
     loop {
         // Check for interruption before each attempt
         if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-            return partial_result(collect, false);
+            return partial_result(collect, false, &deltas_state);
         }
 
         // Create cancellation token for this attempt
@@ -925,7 +928,7 @@ pub async fn process_sse_events(
                         Err(e) => {
                             cancel_guard.abort();
                             if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                                return partial_result(collect, false);
+                                return partial_result(collect, false, &deltas_state);
                             }
                             let err_str = e.to_string();
                             if is_transient_error(&err_str) && retry < MAX_STREAM_RETRIES {
@@ -939,13 +942,13 @@ pub async fn process_sse_events(
                                 continue;
                             }
                             // Non-transient or retries exhausted
-                            return partial_result(collect, false);
+                            return partial_result(collect, false, &deltas_state);
                         }
                     }
                 }
             _ = cancel_token.cancelled() => {
                 cancel_guard.abort();
-                return partial_result(collect, false);
+                return partial_result(collect, false, &deltas_state);
             }
         };
 
@@ -973,7 +976,7 @@ pub async fn process_sse_events(
         loop {
             // Check for interruption during streaming
             if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                return partial_result(collect, false);
+                return partial_result(collect, false, &deltas_state);
             }
 
             // Stall timeout: race next chunk against timeout
@@ -993,7 +996,7 @@ pub async fn process_sse_events(
                         break; // retry outer loop
                     }
                     // Retries exhausted, return partial
-                    return partial_result(collect, false);
+                    return partial_result(collect, false, &deltas_state);
                 }
             };
 
@@ -1022,13 +1025,13 @@ pub async fn process_sse_events(
                             DeltasState::TextOnly => {
                                 // Text already streamed to user -- can't retry without duplication
                                 eprintln!("\n  [!] Stream interrupted after text output, returning partial result...");
-                                return partial_result(collect, false);
+                                return partial_result(collect, false, &deltas_state);
                             }
                         }
                         break; // retry outer loop
                     }
                     // Non-transient or retries exhausted: return partial results
-                    return partial_result(collect, false);
+                    return partial_result(collect, false, &deltas_state);
                 }
                 None => {
                     // Stream ended normally
@@ -1048,7 +1051,7 @@ pub async fn process_sse_events(
                     // Non-SSE JSON - parse as complete message and return
                     if let Ok(msg) = serde_json::from_str::<serde_json::Value>(trimmed) {
                         parse_anthropic_message(&msg, collect, term);
-                        return partial_result(collect, true);
+                        return partial_result(collect, true, &deltas_state);
                     }
                 }
                 sse_detected = true;
@@ -1079,7 +1082,7 @@ pub async fn process_sse_events(
                             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
                                 if event_type == "message" {
                                     parse_anthropic_message(&event, collect, term);
-                                    return partial_result(collect, true);
+                                    return partial_result(collect, true, &deltas_state);
                                 }
 
                                 // Extract stop_reason from message_delta
@@ -1131,7 +1134,7 @@ pub async fn process_sse_events(
             usage: None,
         });
 
-        return partial_result(collect, true);
+        return partial_result(collect, true, &deltas_state);
     }
 }
 
@@ -1180,13 +1183,16 @@ fn is_local_endpoint(base_url: &str) -> bool {
 /// Build a StreamResult from the CollectHandler.
 /// `completed` is true when the stream ended normally, false when partial results
 /// are returned after a failure -- this lets the agent loop distinguish success from failure.
-fn partial_result(collect: &CollectHandler, completed: bool) -> Result<StreamResult> {
+/// `deltas_state` is used to set `text_already_streamed`.
+fn partial_result(collect: &CollectHandler, completed: bool, deltas_state: &DeltasState) -> Result<StreamResult> {
+    let text_already_streamed = matches!(deltas_state, DeltasState::TextOnly);
     Ok(StreamResult {
         tool_calls: collect.tool_calls(),
         text: collect.full_response(),
         thinking: collect.thinking(),
         completed,
         finish_reason: collect.finish_reason(),
+        text_already_streamed,
     })
 }
 

@@ -611,8 +611,8 @@ fn stall_detector_default() {
 fn stall_detector_timeout_returns_startup_initially() {
     let sd = StallDetector::new();
     let t = sd.timeout();
-    // Should be startup_timeout (120s) since no event received yet
-    assert_eq!(t, Duration::from_secs(120));
+    // Should be startup_timeout (360s) since no event received yet
+    assert_eq!(t, Duration::from_secs(360));
 }
 
 // ============================================================
@@ -1402,6 +1402,7 @@ fn stream_result_completed_true() {
         thinking,
         completed: true,
         finish_reason: fr,
+        text_already_streamed: false,
     };
 
     assert!(result.completed);
@@ -1426,6 +1427,7 @@ fn stream_result_completed_false_has_partial() {
         thinking: h.thinking(),
         completed: false,
         finish_reason: h.finish_reason(),
+        text_already_streamed: false,
     };
 
     assert!(!result.completed);

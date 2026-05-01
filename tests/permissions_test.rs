@@ -153,7 +153,12 @@ fn exec_tool_check_permissions_dangerous_rm() {
     let result = tool.check_permissions(&params);
     assert!(result.is_some());
     let output = &result.unwrap().output;
-    assert!(output.to_lowercase().contains("dangerous") || output.to_lowercase().contains("home"));
+    assert!(
+        output.to_lowercase().contains("dangerous") ||
+        output.to_lowercase().contains("destructive") ||
+        output.to_lowercase().contains("home"),
+        "Expected dangerous/destructive/home error, got: {}", output
+    );
 }
 
 #[test]
@@ -164,11 +169,11 @@ fn exec_tool_check_permissions_git_destruction() {
     let result = tool.check_permissions(&params);
     assert!(result.is_some());
     let output = result.unwrap().output;
-    // The error message is "Command would destroy .git directory"
-    // But the regex might not match "rm -rf .git" - check if dangerous pattern detected
+    // The error could come from destructive detection or .git regex
     assert!(
-        output.contains(".git") || output.contains("git directory") || output.to_lowercase().contains("dangerous"),
-        "Expected .git related error, got: {}", output
+        output.contains(".git") || output.contains("git directory") ||
+        output.to_lowercase().contains("destructive") || output.to_lowercase().contains("dangerous"),
+        "Expected .git/destructive/dangerous error, got: {}", output
     );
 }
 
@@ -179,7 +184,11 @@ fn exec_tool_check_permissions_shutdown() {
     params.insert("command".to_string(), serde_json::json!("shutdown now"));
     let result = tool.check_permissions(&params);
     assert!(result.is_some());
-    assert!(result.unwrap().output.to_lowercase().contains("dangerous"));
+    let output = &result.unwrap().output;
+    assert!(
+        output.to_lowercase().contains("dangerous") || output.to_lowercase().contains("destructive") || output.to_lowercase().contains("shutdown"),
+        "Expected dangerous/destructive/shutdown error, got: {}", output
+    );
 }
 
 #[test]

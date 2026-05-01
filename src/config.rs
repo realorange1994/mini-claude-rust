@@ -46,6 +46,9 @@ pub struct Config {
     pub session_memory: Option<Arc<SessionMemory>>,
     // Reactive compact: trigger compaction when token delta exceeds this threshold
     pub reactive_compact_threshold: usize,
+    // Sub-agent config
+    pub sub_agent_max_turns: u32,   // default 50
+    pub sub_agent_enabled: bool,    // default true
 }
 
 impl Default for Config {
@@ -110,6 +113,8 @@ impl Default for Config {
             post_compact_history_snip_count: 3,
             session_memory: None,
             reactive_compact_threshold: 5000,
+            sub_agent_max_turns: 50,
+            sub_agent_enabled: true,
         }
     }
 }
@@ -209,6 +214,76 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
                 } else if let Some(cmd) = entry.command {
                     let args = entry.args.unwrap_or_default();
                     mcp_manager.register(&name, &cmd, &args, entry.env.unwrap_or_default());
+                }
+            }
+        }
+    }
+
+    // ─── Home directory fallback ───────────────────────────────────────────
+    // Fill in missing values from ~/.claude/settings.json and ~/.mcp.json
+    if let Some(home_dir) = dirs::home_dir()
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+    {
+        let home_claude_dir = home_dir.join(".claude");
+
+        // Home settings.json fallback (only fill empty values)
+        let home_settings = home_claude_dir.join("settings.json");
+        if home_settings.exists() {
+            if let Ok(data) = std::fs::read_to_string(&home_settings) {
+                if let Ok(settings) = serde_json::from_str::<ClaudeSettings>(&data) {
+                    // Fill in API key if missing
+                    if cfg.api_key.is_none() || cfg.api_key.as_deref() == Some("") {
+                        if let Some(key) = settings.env.anthropic_auth_token {
+                            cfg.api_key = Some(key);
+                        }
+                    }
+                    // Fill in base URL if missing
+                    if cfg.base_url.is_none() || cfg.base_url.as_deref() == Some("") {
+                        if let Some(url) = settings.env.anthropic_base_url {
+                            cfg.base_url = Some(url);
+                        }
+                    }
+                    // Fill in model if empty
+                    if cfg.model.is_empty() {
+                        if let Some(model) = settings.env.anthropic_model {
+                            cfg.model = model;
+                        }
+                    }
+
+                    // Fill in MCP servers from home settings if none loaded from project
+                    let has_project_mcp = cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty());
+                    if !has_project_mcp && !settings.mcp.servers.is_empty() {
+                        let mcp_manager = cfg.mcp_manager.get_or_insert_with(|| Arc::new(crate::mcp::Manager::new()));
+                        for (name, srv) in settings.mcp.servers {
+                            if let Some(cmd) = srv.command {
+                                let args = srv.args.unwrap_or_default();
+                                let env = srv.env.unwrap_or_default();
+                                mcp_manager.register(&name, &cmd, &args, env);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Home .mcp.json fallback (only if no MCP servers loaded from project)
+        let has_project_mcp = cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty());
+        if !has_project_mcp {
+            let home_mcp = home_dir.join(".mcp.json");
+            if home_mcp.exists() {
+                if let Ok(data) = std::fs::read_to_string(&home_mcp) {
+                    if let Ok(mcp_cfg) = serde_json::from_str::<McpConfigFile>(&data) {
+                        let mcp_manager = cfg.mcp_manager.get_or_insert_with(|| Arc::new(crate::mcp::Manager::new()));
+                        for (name, entry) in mcp_cfg.mcp_servers {
+                            if let Some(url) = entry.url {
+                                mcp_manager.register_remote(&name, &url, entry.env.unwrap_or_default());
+                            } else if let Some(cmd) = entry.command {
+                                let args = entry.args.unwrap_or_default();
+                                mcp_manager.register(&name, &cmd, &args, entry.env.unwrap_or_default());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -327,8 +402,6 @@ pub fn build_system_prompt(
 - Working Directory: {}
 - Shell: PowerShell on Windows, sh/bash on Unix
 - Current Date/Time: {} ({})
-
-You have access to the following tools to help the user with software engineering tasks:
 "#,
         model_name,
         std::env::consts::OS,
@@ -339,9 +412,31 @@ You have access to the following tools to help the user with software engineerin
         Local::now().format("%z")
     );
 
-    // Add tool list
+    // Section 1: Git context injection
+    let git_ctx = crate::tools::git_tool::get_git_context_for_prompt();
+    if !git_ctx.is_empty() {
+        prompt.push_str(&format!("\n{}\n", git_ctx));
+    }
+
+    prompt.push_str("\nYou have access to the following tools to help the user with software engineering tasks:\n");
+
+    // Section 2: Tool hints
+    let tool_hints: std::collections::HashMap<&str, &str> = [
+        ("glob", "(fast, use liberally)"),
+        ("grep", "(fast, use liberally)"),
+        ("file_read", "(use before file_edit)"),
+        ("exec", "(for shell commands, package installs, git operations)"),
+        ("file_edit", "(MUST read file first)"),
+        ("file_write", "(overwrites entire file)"),
+    ].iter().cloned().collect();
+
     for tool in registry.all_tools() {
-        prompt.push_str(&format!("- **{}**: {}\n", tool.name(), tool.description()));
+        let name = tool.name();
+        if let Some(hint) = tool_hints.get(name) {
+            prompt.push_str(&format!("- **{}**: {} {}\n", name, tool.description(), hint));
+        } else {
+            prompt.push_str(&format!("- **{}**: {}\n", name, tool.description()));
+        }
     }
 
     // Operating Rules
@@ -361,15 +456,86 @@ You have access to the following tools to help the user with software engineerin
     prompt.push_str("11. Prefer built-in tools over exec commands. For git operations, use the git tool instead of exec. For file searches, use grep and glob instead of exec. Always choose the most appropriate built-in tool when available.\n");
     prompt.push_str("12. **Sub-Agent Dispatching** -- When the user requests dispatching, delegating, or assigning a task to a sub-agent (indicated by keywords like: 派遣, 安排, 让, 要, 使, dispatch, delegate, spawn, launch agent, sub-agent), you MUST use the \"agent\" tool. Do NOT use mcp_call_tool, coze_llm, minimax_llm, or any MCP tool for sub-agent dispatching. The \"agent\" tool creates autonomous sub-agents with their own context and tool access. MCP LLM tools are only for calling external LLM APIs (generation/embedding/search), NOT for creating sub-agents.\n\n");
 
-    // Common tool parameter
+    // Section 3: Tool Selection Decision Tree
+    prompt.push_str("### Tool Selection Decision Tree\n\n");
+    prompt.push_str("When deciding which tool to use, follow these steps in order and stop at the first match:\n\n");
+    prompt.push_str("Step 0: Does this task need a tool at all? Pure knowledge questions, content already visible in context → answer directly, no tool call.\n\n");
+    prompt.push_str("Step 1: Is there a dedicated tool? Read/Edit/Write/Glob/Grep always beat exec equivalents. Stop here if a dedicated tool fits.\n\n");
+    prompt.push_str("Step 2: Is this a shell operation? Package installs, test runners, build commands, git operations → exec.\n\n");
+    prompt.push_str("Step 3: Should work run in parallel? Independent operations → parallel calls. Dependent operations → sequential.\n\n");
+
+    // Section 4: When NOT to Use Tools
+    prompt.push_str("### When NOT to Use Tools\n\n");
+    prompt.push_str("Do not use tools when:\n");
+    prompt.push_str("- Answering questions about programming concepts, syntax, or design patterns you already know\n");
+    prompt.push_str("- The error message or content is already visible in context\n");
+    prompt.push_str("- The user asks for an explanation that does not require inspecting code\n");
+    prompt.push_str("- Summarizing content already in the conversation\n\n");
+
+    // Section 5: Few-Shot Tool Selection Examples
+    prompt.push_str("### Few-Shot Tool Selection Examples\n\n");
+    prompt.push_str("Use these patterns to select the right tool:\n");
+    prompt.push_str("- \"find all .go files\" → glob(pattern=\"**/*.go\"), NOT exec(\"find ...\")\n");
+    prompt.push_str("- \"run tests\" → exec(\"go test ./...\")\n");
+    prompt.push_str("- \"search for TODO\" → grep(pattern=\"TODO\")\n");
+    prompt.push_str("- \"check if a file exists\" → glob(pattern=\"path/to/file\"), NOT exec(\"ls\" or \"test -f\")\n");
+    prompt.push_str("- \"find where UserService is defined\" → grep(pattern=\"class UserService|func UserService\")\n");
+    prompt.push_str("- \"install a package\" → exec(\"go get package-name\")\n");
+    prompt.push_str("- \"rename a variable across a file\" → file_edit with replace_all, NOT exec(\"sed\")\n");
+    prompt.push_str("- \"list files in current directory\" → list_dir, NOT exec(\"ls\" or \"dir\")\n");
+    prompt.push_str("- \"read a file's contents\" → file_read, NOT exec(\"cat\")\n\n");
+
+    // Section 6: Tool Cost Awareness
+    prompt.push_str("### Tool Cost Awareness\n\n");
+    prompt.push_str("glob and grep are cheap operations — use them liberally rather than guessing file locations or code patterns. A search that returns nothing costs a second; proposing changes to code you haven't read costs the whole task.\n\n");
+
+    // Section 7: Search Fallback Strategy
+    prompt.push_str("### Search Fallback Strategy\n\n");
+    prompt.push_str("When a grep/glob search returns nothing:\n");
+    prompt.push_str("1. Try a broader pattern — fewer terms, remove qualifiers\n");
+    prompt.push_str("2. Try alternate naming conventions — camelCase vs snake_case\n");
+    prompt.push_str("3. Try different file extensions — .go vs .rs vs .ts\n");
+    prompt.push_str("4. If exhausted after 3+ attempts — tell the user and ask for guidance\n\n");
+
+    // Section 8: Search Effort Scale
+    prompt.push_str("### Search Effort Scale\n\n");
+    prompt.push_str("Scale search effort to task complexity:\n");
+    prompt.push_str("- Single file fix: 1-2 searches\n");
+    prompt.push_str("- Cross-cutting change: 3-5 searches\n");
+    prompt.push_str("- Architecture investigation: 5-10+ searches\n");
+    prompt.push_str("- Full codebase audit: use Agent with specialized sub-agent\n\n");
+
+    // Common tool parameter (Section 11: timeout updated to 1-600, default 600)
     prompt.push_str("## Tool Parameters\n\n");
-    prompt.push_str("All tools accept an optional **`timeout`** parameter (integer, seconds, range 1-300, default 30) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with `grep` or `glob`.\n\n");
+    prompt.push_str("All tools accept an optional **`timeout`** parameter (integer, seconds, range 1-600, default 600) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with `grep` or `glob`.\n\n");
 
     // Task Management Rules
     prompt.push_str("## Task Management Rules\n\n");
     prompt.push_str("13. **When to Create Tasks** -- Use task_create for complex multi-step tasks (3+ distinct steps or actions). When the user provides multiple tasks (numbered or comma-separated), immediately capture them as tasks. When starting work on a task, mark it as in_progress BEFORE beginning work. After completing a task, mark it as completed and add any new follow-up tasks discovered.\n");
     prompt.push_str("14. **Task Workflow** -- Create tasks with clear, specific subjects in imperative form (e.g., \"Fix authentication bug\"). Use task_update to set status: pending → in_progress → completed. ONLY mark as completed when FULLY accomplished — if tests fail, implementation is partial, or you encountered unresolved errors, keep the task in_progress. If blocked, create a new task describing what needs to be resolved. After completing a task, check task_list to find the next available task. Do not batch up multiple tasks before marking them as completed — mark each one done as soon as it is finished.\n");
     prompt.push_str("15. **Background Command Execution** -- For long-running commands, use run_in_background=true with the exec tool. You will receive a task ID and output file path immediately; you do not need to check the output right away. When the background task completes, you will be notified via a task-notification message. Use task_output to retrieve results. Use task_stop to stop a running background task if needed. Do NOT use sleep to poll for results — use run_in_background and wait for the notification.\n\n");
+
+    // Section 9: Destructive Operation Safety
+    prompt.push_str("### Destructive Operation Safety\n\n");
+    prompt.push_str("The following operations require extra caution and should prompt for user confirmation when in doubt:\n");
+    prompt.push_str("- File deletion: rm -rf, rmdir, del /s — always verify the target path before executing\n");
+    prompt.push_str("- Git data loss: git reset --hard, git push --force, git clean -f, git checkout . — these discard uncommitted changes\n");
+    prompt.push_str("- Git history rewrite: git rebase, git commit --amend (on published branches)\n");
+    prompt.push_str("- Database: DROP TABLE, TRUNCATE, DELETE FROM without WHERE clause\n");
+    prompt.push_str("- Infrastructure: kubectl delete, terraform destroy\n\n");
+    prompt.push_str("When you encounter an obstacle, do NOT use destructive actions as a shortcut. Investigate the root cause instead.\n\n");
+    prompt.push_str("NEVER delete these critical paths:\n");
+    prompt.push_str("- System directories: /etc, /usr, /bin, /sbin, /tmp, /var, /home, /root\n");
+    prompt.push_str("- Git metadata: .git/, .claude/\n");
+    prompt.push_str("- Project root files: go.mod, package.json, Cargo.toml, Makefile\n\n");
+
+    // Section 10: Communication Principles
+    prompt.push_str("## Communication Principles\n\n");
+    prompt.push_str("1. Be concise and direct — lead with the answer, not the reasoning.\n");
+    prompt.push_str("2. Acknowledge the user's request first, then act on it.\n");
+    prompt.push_str("3. Skip filler words, preamble, and unnecessary transitions.\n");
+    prompt.push_str("4. Don't restate what the user said — just do it.\n");
+    prompt.push_str("5. Flag risks and trade-offs proactively. Don't wait to be asked.\n\n");
 
     // Permission mode
     let mode_upper = permission_mode.to_string().to_uppercase();
