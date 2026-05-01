@@ -240,7 +240,12 @@ fn main() -> Result<()> {
     if let Some(message) = args.message {
         let prompt = message.join(" ");
         let result = agent.run(&prompt);
-        println!("{}", result);
+        // When streaming is enabled and stdout is a terminal, TerminalHandler
+        // already displayed the text via stderr. Printing again would duplicate it.
+        let stdout_is_term = console::user_attended();
+        if !agent.use_stream || !stdout_is_term {
+            println!("{}", result);
+        }
         agent.close();
         return Ok(());
     }
