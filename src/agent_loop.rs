@@ -130,7 +130,7 @@ pub struct AgentLoop {
     pub config: Config,
     pub registry: Arc<RwLock<Registry>>,
     gate: PermissionGate,
-    context: Arc<RwLock<ConversationContext>>,
+    pub(crate) context: Arc<RwLock<ConversationContext>>,
     client: reqwest::Client,
     pub use_stream: bool,
     /// Tracks whether the LAST API call actually used streaming (set by the async agent loop).
@@ -2132,6 +2132,11 @@ impl AgentLoop {
     /// Get the number of tools used (for sub-agent reporting)
     pub fn tools_used_count(&self) -> usize {
         self.tools_used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get a clone of the context Arc (for fork mode)
+    pub fn context_arc(&self) -> Arc<RwLock<ConversationContext>> {
+        self.context.clone()
     }
 
     /// Get the last assistant text from the conversation context as a partial result.

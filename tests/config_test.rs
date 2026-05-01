@@ -125,11 +125,7 @@ fn claude_settings_deserialize_all_env() {
         "env": {
             "ANTHROPIC_AUTH_TOKEN": "sk-123",
             "ANTHROPIC_BASE_URL": "https://custom.api.com",
-            "ANTHROPIC_MODEL": "claude-opus-4-6",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-6",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
-            "ANTHROPIC_REASONING_MODEL": "claude-opus-4-6"
+            "ANTHROPIC_MODEL": "claude-opus-4-6"
         }
     }"#;
     let settings: ClaudeSettings = serde_json::from_str(json).unwrap();

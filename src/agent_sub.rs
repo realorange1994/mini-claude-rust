@@ -2,9 +2,12 @@
 
 use crate::agent_loop::AgentLoop;
 use crate::config::Config;
+use crate::context::{ConversationContext, Message, MessageContent};
 use crate::tools::Registry;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Static counter for generating unique sub-agent IDs.
 static AGENT_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -228,6 +231,57 @@ pub fn generate_agent_id() -> String {
     format!("agent-{}", generate_short_id())
 }
 
+/// Clone the parent's conversation context into a child agent (fork mode).
+///
+/// Iterates through the parent's entries and clones Text, ToolUse, and ToolResult
+/// content into the child. The last ToolUseBlocks entry (the agent tool call that
+/// spawned this child) is skipped since the child has no corresponding tool_result.
+///
+/// CompactBoundary and Attachment content are also skipped — the child starts fresh.
+pub fn clone_context_for_fork(
+    parent: &Arc<RwLock<ConversationContext>>,
+    child: &Arc<RwLock<ConversationContext>>,
+) {
+    let parent_entries: Vec<Message> = {
+        let parent_ctx = parent.blocking_read();
+        parent_ctx.entries().to_vec()
+    };
+
+    // Find the index of the last ToolUseBlocks message (the agent tool that spawned this child)
+    let last_tool_use_idx = parent_entries
+        .iter()
+        .rposition(|msg| matches!(msg.content, MessageContent::ToolUseBlocks(_)))
+        .map(|i| i as isize)
+        .unwrap_or(-1);
+
+    let mut cloned: Vec<Message> = Vec::with_capacity(parent_entries.len());
+    for (i, entry) in parent_entries.iter().enumerate() {
+        // Skip the last ToolUseBlocks entry (the agent tool call that spawned this child)
+        // because the child has no corresponding tool_result for it
+        if i as isize == last_tool_use_idx {
+            continue;
+        }
+
+        match &entry.content {
+            MessageContent::Text(_)
+            | MessageContent::ToolUseBlocks(_)
+            | MessageContent::ToolResultBlocks(_)
+            | MessageContent::Summary(_) => {
+                cloned.push(entry.clone());
+            }
+            MessageContent::CompactBoundary { .. } | MessageContent::Attachment(_) => {
+                // Skip compact boundaries and attachments in fork mode
+                continue;
+            }
+        }
+    }
+
+    let mut child_ctx = child.blocking_write();
+    for msg in cloned {
+        child_ctx.add_message(msg);
+    }
+}
+
 /// Spawn a sub-agent and return its result.
 ///
 /// This is the synchronous path — it blocks until the child agent completes.
@@ -241,7 +295,8 @@ pub fn spawn_sub_agent_sync(
     run_in_background: bool,
     allowed_tools: &[String],
     disallowed_tools: &[String],
-    _inherit_context: bool,
+    inherit_context: bool,
+    parent_context: Option<Arc<RwLock<ConversationContext>>>,
 ) -> (String, String, String, usize, u64) {
     let start = std::time::Instant::now();
 
@@ -270,9 +325,57 @@ pub fn spawn_sub_agent_sync(
         let prompt_owned = prompt.to_string();
         let sys_prompt_owned = child_sys_prompt;
 
+        // Capture parent entries for fork mode before spawning the thread
+        let parent_entries: Vec<Message> = if inherit_context {
+            if let Some(ref parent_ctx) = parent_context {
+                let ctx = parent_ctx.blocking_read();
+                ctx.entries().to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         std::thread::spawn(move || {
             match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned) {
                 Ok(child_loop) => {
+                    // Apply fork mode: inject parent context entries into child
+                    if !parent_entries.is_empty() {
+                        // Find the last ToolUseBlocks entry index (the agent tool that spawned this child)
+                        let last_tool_use_idx = parent_entries
+                            .iter()
+                            .rposition(|msg| matches!(msg.content, MessageContent::ToolUseBlocks(_)))
+                            .map(|i| i as isize)
+                            .unwrap_or(-1);
+
+                        let mut cloned: Vec<Message> = Vec::new();
+                        for (i, entry) in parent_entries.iter().enumerate() {
+                            if i as isize == last_tool_use_idx {
+                                continue;
+                            }
+                            match &entry.content {
+                                MessageContent::Text(_)
+                                | MessageContent::ToolUseBlocks(_)
+                                | MessageContent::ToolResultBlocks(_)
+                                | MessageContent::Summary(_) => {
+                                    cloned.push(entry.clone());
+                                }
+                                MessageContent::CompactBoundary { .. }
+                                | MessageContent::Attachment(_) => {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Apply cloned entries to child context
+                        let mut child_ctx = child_loop.context.blocking_write();
+                        for msg in cloned {
+                            child_ctx.add_message(msg);
+                        }
+                        drop(child_ctx); // release lock before run()
+                    }
+
                     let _result = child_loop.run(&prompt_owned);
                 }
                 Err(e) => {
@@ -293,6 +396,13 @@ pub fn spawn_sub_agent_sync(
     // Synchronous path: run the child agent loop
     match AgentLoop::new_for_sub_agent(child_config, child_registry, &child_sys_prompt) {
         Ok(child_loop) => {
+            // Apply fork mode: clone parent context entries into child
+            if inherit_context {
+                if let Some(ref parent_ctx) = parent_context {
+                    clone_context_for_fork(parent_ctx, &child_loop.context);
+                }
+            }
+
             let result = child_loop.run(prompt);
 
             // Recover partial results if Run returned empty
@@ -481,6 +591,10 @@ PARTIAL is for environmental limitations only (no test framework, tool unavailab
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::MessageRole;
+    use crate::tools::Tool;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
 
     #[test]
     fn test_generate_short_id() {
@@ -562,4 +676,259 @@ mod tests {
         assert!(child.get("read_file").is_some());
         assert!(child.get("exec").is_none());
     }
+
+    // ─── Feature test: Custom model parameter passing ────────────────────────
+
+    #[test]
+    fn test_custom_model_param_passing() {
+        let parent_config = Config::default();
+        let child_config = build_child_config(&parent_config, "claude-3-5-haiku-20241022");
+        // Model should be overridden
+        assert_eq!(child_config.model, "claude-3-5-haiku-20241022");
+    }
+
+    #[test]
+    fn test_custom_model_param_empty_falls_back_to_parent() {
+        let mut parent_config = Config::default();
+        parent_config.model = "claude-3-5-sonnet-20241022".to_string();
+        let child_config = build_child_config(&parent_config, "");
+        // Empty override should keep parent's model
+        assert_eq!(child_config.model, "claude-3-5-sonnet-20241022");
+    }
+
+    #[test]
+    fn test_subagent_type_inherits_parent_model_if_no_override() {
+        let mut parent_config = Config::default();
+        parent_config.model = "claude-3-opus-20240229".to_string();
+        let child_config = build_child_config(&parent_config, "");
+        assert_eq!(child_config.model, "claude-3-opus-20240229");
+    }
+
+    // ─── Feature test: fork mode inherit_context ─────────────────────────────
+
+    #[test]
+    fn test_clone_context_for_fork_basic() {
+        let parent_ctx = Arc::new(tokio::sync::RwLock::new(ConversationContext::new(Config::default())));
+        let child_ctx = Arc::new(tokio::sync::RwLock::new(ConversationContext::new(Config::default())));
+
+        // Add some messages to parent
+        {
+            let mut parent = parent_ctx.blocking_write();
+            parent.add_user_message("Hello from parent".to_string());
+            parent.add_assistant_text("Response from parent".to_string());
+        }
+
+        clone_context_for_fork(&parent_ctx, &child_ctx);
+
+        // Verify child got the messages
+        {
+            let child = child_ctx.blocking_read();
+            let entries = child.entries();
+            assert_eq!(entries.len(), 2, "Child should have 2 entries from parent");
+            assert!(matches!(&entries[0].content, MessageContent::Text(t) if t == "Hello from parent"));
+            assert!(matches!(&entries[1].content, MessageContent::Text(t) if t == "Response from parent"));
+        }
+    }
+
+    #[test]
+    fn test_clone_context_for_fork_skips_last_tool_use() {
+        use crate::context::{Message, MessageContent, ToolUseBlock};
+
+        let parent_ctx = Arc::new(tokio::sync::RwLock::new(ConversationContext::new(Config::default())));
+        let child_ctx = Arc::new(tokio::sync::RwLock::new(ConversationContext::new(Config::default())));
+
+        // Add user message, assistant text, tool use block (the agent tool call)
+        {
+            let mut parent = parent_ctx.blocking_write();
+            parent.add_user_message("User message".to_string());
+            parent.add_assistant_text("Thinking...".to_string());
+            // Add a ToolUseBlocks entry (simulates the agent tool that spawned this child)
+            let tool_use_msg = Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "toolu_agent_123".to_string(),
+                    name: "agent".to_string(),
+                    input: std::collections::HashMap::from([
+                        ("prompt".to_string(), serde_json::json!("test")),
+                    ]),
+                }]),
+            );
+            parent.add_message(tool_use_msg);
+        }
+
+        clone_context_for_fork(&parent_ctx, &child_ctx);
+
+        // Verify child got user message + assistant text but NOT the ToolUseBlocks entry
+        {
+            let child = child_ctx.blocking_read();
+            let entries = child.entries();
+            assert_eq!(entries.len(), 2, "Child should have 2 entries (agent ToolUseBlocks skipped)");
+            assert!(matches!(&entries[0].content, MessageContent::Text(t) if t == "User message"));
+            assert!(matches!(&entries[1].content, MessageContent::Text(t) if t == "Thinking..."));
+        }
+    }
+
+    // ─── Feature test: allowed_tools with wildcard ["*"] ─────────────────────
+
+    #[test]
+    fn test_wildcard_allowed_tools_includes_all_non_disallowed() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        let allowed = vec!["*".to_string()];
+        let child = build_child_registry(&registry, "", &allowed, &[], false);
+        // With wildcard, all tools should be present
+        assert!(child.get("read_file").is_some());
+        assert!(child.get("write_file").is_some());
+        assert!(child.get("edit_file").is_some());
+        assert!(child.get("exec").is_some());
+        assert!(child.get("grep").is_some());
+        assert!(child.get("glob").is_some());
+    }
+
+    #[test]
+    fn test_wildcard_with_disallowed_excludes_specific() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        let allowed = vec!["*".to_string()];
+        let disallowed = vec!["exec".to_string(), "write_file".to_string(), "edit_file".to_string()];
+        let child = build_child_registry(&registry, "", &allowed, &disallowed, false);
+        // Wildcard allows all, but disallowed still blocks specific tools
+        assert!(child.get("read_file").is_some());
+        assert!(child.get("grep").is_some());
+        assert!(child.get("exec").is_none());
+        assert!(child.get("write_file").is_none());
+        assert!(child.get("edit_file").is_none());
+    }
+
+    #[test]
+    fn test_wildcard_with_explore_type_excludes_type_specific() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        let allowed = vec!["*".to_string()];
+        let child = build_child_registry(&registry, "explore", &allowed, &[], false);
+        // Wildcard + explore type: type-specific deny tools should still be excluded
+        assert!(child.get("read_file").is_some());
+        assert!(child.get("grep").is_some());
+        assert!(child.get("write_file").is_none());
+        assert!(child.get("edit_file").is_none());
+        assert!(child.get("exec").is_none());
+    }
+
+    // ─── Feature test: AgentTool input schema validation ─────────────────────
+
+    #[test]
+    fn test_agent_tool_missing_prompt() {
+        use crate::tools::agent_tool::AgentTool;
+        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
+            ("agent-test".to_string(), "ok".to_string(), String::new(), 0, 0)
+        });
+        let params = HashMap::new(); // empty params - missing required "prompt"
+        let result = tool.execute(params);
+        assert!(result.is_error);
+        assert!(result.output.contains("prompt is required"));
+    }
+
+    #[test]
+    fn test_agent_tool_empty_prompt() {
+        use crate::tools::agent_tool::AgentTool;
+        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
+            ("agent-test".to_string(), "ok".to_string(), String::new(), 0, 0)
+        });
+        let mut params = HashMap::new();
+        params.insert("prompt".to_string(), serde_json::json!(""));
+        let result = tool.execute(params);
+        assert!(result.is_error);
+        assert!(result.output.contains("prompt is required"));
+    }
+
+    #[test]
+    fn test_agent_tool_no_spawn_func() {
+        use crate::tools::agent_tool::AgentTool;
+        let tool = AgentTool::new(); // no spawn_func set
+        let mut params = HashMap::new();
+        params.insert("prompt".to_string(), serde_json::json!("hello"));
+        let result = tool.execute(params);
+        assert!(result.is_error);
+        assert!(result.output.contains("agent system not initialized"));
+    }
+
+    #[test]
+    fn test_agent_tool_input_schema_requires_description_and_prompt() {
+        use crate::tools::agent_tool::AgentTool;
+        use crate::tools::Tool;
+        let tool = AgentTool::new();
+        let schema = tool.input_schema();
+        let required = schema.get("required").and_then(|v| v.as_array()).unwrap();
+        assert!(required.contains(&serde_json::json!("description")));
+        assert!(required.contains(&serde_json::json!("prompt")));
+    }
+
+    // ─── Feature test: Multiple sequential sub-agents ────────────────────────
+
+    #[test]
+    fn test_multiple_sequential_registry_builds_no_state_corruption() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        // Build multiple child registries in sequence with different configs
+        let allowed1 = vec!["read_file".to_string()];
+        let child1 = build_child_registry(&registry, "", &allowed1, &[], false);
+        assert!(child1.get("read_file").is_some());
+        assert!(child1.get("exec").is_none());
+
+        let allowed2 = vec!["exec".to_string()];
+        let child2 = build_child_registry(&registry, "", &allowed2, &[], false);
+        assert!(child2.get("exec").is_some());
+        assert!(child2.get("read_file").is_none());
+
+        let allowed3 = vec!["*".to_string()];
+        let child3 = build_child_registry(&registry, "", &allowed3, &[], false);
+        assert!(child3.get("read_file").is_some());
+        assert!(child3.get("exec").is_some());
+        assert!(child3.get("write_file").is_some());
+    }
+
+    #[test]
+    fn test_sequential_registry_builds_different_agent_types() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        let explore = build_child_registry(&registry, "explore", &[], &[], false);
+        let plan = build_child_registry(&registry, "plan", &[], &[], false);
+        let verify = build_child_registry(&registry, "verify", &[], &[], false);
+        let general = build_child_registry(&registry, "", &[], &[], false);
+
+        // All should have read_file
+        assert!(explore.get("read_file").is_some());
+        assert!(plan.get("read_file").is_some());
+        assert!(verify.get("read_file").is_some());
+        assert!(general.get("read_file").is_some());
+
+        // Explore and plan should NOT have write_file
+        assert!(explore.get("write_file").is_none());
+        assert!(plan.get("write_file").is_none());
+        // Verify should NOT have write_file (type deny list)
+        assert!(verify.get("write_file").is_none());
+        // General should have write_file
+        assert!(general.get("write_file").is_some());
+    }
+
+    #[test]
+    fn test_sequential_registry_builds_with_disallowed() {
+        let registry = Registry::new();
+        crate::tools::register_builtin_tools(&registry);
+
+        // First build with exec disallowed
+        let disallowed1 = vec!["exec".to_string()];
+        let child1 = build_child_registry(&registry, "", &[], &disallowed1, false);
+        assert!(child1.get("exec").is_none());
+
+        // Second build without exec disallowed (verify no cross-contamination)
+        let child2 = build_child_registry(&registry, "", &[], &[], false);
+        assert!(child2.get("exec").is_some());
+    }
 }
+

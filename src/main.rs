@@ -163,10 +163,18 @@ fn main() -> Result<()> {
     let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
     let _notification_rx = tools::register_bash_task_tools(&registry, task_store.clone());
 
+    // Parent context slot for agent tool's fork mode — set after agent loop is created
+    let parent_context_slot: std::sync::Arc<
+        tokio::sync::RwLock<
+            Option<std::sync::Arc<tokio::sync::RwLock<miniclaudecode_rust::context::ConversationContext>>>
+        >
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
     // Register agent tool with spawn callback
     {
         let cfg_for_spawn = cfg.clone();
         let registry_arc_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(registry.clone_for_spawn()));
+        let context_slot_for_closure = parent_context_slot.clone();
         let spawn_func: tools::agent_tool::AgentSpawnFunc = std::sync::Arc::new(move |
             prompt: &str,
             subagent_type: &str,
@@ -175,7 +183,10 @@ fn main() -> Result<()> {
             allowed_tools: &[String],
             disallowed_tools: &[String],
             inherit_context: bool,
+            _parent_context: Option<std::sync::Arc<tokio::sync::RwLock<miniclaudecode_rust::context::ConversationContext>>>,
         | -> (String, String, String, usize, u64) {
+            // Read parent context from the slot
+            let parent_ctx = context_slot_for_closure.blocking_read().clone();
             let parent_registry = registry_arc_for_spawn.blocking_read();
             miniclaudecode_rust::agent_sub::spawn_sub_agent_sync(
                 &cfg_for_spawn,
@@ -187,6 +198,7 @@ fn main() -> Result<()> {
                 allowed_tools,
                 disallowed_tools,
                 inherit_context,
+                parent_ctx,
             )
         });
         tools::register_agent_tool(&registry, spawn_func);
@@ -217,6 +229,12 @@ fn main() -> Result<()> {
     } else {
         agent_loop::AgentLoop::new(cfg, registry, use_stream)?
     };
+
+    // Set parent context for fork mode so the agent tool can access it
+    {
+        let mut slot = parent_context_slot.blocking_write();
+        *slot = Some(agent.context_arc());
+    }
 
     // One-shot mode
     if let Some(message) = args.message {

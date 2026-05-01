@@ -137,14 +137,6 @@ pub struct EnvSettings {
     pub anthropic_base_url: Option<String>,
     #[serde(rename = "ANTHROPIC_MODEL")]
     pub anthropic_model: Option<String>,
-    #[serde(rename = "ANTHROPIC_DEFAULT_SONNET_MODEL")]
-    pub anthropic_default_sonnet_model: Option<String>,
-    #[serde(rename = "ANTHROPIC_DEFAULT_OPUS_MODEL")]
-    pub anthropic_default_opus_model: Option<String>,
-    #[serde(rename = "ANTHROPIC_DEFAULT_HAIKU_MODEL")]
-    pub anthropic_default_haiku_model: Option<String>,
-    #[serde(rename = "ANTHROPIC_REASONING_MODEL")]
-    pub anthropic_reasoning_model: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

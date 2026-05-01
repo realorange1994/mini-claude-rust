@@ -15,7 +15,7 @@ miniClaudeCode-rust is a minimal AI coding assistant that implements the core ag
 - Both interactive REPL and one-shot modes
 
 ### Streaming Support
-- Real-time SSE streaming output with `--stream` flag
+- Real-time SSE streaming output enabled by default; disable with `--no-stream` flag
 - ThinkFilter state machine that filters `<thinking>`/`</thinking>`, `<think>`/`</think>`, and Anthropic extended thinking blocks
 - Streaming output displayed in dim/gray styling for thinking content
 - Tool call display with argument accumulation
@@ -85,6 +85,13 @@ Inject external context directly into prompts:
 | `web_search` | Web search via DuckDuckGo HTML scraping |
 | `web_fetch` | Web page content fetching with built-in scraper |
 | `exa_search` | Web search via Exa API |
+| `agent` | Spawn sub-agents for complex multi-step tasks (sync or async). Supports typed agents: `explore` (read-only code search), `plan` (read-only architecture planning), `verify` (adversarial verification). Filtered tool registries per agent type. |
+| `task_create` | Create structured tasks with dependency tracking |
+| `task_list` | List all tasks with status, owner, and blocked-by info |
+| `task_get` | Get detailed info for a specific task |
+| `task_update` | Update task status, subject, metadata, or dependencies (bidirectional blocks/blocked_by with cycle detection) |
+| `task_stop` | Kill a running background bash task by ID (OS-level process kill). Use `task_update` with `status: "deleted"` to delete work tasks. |
+| `task_output` | Read output file from a background bash task (supports blocking wait) |
 
 **File History Tools** (13 dedicated tools with disk-persisted snapshots):
 | Tool | Description |
@@ -198,11 +205,11 @@ The binary will be at `target/release/miniclaudecode-rust`.
 ### Command-Line Options
 
 ```bash
-# Interactive mode
+# Interactive mode (streaming enabled by default)
 ./target/release/miniclaudecode-rust
 
-# With streaming output
-./target/release/miniclaudecode-rust --stream
+# Disable streaming output
+./target/release/miniclaudecode-rust --no-stream
 
 # Specify permission mode
 ./target/release/miniclaudecode-rust --mode ask
@@ -276,8 +283,10 @@ Configuration is resolved in this priority order (highest to lowest):
 ```bash
 export ANTHROPIC_API_KEY="your-api-key"     # or ANTHROPIC_AUTH_TOKEN
 export ANTHROPIC_BASE_URL="https://api.anthropic.com"
-export ANTHROPIC_MODEL="claude-sonnet-4-20250514"
+export ANTHROPIC_MODEL="claude-sonnet-4-20250514"  # Default model
 ```
+
+The `agent` tool accepts an optional `model` parameter to override the model for a specific sub-agent.
 
 ### Settings File
 
@@ -319,7 +328,7 @@ MCP servers can also be configured via `.mcp.json`:
 }
 ```
 
-MCP transport: stdio for local servers, HTTP for remote servers.
+MCP transport: stdio (JSON-RPC 2.0 over stdin/stdout) for local servers, HTTP+SSE for remote servers. Both transports are auto-detected from configuration -- entries with `command` use stdio, entries with `url` use HTTP+SSE.
 
 ### CLAUDE.md
 
@@ -406,6 +415,7 @@ miniClaudeCode-rust/
 ├── src/
 │   ├── main.rs              # Entry point, CLI args, and REPL
 │   ├── agent_loop.rs        # Core agent loop with turn limits, transcript logging
+│   ├── agent_sub.rs         # Sub-agent spawning system (agent types, filtered registries, prompt builders)
 │   ├── streaming.rs         # SSE parsing, ThinkFilter, CollectHandler, TerminalHandler, stall detection
 │   ├── context.rs           # Conversation context, message types, tool pairing, role alternation
 │   ├── context_references.rs # @ reference expansion (file, folder, git, url)
@@ -419,10 +429,12 @@ miniClaudeCode-rust/
 │   ├── normalize.rs         # API message normalization for KV cache reuse
 │   ├── rate_limit.rs        # Rate limit tracking from response headers
 │   ├── retry_utils.rs       # Retry utilities with exponential backoff
-│   ├── tools/               # Built-in tool implementations (17+ tools)
+│   ├── task_store.rs        # TaskStore for background bash tasks (registration, kill, eviction)
+│   ├── work_task.rs         # WorkTaskStore for LLM task management (dependencies, cycle detection)
+│   ├── tools/               # Built-in tool implementations
 │   │   ├── coercion.rs      # Argument type coercion
 │   │   ├── mod.rs           # ToolResult, ToolResultMetadata, Registry, path safety
-│   │   ├── exec_tool.rs     # Shell command execution
+│   │   ├── exec_tool.rs     # Shell command execution + background bash task system
 │   │   ├── file_read.rs     # File reading
 │   │   ├── file_write.rs    # File writing
 │   │   ├── file_edit.rs     # Single-file editing
@@ -442,17 +454,61 @@ miniClaudeCode-rust/
 │   │   ├── mcp_tools.rs     # MCP tool integration
 │   │   ├── skill_tools.rs   # Skill tools (read, list, search)
 │   │   ├── file_history_tools.rs  # 13 file history tools
-│   │   └── memory_tool.rs   # Session memory tools
+│   │   ├── memory_tool.rs   # Session memory tools
+│   │   ├── task_tool.rs     # Task management tools (create, list, get, update, stop)
+│   │   └── agent_tool.rs    # Sub-agent spawning tool
 │   ├── skills/              # Skill loading and tracking
 │   │   ├── mod.rs           # Loader, SkillMeta, SkillInfo, frontmatter parsing
 │   │   └── tracker.rs       # SkillTracker (shown/read/used tracking)
 │   ├── mcp/                 # MCP client support
 │   │   ├── mod.rs           # Manager (register, start, list servers)
-│   │   └── client.rs        # stdio transport client
+│   │   └── client.rs        # stdio + HTTP+SSE transport client
 │   └── transcript/          # JSONL conversation logging
 │       └── mod.rs           # Transcript, Entry types, resume support
 └── Cargo.toml
 ```
+
+### Sub-Agent System (AgentTool)
+
+The `agent` tool enables spawning sub-agents that run independently with their own filtered tool registries. Three built-in agent types are supported:
+
+- **`explore`** -- Read-only agent specialized in code search. Tools denied: `write_file`, `edit_file`, `multi_edit`, `fileops`, `exec`, `terminal`, `git`.
+- **`plan`** -- Read-only agent specialized in architecture planning. Same tool restrictions as `explore`.
+- **`verify`** -- Adversarial verification agent. Tools denied: `write_file`, `edit_file`, `multi_edit`, `fileops`. Can run commands but cannot write files.
+
+Sub-agents can be spawned **synchronously** (blocking, result returned inline) or **asynchronously** (non-blocking, task ID returned for later retrieval). Key implementation details:
+
+- 4-layer tool filtering: (1) global disallowed (`agent` tool always denied to prevent recursion), (2) async-specific disallowed, (3) agent type deny list, (4) caller-specified disallowed tools. Optional `allowed_tools` whitelist with `*` wildcard support.
+- Sub-agents inherit the parent's model configuration but can override with a `model` parameter. Max turns capped at 50.
+- Sub-agents build their own system prompts with environment info, tool list, and agent-type-specific behavioral instructions.
+- Sub-agents do not inherit session memory to avoid cross-agent interference.
+
+### Task Management System (TaskTool + WorkTask)
+
+Two distinct task management systems exist for different purposes:
+
+**WorkTaskStore** (`work_task.rs`) -- LLM task tracking:
+- Structured tasks with subject, description, active_form, status, owner, and arbitrary metadata.
+- Bidirectional dependency tracking: `blocks`/`blocked_by` edges maintained automatically.
+- Cycle detection via BFS before adding new dependency edges (prevents circular chains).
+- Hash prefix normalization (`#1` -> `1`) and integer-to-string coercion for LLM-friendly dependency IDs.
+- Deleted tasks automatically clean up their references from all other tasks.
+
+**TaskStore** (`task_store.rs`) -- Background bash task lifecycle:
+- Task states: `pending` -> `running` -> `completed`/`failed`/`killed`.
+- OS process tracking with PID for kill support (platform-specific: `kill -9` on Unix, `taskkill /F /T` on Windows).
+- Automatic eviction after 30 seconds for completed/failed/killed tasks, with output file cleanup.
+- Canonical task ID registration: IDs are generated by the TaskStore at registration time, ensuring display IDs and internal IDs match (fixing the earlier ID mismatch bug).
+
+### Background Bash Task System
+
+Background bash commands (via `exec` tool with `run_in_background=true`) are integrated into `exec_tool.rs`:
+
+- Commands run in dedicated background threads with child processes.
+- Task IDs are registered in `TaskStore` before process spawn, with output files named after the canonical task ID.
+- The `task_output` tool reads output files and supports blocking wait for completion.
+- The `task_stop` tool kills the background process via OS signal and marks the task as killed.
+- Task completion/failure notifications are sent via an unbounded MPSC channel for agent loop integration.
 
 ## Compatibility
 

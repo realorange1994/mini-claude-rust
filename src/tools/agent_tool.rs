@@ -1,5 +1,6 @@
 //! AgentTool — spawns a sub-agent to handle complex, multi-step tasks.
 
+use crate::context::ConversationContext;
 use crate::tools::{Tool, ToolResult};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,6 +8,10 @@ use std::sync::Arc;
 
 /// Callback signature for spawning a child agent loop.
 /// Returns (agent_id, result_text, error_text, tools_used, duration_ms).
+///
+/// The `parent_context` parameter provides access to the parent agent's conversation
+/// context for fork mode (inherit_context=true). It is None when the tool is called
+/// outside of an agent loop context.
 pub type AgentSpawnFunc = Arc<dyn Fn(
     &str,  // prompt
     &str,  // subagent_type
@@ -15,6 +20,7 @@ pub type AgentSpawnFunc = Arc<dyn Fn(
     &[String],    // allowed_tools
     &[String],    // disallowed_tools
     bool,  // inherit_context
+    Option<Arc<tokio::sync::RwLock<ConversationContext>>>,  // parent_context
 ) -> (String, String, String, usize, u64) + Send + Sync>;
 
 /// AgentTool spawns a child agent to execute a specialized task.
@@ -29,7 +35,7 @@ impl AgentTool {
 
     pub fn with_spawn_func<F>(f: F) -> Self
     where
-        F: Fn(&str, &str, &str, bool, &[String], &[String], bool) -> (String, String, String, usize, u64)
+        F: Fn(&str, &str, &str, bool, &[String], &[String], bool, Option<Arc<tokio::sync::RwLock<ConversationContext>>>) -> (String, String, String, usize, u64)
             + Send + Sync + 'static,
     {
         Self {
@@ -152,6 +158,7 @@ impl Tool for AgentTool {
             let (agent_id, _, _, _, _) = spawn_func(
                 &prompt, &subagent_type, &model, true,
                 &allowed_tools, &disallowed_tools, inherit_context,
+                None, // parent_context set by the spawn_func closure
             );
             return ToolResult::ok(format!(
                 "Agent launched in background.\n\n\
@@ -165,6 +172,7 @@ impl Tool for AgentTool {
         let (agent_id, result, err_text, tools_used, duration_ms) = spawn_func(
             &prompt, &subagent_type, &model, false,
             &allowed_tools, &disallowed_tools, inherit_context,
+            None, // parent_context set by the spawn_func closure
         );
 
         if !err_text.is_empty() {
