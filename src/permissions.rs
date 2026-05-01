@@ -335,6 +335,29 @@ impl PermissionGate {
 
         // Fast path: whitelisted tools are always allowed
         if is_auto_allowlisted(tool_name, params) {
+            // Log what was auto-allowed so the decision is visible in traces
+            let desc = match tool_name {
+                "exec" => {
+                    let cmd = params.get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<no command>");
+                    format!("WHITELISTED: [exec]: {}", cmd)
+                }
+                "git" => {
+                    let op = params.get("operation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<no operation>");
+                    format!("WHITELISTED: [git]: {}", op)
+                }
+                "process" => {
+                    let op = params.get("operation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<no operation>");
+                    format!("WHITELISTED: [process]: {}", op)
+                }
+                other => format!("WHITELISTED: [{}]", other),
+            };
+            eprintln!("  [auto-classifier] {}", desc);
             self.denial_count.store(0, Ordering::SeqCst);
             return None;
         }
