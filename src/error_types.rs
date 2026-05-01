@@ -58,6 +58,7 @@ pub enum TransientError {
     Timeout,
     ServerError(u16),
     StreamStall,
+    Transient,
 }
 
 /// Recovery hints from error classification.
@@ -239,8 +240,8 @@ const NETWORK_ERROR_PATTERNS: &[&str] = &[
     "connection refused", "connection reset", "connection timed out",
     "connection error", "connection lost", "no such host",
     "temporary failure", "dns error", "network error",
-    "network is unreachable", "host unreachable",
-    "socket error", "tcp error",
+    "network is unreachable", "network unreachable", "host unreachable",
+    "socket error", "tcp error", "broken pipe",
 ];
 
 const SERVER_ERROR_PATTERNS: &[&str] = &[
@@ -464,6 +465,11 @@ pub fn classify_error(err_msg: &str, approx_tokens: usize, context_length: usize
     }
     if matches_any(&lower, TRANSPORT_ERROR_TYPES) {
         return result(AgentError::Timeout { source: TransientError::Timeout });
+    }
+
+    // Transient error keyword
+    if lower.contains("transient") {
+        return result(AgentError::Transient { source: TransientError::Transient });
     }
 
     // ── Fallback ──

@@ -264,7 +264,7 @@ fn tool_arg_summary_process_by_name() {
 fn tool_arg_summary_process_by_pid() {
     assert_eq!(
         agent_loop::tool_arg_summary("process", r#"{"pid": 1234}"#),
-        "pid=1234"
+        "PID 1234"
     );
 }
 

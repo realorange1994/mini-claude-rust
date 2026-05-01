@@ -2069,6 +2069,28 @@ impl AgentLoop {
         }
     }
 
+    /// Force partial compaction with direction and optional pivot index.
+    /// Direction: "up_to" or "from". Pivot index defaults to midpoint if not provided.
+    pub fn force_partial_compact(&self, direction: &str, pivot_index: Option<usize>) -> crate::compact::PartialCompactionResult {
+        use crate::compact::PartialCompactDirection;
+
+        let dir = match direction {
+            "from" => PartialCompactDirection::From,
+            _ => PartialCompactDirection::UpTo,
+        };
+
+        let mut context = self.context.blocking_write();
+        let messages = context.messages().to_vec();
+        let total = messages.len();
+
+        // Default pivot: midpoint of messages
+        let pivot = pivot_index.unwrap_or(total / 2);
+
+        eprintln!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
+
+        crate::compact::partial_compact(&mut context, dir, pivot)
+    }
+
     /// Clear all conversation messages (for /clear command).
     /// Returns the number of messages cleared.
     pub fn clear_context(&self) -> usize {
@@ -2158,6 +2180,19 @@ pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
         "web_fetch" => {
             if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
                 return url.to_string();
+            }
+        }
+        "process" => {
+            if let Some(name) = input.get("process_name").and_then(|v| v.as_str()) {
+                return name.to_string();
+            }
+            if let Some(pid) = input.get("pid").and_then(|v| v.as_i64()) {
+                return format!("PID {}", pid);
+            }
+        }
+        "runtime_info" => {
+            if let Some(show) = input.get("show").and_then(|v| v.as_str()) {
+                return show.to_string();
             }
         }
         _ => {}

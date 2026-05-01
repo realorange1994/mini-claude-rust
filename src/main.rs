@@ -266,7 +266,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         let is_known_cmd = if user_input.starts_with('/') {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
             let cmd = parts.first().unwrap_or(&"").to_lowercase();
-            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/clear")
+            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/partialcompact" | "/clear")
         } else {
             false
         };
@@ -320,6 +320,21 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     }
                     continue;
                 }
+                "/partialcompact" => {
+                    // /partialcompact [up_to|from] [pivot_index]
+                    let direction = parts.get(1).map(|s| *s).unwrap_or("up_to");
+                    let pivot: Option<usize> = parts.get(2).and_then(|s| s.parse().ok());
+                    let result = agent.force_partial_compact(direction, pivot);
+                    if result.entries_before == 0 {
+                        println!("No messages to partial compact.");
+                    } else {
+                        let saved = result.pre_compact_tokens.saturating_sub(result.post_compact_tokens);
+                        println!("[partial-compact {}] {} -> {} entries, ~{} tokens saved (pivot={})",
+                            direction, result.entries_before, result.entries_after, saved,
+                            pivot.unwrap_or(result.entries_before / 2));
+                    }
+                    continue;
+                }
                 "/clear" => {
                     let count = agent.clear_context();
                     agent.registry.blocking_read().clear_files_read();
@@ -334,6 +349,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                     println!("Commands:");
                     println!("  /help    -- Show available commands");
                     println!("  /compact -- Force context compaction");
+                    println!("  /partialcompact [up_to|from] [pivot] -- Partial compact, optionally direction and pivot index");
                     println!("  /clear   -- Clear conversation history");
                     println!("  /mode    -- Switch permission mode (ask|auto|plan)");
                     println!("  /resume  -- Resume a previous session");

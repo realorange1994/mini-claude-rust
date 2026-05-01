@@ -176,19 +176,6 @@ pub struct McpConfigEntry {
     pub url: Option<String>,
 }
 
-/// Returns the path to `~/.claude` (or `%USERPROFILE%\.claude` on Windows),
-/// or `None` if neither `USERPROFILE` nor `HOME` is set.
-fn home_claude_dir() -> Option<PathBuf> {
-    // Try USERPROFILE on Windows, HOME on Unix
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        return Some(PathBuf::from(profile).join(".claude"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".claude"));
-    }
-    None
-}
-
 pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     let mut cfg = Config::default();
     cfg.project_dir = project_dir.to_path_buf();
@@ -219,47 +206,6 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
         }
     }
 
-    // Fallback: load from home directory ~/.claude/settings.json
-    // Fill in values that are still empty/default after project-level loading
-    if cfg.api_key.is_none() || cfg.base_url.is_none() || cfg.model.is_empty() {
-        if let Some(home_claude) = home_claude_dir() {
-            let home_settings_path = home_claude.join("settings.json");
-            if let Ok(data) = std::fs::read_to_string(&home_settings_path) {
-                if let Ok(settings) = serde_json::from_str::<ClaudeSettings>(&data) {
-                    if cfg.api_key.is_none() {
-                        if let Some(key) = settings.env.anthropic_auth_token {
-                            cfg.api_key = Some(key);
-                        }
-                    }
-                    if cfg.base_url.is_none() {
-                        if let Some(url) = settings.env.anthropic_base_url {
-                            cfg.base_url = Some(url);
-                        }
-                    }
-                    if cfg.model.is_empty() {
-                        if let Some(model) = settings.env.anthropic_model {
-                            cfg.model = model;
-                        }
-                    }
-                    // Load MCP servers from home settings (only if not already loaded)
-                    if cfg.mcp_manager.is_none() {
-                        let mcp_manager = crate::mcp::Manager::new();
-                        for (name, srv) in settings.mcp.servers {
-                            if let Some(cmd) = srv.command {
-                                let args = srv.args.unwrap_or_default();
-                                let env = srv.env.unwrap_or_default();
-                                mcp_manager.register(&name, &cmd, &args, env);
-                            }
-                        }
-                        cfg.mcp_manager = Some(mcp_manager);
-                    }
-                } else {
-                    eprintln!("[WARN] Failed to parse home settings.json");
-                }
-            }
-        }
-    }
-
     // Load MCP config from .mcp.json
     let mcp_path = project_dir.join(".mcp.json");
     if let Ok(data) = std::fs::read_to_string(&mcp_path) {
@@ -271,29 +217,6 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
                 } else if let Some(cmd) = entry.command {
                     let args = entry.args.unwrap_or_default();
                     mcp_manager.register(&name, &cmd, &args, entry.env.unwrap_or_default());
-                }
-            }
-        }
-    }
-
-    // Fallback: load MCP config from home directory ~/.claude/.mcp.json
-    // Only if no MCP servers were loaded from project-level config
-    let has_mcp_servers = cfg.mcp_manager.as_ref().map_or(false, |m| !m.list_servers().is_empty());
-    if !has_mcp_servers {
-        if let Some(home_claude) = home_claude_dir() {
-            let home_mcp_path = home_claude.join(".mcp.json");
-            if let Ok(data) = std::fs::read_to_string(&home_mcp_path) {
-                if let Ok(mcp_cfg) = serde_json::from_str::<McpConfigFile>(&data) {
-                    let mcp_manager = crate::mcp::Manager::new();
-                    for (name, entry) in mcp_cfg.mcp_servers {
-                        if let Some(url) = entry.url {
-                            mcp_manager.register_remote(&name, &url, entry.env.unwrap_or_default());
-                        } else if let Some(cmd) = entry.command {
-                            let args = entry.args.unwrap_or_default();
-                            mcp_manager.register(&name, &cmd, &args, entry.env.unwrap_or_default());
-                        }
-                    }
-                    cfg.mcp_manager = Some(mcp_manager);
                 }
             }
         }
