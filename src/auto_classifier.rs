@@ -1,5 +1,7 @@
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -255,6 +257,195 @@ fn split_shell_commands(cmd: &str) -> Vec<String> {
         return vec![cmd.to_string()];
     }
     segments
+}
+
+/// Check if a resolved path targets a system-critical directory.
+/// Modeled after Claude Code's isDangerousRemovalPath() in pathValidation.ts.
+/// Returns true for paths that should never be auto-allowed for deletion.
+pub fn is_dangerous_removal_path(resolved_path: &str) -> bool {
+    // Normalize: backslashes to forward slashes, trim trailing slashes
+    let mut p = resolved_path.replace('\\', "/");
+    while p.ends_with('/') && p.len() > 1 {
+        p.pop();
+    }
+    if p.is_empty() {
+        return false; // empty path after normalization
+    }
+
+    // Expand ~ to home directory
+    if p == "~" || p.starts_with("~/") {
+        if let Some(home_dir) = dirs::home_dir() {
+            let home_str = home_dir.to_string_lossy().replace('\\', "/");
+            let home_norm = home_str.trim_end_matches('/');
+            if p == "~" {
+                p = home_norm.to_string();
+            } else {
+                p = format!("{}{}", home_norm, &p[1..]);
+            }
+        } else {
+            return false; // cannot resolve home, treat as safe
+        }
+    }
+
+    // Exact root directory
+    if p == "/" {
+        return true;
+    }
+
+    // Wildcard removal
+    if p == "*" || p.ends_with("/*") {
+        return true;
+    }
+
+    // Home directory itself
+    if let Some(home_dir) = dirs::home_dir() {
+        let home_str = home_dir.to_string_lossy().replace('\\', "/");
+        let home_norm = home_str.trim_end_matches('/');
+        if p == home_norm {
+            return true;
+        }
+    }
+
+    // Direct child of root (e.g., /usr, /tmp, /etc, /bin, /var)
+    if p.starts_with('/') {
+        let stripped = p.trim_start_matches('/');
+        let parts: Vec<&str> = stripped.splitn(2, '/').collect();
+        if parts.len() == 1 || (parts.len() == 2 && parts[1].is_empty()) {
+            // Exactly one component after root -> direct child
+            return true;
+        }
+    }
+
+    // Windows drive root: C:\, D:\, etc.
+    if let Ok(re) = Regex::new(r"^[A-Za-z]:\\?$") {
+        if re.is_match(resolved_path) {
+            return true;
+        }
+    }
+
+    // Windows drive direct children: C:\Windows, C:\Users, C:\Program Files, etc.
+    let win_protected_dirs = [
+        "Windows",
+        "Users",
+        "Program Files",
+        "Program Files (x86)",
+        "ProgramData",
+        "PerfLogs",
+    ];
+    for dir in &win_protected_dirs {
+        let escaped = regex::escape(dir);
+        if let Ok(re) = Regex::new(&format!(r"^[A-Za-z]:\\{}$", escaped)) {
+            if re.is_match(resolved_path) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Extract path arguments from an rm/rmdir command string.
+/// Skips flags starting with - (stops at --), returns remaining arguments as paths.
+fn extract_removal_paths(command: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let args: Vec<&str> = command.split_whitespace().collect();
+    if args.is_empty() {
+        return paths;
+    }
+    // Skip the command name (rm, rmdir, etc.)
+    let mut i = 1;
+    while i < args.len() {
+        let arg = args[i];
+        if arg == "--" {
+            i += 1;
+            break;
+        }
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        // Strip surrounding quotes
+        let arg = strip_quotes(arg);
+        paths.push(arg);
+        i += 1;
+    }
+    // Remaining args after flags or --
+    while i < args.len() {
+        let arg = strip_quotes(args[i]);
+        paths.push(arg);
+        i += 1;
+    }
+    paths
+}
+
+/// Strip surrounding single or double quotes from a string.
+fn strip_quotes(s: &str) -> String {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+        {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Resolve a path relative to cwd.
+fn resolve_path(path: &str, cwd: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        PathBuf::from(cwd).join(p)
+    }
+    .to_string_lossy()
+    .replace('\\', "/")
+}
+
+/// Check all paths in an rm command for dangerous targets.
+/// Returns (is_dangerous, reason).
+pub fn check_dangerous_removal_paths(command: &str, cwd: &str) -> (bool, String) {
+    let paths = extract_removal_paths(command);
+    for p in &paths {
+        let resolved = resolve_path(p, cwd);
+        if is_dangerous_removal_path(&resolved) {
+            return (true, format!("rm targets critical system path {:?}", resolved));
+        }
+    }
+    (false, String::new())
+}
+
+/// Provide classifier context for removal commands.
+/// Returns a context string if the command is an rm/rmdir, empty string otherwise.
+fn get_exec_safety_context(command: &str, cwd: &str) -> String {
+    let trimmed = command.trim();
+    if !trimmed.starts_with("rm ") && !trimmed.starts_with("rm\t") && trimmed != "rm" {
+        return String::new();
+    }
+    let paths = extract_removal_paths(command);
+    for p in &paths {
+        let resolved = resolve_path(p, cwd);
+        if is_dangerous_removal_path(&resolved) {
+            return format!("DANGEROUS: rm targets critical system path {:?}. This is BLOCK ALWAYS (Irreversible Local Destruction).", resolved);
+        }
+    }
+    if !paths.is_empty() {
+        return "INFO: rm targets project-scoped paths only. User explicitly requested deletion.".to_string();
+    }
+    String::new()
+}
+
+/// Check if a fileops removal operation targets a dangerous path.
+fn is_fileops_dangerous_removal_path(operation: &str, path: &str, cwd: &str) -> bool {
+    if operation != "rm" && operation != "rmdir" && operation != "rmrf" {
+        return false;
+    }
+    if path.is_empty() {
+        return false;
+    }
+    let resolved = resolve_path(path, cwd);
+    is_dangerous_removal_path(&resolved)
 }
 
 /// Process operations that are read-only and safe to auto-allow.
@@ -650,7 +841,16 @@ fn format_action_for_classifier(
     match tool_name {
         "exec" => {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                return format!("Tool: exec (shell command)\nCommand: {}", cmd);
+                let cwd = std::env::current_dir()
+                    .map(|c| c.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut action = format!("Tool: exec (shell command)\nCommand: {}", cmd);
+                let ctx = get_exec_safety_context(cmd, &cwd);
+                if !ctx.is_empty() {
+                    action.push('\n');
+                    action.push_str(&ctx);
+                }
+                return action;
             }
         }
         "write_file" => {
@@ -677,7 +877,16 @@ fn format_action_for_classifier(
         "fileops" => {
             let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            return format!("Tool: fileops\nOperation: {}\nPath: {}", op, path);
+            let mut action = format!("Tool: fileops\nOperation: {}\nPath: {}", op, path);
+            let cwd = std::env::current_dir()
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if is_fileops_dangerous_removal_path(op, path, &cwd) {
+                action.push_str("\nDANGEROUS: Fileops deletion targets critical system path. This is BLOCK ALWAYS (Irreversible Local Destruction).");
+            } else if op == "rm" || op == "rmdir" || op == "rmrf" {
+                action.push_str("\nINFO: Fileops deletion targets project-scoped path. User explicitly requested deletion.");
+            }
+            return action;
         }
         "git" => {
             if let Some(args) = input.get("args").and_then(|v| v.as_str()) {
@@ -1263,5 +1472,194 @@ mod tests {
         assert!(AUTO_CLASSIFIER_SYSTEM_PROMPT.contains("BLOCK"));
         assert!(AUTO_CLASSIFIER_SYSTEM_PROMPT.contains("ALLOW"));
         assert!(AUTO_CLASSIFIER_SYSTEM_PROMPT.contains("decision"));
+    }
+
+    #[test]
+    fn test_is_dangerous_removal_path() {
+        // Dangerous paths
+        let dangerous_paths = [
+            "/",
+            "/usr",
+            "/tmp",
+            "/etc",
+            "/home",
+            "/var",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/opt",
+            "/root",
+            "/boot",
+            "/dev",
+            "/proc",
+            "/sys",
+            "/run",
+            "/mnt",
+            "/media",
+            "/srv",
+            "/snap",
+            "*",
+            "/*",
+        ];
+        for p in &dangerous_paths {
+            assert!(
+                is_dangerous_removal_path(p),
+                "is_dangerous_removal_path({:?}) should be true",
+                p
+            );
+        }
+
+        // Home directory itself
+        if let Some(home_dir) = dirs::home_dir() {
+            let home_str = home_dir.to_string_lossy().to_string();
+            assert!(
+                is_dangerous_removal_path(&home_str),
+                "is_dangerous_removal_path({:?}) should be true",
+                home_str
+            );
+        }
+
+        // Tilde expansion
+        assert!(
+            is_dangerous_removal_path("~"),
+            "is_dangerous_removal_path(\"~\") should be true"
+        );
+
+        // Safe paths
+        let safe_paths = [
+            "/home/user/project/build",
+            "/home/user/project/node_modules",
+            "./build",
+            "./node_modules",
+            "./dist",
+            "./tmp",
+            "build",
+            "dist",
+            "/home/user/project/src/build",
+            "/var/log/myapp/debug",
+        ];
+        for p in &safe_paths {
+            assert!(
+                !is_dangerous_removal_path(p),
+                "is_dangerous_removal_path({:?}) should be false",
+                p
+            );
+        }
+
+        // Windows paths
+        let win_dangerous = [
+            "C:\\",
+            "D:\\",
+            "C:\\Windows",
+            "C:\\Users",
+            "C:\\Program Files",
+            "C:\\Program Files (x86)",
+            "C:\\ProgramData",
+        ];
+        for p in &win_dangerous {
+            assert!(
+                is_dangerous_removal_path(p),
+                "is_dangerous_removal_path({:?}) should be true",
+                p
+            );
+        }
+
+        let win_safe = [
+            "C:\\Projects\\myapp",
+            "C:\\Users\\myuser\\project\\build",
+            "D:\\workspace\\dist",
+        ];
+        for p in &win_safe {
+            assert!(
+                !is_dangerous_removal_path(p),
+                "is_dangerous_removal_path({:?}) should be false",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_removal_paths() {
+        let cases = [
+            ("rm -rf /tmp/build", vec!["/tmp/build"]),
+            ("rm -rf -v /tmp/a /tmp/b", vec!["/tmp/a", "/tmp/b"]),
+            ("rm -- /tmp/file", vec!["/tmp/file"]),
+            ("rm -rf -- /tmp/a /tmp/b", vec!["/tmp/a", "/tmp/b"]),
+            ("rm ./build ./dist", vec!["./build", "./dist"]),
+            ("rmdir /tmp/empty", vec!["/tmp/empty"]),
+        ];
+        for (command, want) in &cases {
+            let got = extract_removal_paths(command);
+            assert_eq!(
+                got, *want,
+                "extract_removal_paths({:?}): got {:?}, want {:?}",
+                command, got, want
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_exec_safety_context() {
+        let cwd = "/home/user/project";
+
+        // Dangerous rm (direct child of root)
+        let ctx = get_exec_safety_context("rm -rf /", cwd);
+        assert!(
+            ctx.contains("DANGEROUS"),
+            "get_exec_safety_context(\"rm -rf /\") should contain DANGEROUS, got {:?}",
+            ctx
+        );
+
+        let ctx = get_exec_safety_context("rm -rf /usr", cwd);
+        assert!(
+            ctx.contains("DANGEROUS"),
+            "get_exec_safety_context(\"rm -rf /usr\") should contain DANGEROUS, got {:?}",
+            ctx
+        );
+
+        let ctx = get_exec_safety_context("rm -rf /tmp", cwd);
+        assert!(
+            ctx.contains("DANGEROUS"),
+            "get_exec_safety_context(\"rm -rf /tmp\") should contain DANGEROUS, got {:?}",
+            ctx
+        );
+
+        // Safe rm (project-scoped paths)
+        let ctx = get_exec_safety_context("rm -rf ./build", cwd);
+        assert!(
+            ctx.contains("INFO"),
+            "get_exec_safety_context(\"rm -rf ./build\") should contain INFO, got {:?}",
+            ctx
+        );
+
+        // /usr/local is not a direct child of root — goes through classifier instead
+        let ctx = get_exec_safety_context("rm -rf /usr/local", cwd);
+        assert!(
+            ctx.contains("INFO"),
+            "get_exec_safety_context(\"rm -rf /usr/local\") should contain INFO (not direct child of root), got {:?}",
+            ctx
+        );
+
+        // Non-rm command
+        let ctx = get_exec_safety_context("ls -la", cwd);
+        assert!(
+            ctx.is_empty(),
+            "get_exec_safety_context(\"ls -la\") should be empty, got {:?}",
+            ctx
+        );
+    }
+
+    #[test]
+    fn test_check_dangerous_removal_paths() {
+        let cwd = "/home/user/project";
+
+        // Dangerous target
+        let (dangerous, reason) = check_dangerous_removal_paths("rm -rf /", cwd);
+        assert!(dangerous, "rm -rf / should be dangerous");
+        assert!(!reason.is_empty());
+
+        // Safe target
+        let (dangerous, _) = check_dangerous_removal_paths("rm -rf ./build", cwd);
+        assert!(!dangerous, "rm -rf ./build should not be dangerous");
     }
 }
