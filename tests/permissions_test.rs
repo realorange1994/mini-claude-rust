@@ -275,9 +275,27 @@ fn permission_mode_serialize_deserialize_roundtrip() {
 // ─── PermissionGate: Auto mode with various commands ───
 
 #[test]
-fn permission_gate_auto_allows_dangerous_commands() {
-    // In Auto mode, even dangerous commands are allowed
-    // (the gate doesn't check, tool's check_permissions is not called by gate)
+fn permission_gate_auto_allows_safe_commands() {
+    // In Auto mode, safe commands are allowed (no user confirmation needed)
+    let mut config = Config::default();
+    config.permission_mode = PermissionMode::Auto;
+    let gate = PermissionGate::new(config);
+
+    let registry = Registry::new();
+    registry.register(ExecTool::new());
+    let tool = registry.get("exec").unwrap();
+
+    let mut params = HashMap::new();
+    params.insert("command".to_string(), serde_json::json!("ls -la"));
+    let result = gate.check(tool.as_ref(), params);
+    // In auto mode, safe commands should be allowed
+    assert!(result.is_none(), "Safe commands should be allowed in auto mode");
+}
+
+#[test]
+fn permission_gate_auto_blocks_dangerous_commands() {
+    // In Auto mode, security checks from tools are still enforced
+    // (unconditional security layer, not bypassed by permission mode)
     let mut config = Config::default();
     config.permission_mode = PermissionMode::Auto;
     let gate = PermissionGate::new(config);
@@ -289,6 +307,6 @@ fn permission_gate_auto_allows_dangerous_commands() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("rm -rf /"));
     let result = gate.check(tool.as_ref(), params);
-    // In auto mode, all tools should be allowed
-    assert!(result.is_none());
+    // Even in auto mode, dangerous commands should be blocked by tool's security check
+    assert!(result.is_some(), "Dangerous commands should be blocked even in auto mode");
 }

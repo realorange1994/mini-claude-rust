@@ -230,9 +230,15 @@ impl PermissionGate {
     /// Check if a tool should be allowed to execute
     /// Returns Some(ToolResult) if blocked, None if allowed
     pub fn check(&self, tool: &dyn crate::tools::Tool, params: std::collections::HashMap<String, serde_json::Value>) -> Option<ToolResult> {
+        // UNCONDITIONAL: Always run tool's own security check (dangerous operations, etc.)
+        // This must not be bypassed by any permission mode.
+        if let Some(denial) = tool.check_permissions(&params) {
+            return Some(denial);
+        }
+
         match self.config.permission_mode {
             PermissionMode::Auto => {
-                // All allowed in auto mode
+                // All allowed in auto mode (security check already done above)
                 None
             }
             PermissionMode::Plan => {
@@ -254,15 +260,6 @@ impl PermissionGate {
                 None
             }
             PermissionMode::Ask => {
-                // Layer 1: Tool's own permission check (warnings)
-                // Always ask user if tool returned a warning
-                if let Some(warning) = tool.check_permissions(&params) {
-                    if !self.ask_user(tool.name(), &params, Some(&warning.output)) {
-                        return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
-                    }
-                    return None; // user approved
-                }
-
                 // Layer 1.5: Denied patterns check (hard denial)
                 if let Some(denial) = self.check_denied_patterns(tool.name(), &params) {
                     return Some(ToolResult::error(denial));
