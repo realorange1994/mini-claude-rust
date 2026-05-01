@@ -184,6 +184,27 @@ pub struct ConversationContext {
     system_prompt: String,
 }
 
+/// Set of tool names whose results should be cleared during micro-compaction.
+/// These are read/search/web/write tools where the raw output is large and not
+/// needed for context after the turn passes.
+/// Tools like git, memory, skill, list_dir, exec, etc. are NOT compacted because
+/// their results contain structural information the model may need later.
+const COMPACTABLE_TOOLS: &[&str] = &[
+    "read_file",
+    "exec",
+    "edit_file",
+    "write_file",
+    "multi_edit",
+    "grep",
+    "glob",
+    "web_fetch",
+    "web_search",
+];
+
+fn is_compactable_tool(name: &str) -> bool {
+    COMPACTABLE_TOOLS.contains(&name)
+}
+
 impl ConversationContext {
     pub fn new(config: Config) -> Self {
         Self {
@@ -575,6 +596,10 @@ impl ConversationContext {
     /// Micro-compact: clears content of old tool results beyond the keep_recent window.
     /// Returns the number of tool result entries that were cleared.
     /// Tool use IDs are preserved to maintain pairing validity.
+    ///
+    /// Two improvements over the original:
+    ///  1. Dedup: skips tool results already cleared to the placeholder string.
+    ///  2. Whitelist: only clears results from compactable tools (read/exec/edit/grep/glob/web/write).
     pub fn micro_compact_entries(&mut self, keep_recent: usize, placeholder: &str) -> usize {
         let keep_recent = if keep_recent == 0 { 5 } else { keep_recent };
         let placeholder = if placeholder.is_empty() {
@@ -583,22 +608,55 @@ impl ConversationContext {
             placeholder
         };
 
-        // Count tool_result entries from the end (recent first)
+        // Pass 1: Build tool_use_id -> tool_name mapping from ToolUseBlocks messages.
+        let mut tool_name_map: HashMap<String, String> = HashMap::new();
+        for msg in &self.messages {
+            if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                for block in blocks {
+                    if !block.id.is_empty() {
+                        tool_name_map.insert(block.id.clone(), block.name.clone());
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Iterate backwards, clearing eligible tool results.
         let mut recent_count = 0;
         let mut cleared = 0;
 
-        // Iterate backwards to find tool result entries
         for i in (0..self.messages.len()).rev() {
             if let MessageContent::ToolResultBlocks(blocks) = &mut self.messages[i].content {
                 if recent_count < keep_recent {
                     recent_count += 1;
                     continue;
                 }
-                // Clear this tool result: replace content with placeholder, keep ToolUseIDs
+
+                // Check each block: is it already cleared? is it a compactable tool?
+                let all_cleared = blocks.iter().all(|b| {
+                    b.content.iter().any(|c| {
+                        matches!(c, ToolResultContent::Text { text } if text == placeholder)
+                    })
+                });
+                let has_compactable = blocks.iter().any(|b| {
+                    tool_name_map
+                        .get(&b.tool_use_id)
+                        .is_some_and(|name| is_compactable_tool(name))
+                });
+
+                // Skip if all blocks are already cleared, or none are compactable
+                if all_cleared || !has_compactable {
+                    continue;
+                }
+
+                // Clear only compactable tool results; leave others untouched
                 for block in blocks.iter_mut() {
-                    block.content = vec![ToolResultContent::Text {
-                        text: placeholder.to_string(),
-                    }];
+                    if let Some(name) = tool_name_map.get(&block.tool_use_id) {
+                        if is_compactable_tool(name) {
+                            block.content = vec![ToolResultContent::Text {
+                                text: placeholder.to_string(),
+                            }];
+                        }
+                    }
                 }
                 cleared += 1;
             }
