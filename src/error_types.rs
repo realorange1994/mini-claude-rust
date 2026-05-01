@@ -558,7 +558,7 @@ fn extract_http_status(err_msg: &str) -> u16 {
 
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?:status|HTTP|http)\s*[:=]?\s*(\d{3})").ok()
+        Regex::new(r"(?:(?:status|HTTP|http)\s*[:=]?\s*|^|\s)(\d{3})\b").ok()
     });
     let re = match re {
         Some(r) => r,
