@@ -1045,11 +1045,20 @@ pub async fn process_sse_events(
 
                     let line = String::from_utf8_lossy(&line_bytes).to_string();
 
-                    // Parse SSE line: "data: <json>"
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    // Parse SSE line: "data: <json>" or "data:<json>"
+                    let data = line.strip_prefix("data: ")
+                        .or_else(|| line.strip_prefix("data:"));
+                    if let Some(data) = data {
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                            // Extract stop_reason from message_delta (matching Hermes finish_reason tracking)
+                            // Handle proxy returning complete message as single SSE event
+                            // (type="message" with full content array instead of incremental events)
                             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
+                                if event_type == "message" {
+                                    parse_anthropic_message(&event, collect, term);
+                                    return partial_result(collect, true);
+                                }
+
+                                // Extract stop_reason from message_delta
                                 if event_type == "message_delta" {
                                     if let Some(delta) = event.get("delta") {
                                         if let Some(stop_reason) = delta.get("stop_reason").and_then(|v| v.as_str()) {
