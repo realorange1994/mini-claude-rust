@@ -4,6 +4,7 @@ use miniclaudecode_rust::agent_loop;
 use miniclaudecode_rust::config::{load_config_from_file, Config};
 use miniclaudecode_rust::permissions::PermissionMode;
 use miniclaudecode_rust::tools;
+use miniclaudecode_rust::work_task;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,9 +33,13 @@ struct Args {
     #[arg(long, default_value_t = 90)]
     max_turns: usize,
 
-    /// Enable streaming output
-    #[arg(long, short)]
+    /// Enable streaming output (default: true)
+    #[arg(long, short, default_value_t = true)]
     stream: bool,
+
+    /// Disable streaming output (overrides --stream)
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    no_stream: bool,
 
     /// Project directory
     #[arg(long)]
@@ -66,6 +71,9 @@ fn main() -> Result<()> {
     }));
 
     let args = Args::parse();
+
+    // Compute effective streaming flag: --stream (default: true) overridden by --no-stream
+    let use_stream = args.stream && !args.no_stream;
 
     // Priority: flags > env > project .claude/settings.json > home ~/.claude/settings.json > defaults
     let mut cfg = Config::default();
@@ -147,6 +155,43 @@ fn main() -> Result<()> {
     tools::register_mcp_and_skills(&registry, &cfg);
     tools::register_memory_tools(&registry, &session_memory_arc);
 
+    // Initialize WorkTaskStore and register task tools
+    let work_task_store = work_task::WorkTaskStore::new_shared();
+    tools::register_task_tools(&registry, &work_task_store);
+
+    // Initialize TaskStore for bash background tasks and register bash task tools
+    let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
+    let _notification_rx = tools::register_bash_task_tools(&registry, task_store.clone());
+
+    // Register agent tool with spawn callback
+    {
+        let cfg_for_spawn = cfg.clone();
+        let registry_arc_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(registry.clone_for_spawn()));
+        let spawn_func: tools::agent_tool::AgentSpawnFunc = std::sync::Arc::new(move |
+            prompt: &str,
+            subagent_type: &str,
+            model: &str,
+            run_in_background: bool,
+            allowed_tools: &[String],
+            disallowed_tools: &[String],
+            inherit_context: bool,
+        | -> (String, String, String, usize, u64) {
+            let parent_registry = registry_arc_for_spawn.blocking_read();
+            miniclaudecode_rust::agent_sub::spawn_sub_agent_sync(
+                &cfg_for_spawn,
+                &*parent_registry,
+                prompt,
+                subagent_type,
+                model,
+                run_in_background,
+                allowed_tools,
+                disallowed_tools,
+                inherit_context,
+            )
+        });
+        tools::register_agent_tool(&registry, spawn_func);
+    }
+
     // Handle --resume flag
     let resume_path = args.resume.as_ref().map(|s| find_transcript(s)).flatten();
 
@@ -156,19 +201,21 @@ fn main() -> Result<()> {
         tools::register_builtin_tools(&resume_registry);
         tools::register_mcp_and_skills(&resume_registry, &cfg);
         tools::register_memory_tools(&resume_registry, &session_memory_arc);
+        tools::register_task_tools(&resume_registry, &work_task_store);
+        tools::register_bash_task_tools(&resume_registry, task_store);
 
-        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, args.stream, &transcript_path, true) {
+        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, use_stream, &transcript_path, true) {
             Ok(agent) => {
                 println!("[+] Resumed session from: {}", transcript_path.display());
                 agent
             }
             Err(e) => {
                 eprintln!("[!] Failed to resume: {}. Starting new session.", e);
-                agent_loop::AgentLoop::new(cfg, registry, args.stream)?
+                agent_loop::AgentLoop::new(cfg, registry, use_stream)?
             }
         }
     } else {
-        agent_loop::AgentLoop::new(cfg, registry, args.stream)?
+        agent_loop::AgentLoop::new(cfg, registry, use_stream)?
     };
 
     // One-shot mode
@@ -181,13 +228,22 @@ fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_interactive(agent);
+    run_interactive(agent, work_task_store);
     Ok(())
 }
 
-fn run_interactive(mut agent: agent_loop::AgentLoop) {
+fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore) {
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
+
+    // Check if stdout is a terminal (used to suppress duplicate output in streaming mode)
+    // When stdout is NOT a terminal (piped), we always print the result to stdout
+    // even in streaming mode, so the caller gets the complete output.
+    let stdout_is_term = console::user_attended();
+
+    // Clone MCP manager for use in signal handler (to stop servers on double-Ctrl+C)
+    // The agent.close() method takes &self and accesses this Arc<McpManager>.
+    let mcp_for_signal = agent.config.mcp_manager.clone();
 
     // Track Ctrl+C presses for double-press exit
     let last_ctrlc = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
@@ -205,9 +261,13 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
         // Check if this is a double press within 2 seconds
         if let Some(last_time) = *last {
             if now.duration_since(last_time).as_secs() < 2 {
-                // Double press - exit immediately
+                // Double press - exit immediately after cleanup
                 println!("\n\nExiting!");
                 println!("To resume this session: --resume {}", transcript_for_signal);
+                // Cleanup: stop MCP servers before exit (flushes transcript, etc.)
+                if let Some(ref mgr) = mcp_for_signal {
+                    mgr.stop_all();
+                }
                 std::process::exit(0);
             }
         }
@@ -378,6 +438,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                         if let Some(ref sm) = agent.config.session_memory {
                             tools::register_memory_tools(&registry, sm);
                         }
+                        tools::register_task_tools(&registry, &work_task_store);
 
                         match agent_loop::AgentLoop::from_transcript(
                             agent.config.clone(),
@@ -423,7 +484,11 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
 
         println!();
         let result = agent.run(user_input);
-        if !agent.use_stream {
+        // In streaming mode, TerminalHandler displays output on stderr.
+        // When stdout is a terminal, skip printing to avoid duplication.
+        // When stdout is piped (not a terminal), always print so the
+        // result is available on stdout for programmatic consumption.
+        if !agent.use_stream || !stdout_is_term {
             println!("{}", result);
         }
         println!();

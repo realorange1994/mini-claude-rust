@@ -6,14 +6,33 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use std::sync::OnceLock;
 
-pub struct ExecTool;
+/// Background task callback: (command, working_dir) -> (task_id, output_file, error_text)
+pub type BashBgTaskCallback =
+    Arc<dyn Fn(String, String) -> (String, String, String) + Send + Sync>;
+
+/// ExecTool executes shell commands with security guards and background support.
+pub struct ExecTool {
+    /// When set, enables run_in_background support. The callback spawns a background
+    /// bash task and returns (task_id, output_file, error_text).
+    pub background_callback: Option<BashBgTaskCallback>,
+}
 
 impl ExecTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            background_callback: None,
+        }
+    }
+
+    /// Create with a background task callback.
+    pub fn with_background_callback(callback: BashBgTaskCallback) -> Self {
+        Self {
+            background_callback: Some(callback),
+        }
     }
 }
 
@@ -25,7 +44,9 @@ impl Default for ExecTool {
 
 impl Clone for ExecTool {
     fn clone(&self) -> Self {
-        Self
+        Self {
+            background_callback: self.background_callback.clone(),
+        }
     }
 }
 
@@ -35,7 +56,7 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use `curl.exe` instead of `curl` on Windows (curl is alias to Invoke-WebRequest). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory."
+        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use `curl.exe` instead of `curl` on Windows (curl is alias to Invoke-WebRequest). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory. Supports running commands in the background with run_in_background=true."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -53,6 +74,10 @@ impl Tool for ExecTool {
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in seconds (default 120, max 600)."
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Set to true to run this command in the background. Returns immediately with a task ID. Use task_output to read results later."
                 }
             },
             "required": ["command"]
@@ -147,6 +172,24 @@ impl Tool for ExecTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
+        // Check for background execution request
+        let run_in_background = params
+            .get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if run_in_background {
+            return self.exec_in_background(&params);
+        }
+
+        self.exec_foreground(params)
+    }
+}
+
+// ─── Foreground execution ───────────────────────────────────────────────────
+
+impl ExecTool {
+    fn exec_foreground(&self, params: HashMap<String, Value>) -> ToolResult {
         let command = match params.get("command").and_then(|v| v.as_str()) {
             Some(c) => c.trim(),
             None => return ToolResult::error("Error: empty command"),
@@ -275,5 +318,46 @@ impl Tool for ExecTool {
             is_error: !output.status.success(),
             ..Default::default()
         }
+    }
+}
+
+// ─── Background execution ───────────────────────────────────────────────────
+
+impl ExecTool {
+    /// Execute a command in the background. Delegates to the background callback
+    /// if set, otherwise falls back to foreground execution.
+    fn exec_in_background(&self, params: &HashMap<String, Value>) -> ToolResult {
+        let command = match params.get("command").and_then(|v| v.as_str()) {
+            Some(c) => c.trim().to_string(),
+            None => return ToolResult::error("Error: empty command"),
+        };
+
+        if command.is_empty() {
+            return ToolResult::error("Error: empty command");
+        }
+
+        // If no callback is configured, fall back to foreground execution
+        if self.background_callback.is_none() {
+            return self.exec_foreground(params.clone());
+        }
+
+        // Determine working directory
+        let working_dir = params
+            .get("working_dir")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
+
+        let callback = self.background_callback.as_ref().unwrap();
+        let (task_id, output_file, err_text) = callback(command.clone(), working_dir.clone());
+
+        if !err_text.is_empty() {
+            return ToolResult::error(err_text);
+        }
+
+        ToolResult::ok(format!(
+            "Background task started.\nTask ID: {}\nOutput file: {}\nUse the task_output tool to check results when ready.",
+            task_id, output_file
+        ))
     }
 }

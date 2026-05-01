@@ -23,6 +23,9 @@ mod mcp_tools;
 pub mod skill_tools;
 pub mod file_history_tools;
 pub mod memory_tool;
+pub mod task_tool;
+pub mod agent_tool;
+pub mod bash_task_tools;
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
@@ -39,6 +42,7 @@ pub use runtime_info::RuntimeInfoTool;
 pub use web_search::WebSearchTool;
 
 use crate::config::Config;
+use serde_json;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -199,6 +203,23 @@ impl Registry {
         tools.values().cloned().collect()
     }
 
+    /// Register a tool directly from an Arc (used by sub-agent registry filtering)
+    pub fn register_tool_from_arc(&self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        let mut tools = self.tools.write().unwrap();
+        tools.insert(name, tool);
+    }
+
+    /// Clone the registry for use in sub-agent spawning.
+    /// Creates a new Registry and copies all tools from this one.
+    pub fn clone_for_spawn(&self) -> Registry {
+        let child = Registry::new();
+        for tool in self.all_tools() {
+            child.register_tool_from_arc(tool);
+        }
+        child
+    }
+
     /// Mark a file as having been read, storing its current mtime and the read timestamp
     pub fn mark_file_read(&self, path: &str) {
         let normalized = normalize_file_path(path);
@@ -289,7 +310,7 @@ impl Default for Registry {
 
 /// Register all built-in tools
 pub fn register_builtin_tools(registry: &Registry) {
-    registry.register(exec_tool::ExecTool);
+    registry.register(exec_tool::ExecTool::new());
     registry.register(file_read::FileReadTool);
     registry.register(file_write::FileWriteTool);
     registry.register(file_edit::FileEditTool);
@@ -311,10 +332,9 @@ pub fn register_builtin_tools(registry: &Registry) {
 /// Register MCP and skills tools
 pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
     if let Some(mcp_manager) = &cfg.mcp_manager {
-        let arc_manager = Arc::new(mcp_manager.clone());
-        registry.register(mcp_tools::ListMcpTools::new(arc_manager.clone()));
-        registry.register(mcp_tools::McpToolCaller::new(arc_manager.clone()));
-        registry.register(mcp_tools::McpServerStatus::new(arc_manager));
+        registry.register(mcp_tools::ListMcpTools::new(mcp_manager.clone()));
+        registry.register(mcp_tools::McpToolCaller::new(mcp_manager.clone()));
+        registry.register(mcp_tools::McpServerStatus::new(mcp_manager.clone()));
     }
 
     if let Some(skill_loader) = &cfg.skill_loader {
@@ -345,6 +365,68 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
 pub fn register_memory_tools(registry: &Registry, session_memory: &Arc<crate::session_memory::SessionMemory>) {
     registry.register(memory_tool::MemoryAddTool::new(Arc::clone(session_memory)));
     registry.register(memory_tool::MemorySearchTool::new(Arc::clone(session_memory)));
+}
+
+/// Register task tools (TaskCreate/TaskList/TaskGet/TaskUpdate/TaskStop)
+pub fn register_task_tools(registry: &Registry, store: &crate::work_task::SharedWorkTaskStore) {
+    let store_clone = Arc::clone(store);
+    registry.register(task_tool::TaskCreateTool::new(Arc::new(move |subject, desc, active_form, meta| {
+        store_clone.create_task(&subject, &desc, &active_form, meta)
+    })));
+
+    let store_clone = Arc::clone(store);
+    registry.register(task_tool::TaskListTool::new(Arc::new(move || {
+        store_clone.list_tasks()
+    })));
+
+    let store_clone = Arc::clone(store);
+    registry.register(task_tool::TaskGetTool::new(Arc::new(move |id| {
+        store_clone.get_task_info(&id)
+    })));
+
+    let store_clone = Arc::clone(store);
+    registry.register(task_tool::TaskUpdateTool::new(Arc::new(move |id, updates| {
+        store_clone.update_task(&id, &updates)
+    })));
+
+    // TaskStop: placeholder that just marks the task as deleted
+    let store_clone = Arc::clone(store);
+    registry.register(task_tool::TaskStopTool::new(Arc::new(move |id| {
+        let mut updates = std::collections::HashMap::new();
+        updates.insert("status".to_string(), serde_json::json!("deleted"));
+        store_clone.update_task(&id, &updates)
+    })));
+}
+
+/// Register agent tool with spawn callback
+pub fn register_agent_tool(registry: &Registry, spawn_func: agent_tool::AgentSpawnFunc) {
+    registry.register(agent_tool::AgentTool::with_spawn_func_arc(spawn_func));
+}
+
+/// Register bash background task tools (task_stop, task_output) and the exec tool
+/// with a background callback.
+/// Returns the notification channel receiver (the sender is wired into the exec callback).
+pub fn register_bash_task_tools(
+    registry: &Registry,
+    task_store: crate::task_store::SharedTaskStore,
+) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Register task_stop tool
+    registry.register(bash_task_tools::TaskStopTool::new(
+        bash_task_tools::make_task_stop_func(Arc::clone(&task_store)),
+    ));
+
+    // Register task_output tool
+    registry.register(bash_task_tools::TaskOutputTool::new(
+        bash_task_tools::make_task_output_func(Arc::clone(&task_store)),
+    ));
+
+    // Register exec tool with background callback
+    let callback = bash_task_tools::make_bash_bg_callback(task_store, tx);
+    registry.register(exec_tool::ExecTool::with_background_callback(callback));
+
+    rx
 }
 
 // ─── Shared utility functions ───

@@ -500,6 +500,11 @@ impl ConversationContext {
 
     /// Ensures strict user/assistant alternation by merging consecutive
     /// messages with the same role. Critical for Anthropic API compliance.
+    ///
+    /// CRITICAL: Never convert ToolResultBlocks to TextContent. Doing so
+    /// destroys the tool_use/tool_result pairing, causing API error 2013.
+    /// When same-role messages have incompatible content types (e.g. Text
+    /// + ToolResultBlocks), keep them as SEPARATE entries instead of merging.
     pub fn fix_role_alternation(&mut self) {
         if self.messages.is_empty() {
             return;
@@ -516,76 +521,89 @@ impl ConversationContext {
 
             if let Some(last) = merged.last_mut() {
                 if last.role == msg.role {
-                    // Merge same-role consecutive messages
-                    match &msg.content {
-                        MessageContent::Text(b) => {
-                            if let MessageContent::Text(a) = &mut last.content {
-                                a.push_str("\n\n");
-                                a.push_str(b);
-                            } else {
-                                // Type mismatch: serialize last content to text,
-                                // append new text (avoids silent content loss)
+                    // Merge same-role consecutive messages ONLY when content
+                    // types are compatible. When types mismatch, keep separate
+                    // to preserve ToolResultBlocks tool pairing.
+                    let should_merge = match (&last.content, &msg.content) {
+                        // Same types: always merge
+                        (MessageContent::Text(_), MessageContent::Text(_))
+                        | (MessageContent::ToolUseBlocks(_), MessageContent::ToolUseBlocks(_))
+                        | (MessageContent::ToolResultBlocks(_), MessageContent::ToolResultBlocks(_))
+                        | (MessageContent::Summary(_), MessageContent::Summary(_)) => true,
+                        // Text-compatible types: safe to merge
+                        (MessageContent::Text(_), MessageContent::Summary(_))
+                        | (MessageContent::Summary(_), MessageContent::Text(_)) => true,
+                        // Type mismatch: NEVER merge -- ToolResultBlocks must stay intact
+                        // to preserve tool_use/tool_result pairing (API 2013 error otherwise)
+                        _ => false,
+                    };
+
+                    if should_merge {
+                        match &msg.content {
+                            MessageContent::Text(b) => {
+                                if let MessageContent::Text(a) = &mut last.content {
+                                    a.push_str("\n\n");
+                                    a.push_str(b);
+                                } else if let MessageContent::Summary(a) = &mut last.content {
+                                    // Summary + Text -> merge into Text
+                                    let prev = a.clone();
+                                    let mut new_text = prev;
+                                    new_text.push_str("\n\n");
+                                    new_text.push_str(b);
+                                    last.content = MessageContent::Text(new_text);
+                                } else {
+                                    let prev = last.content_to_text();
+                                    last.content = MessageContent::Text(
+                                        format!("{}\n\n{}", prev, b),
+                                    );
+                                }
+                            }
+                            MessageContent::ToolUseBlocks(b) => {
+                                if let MessageContent::ToolUseBlocks(a) = &mut last.content {
+                                    a.extend(b.clone());
+                                } else {
+                                    let prev = last.content_to_text();
+                                    let tools: Vec<String> = b.iter()
+                                        .map(|t| format!("[tool_use: {}({})]", t.name, t.id))
+                                        .collect();
+                                    last.content = MessageContent::Text(
+                                        format!("{}\n\n{}", prev, tools.join(" ")),
+                                    );
+                                }
+                            }
+                            MessageContent::ToolResultBlocks(b) => {
+                                if let MessageContent::ToolResultBlocks(a) = &mut last.content {
+                                    a.extend(b.clone());
+                                }
+                                // else: shouldn't reach here due to should_merge guard
+                            }
+                            MessageContent::Summary(b) => {
+                                if let MessageContent::Summary(a) = &mut last.content {
+                                    a.push_str("\n\n");
+                                    a.push_str(b);
+                                } else if let MessageContent::Text(a) = &mut last.content {
+                                    a.push_str("\n\n");
+                                    a.push_str(b);
+                                } else {
+                                    let prev = last.content_to_text();
+                                    last.content = MessageContent::Text(
+                                        format!("{}\n\n{}", prev, b),
+                                    );
+                                }
+                            }
+                            _ => {
+                                // Fallback: serialize both to text and concatenate
                                 let prev = last.content_to_text();
+                                let curr = msg.content_to_text();
                                 last.content = MessageContent::Text(
-                                    format!("{}\n\n{}", prev, b),
+                                    format!("{}\n\n{}", prev, curr),
                                 );
                             }
                         }
-                        MessageContent::ToolUseBlocks(b) => {
-                            if let MessageContent::ToolUseBlocks(a) = &mut last.content {
-                                a.extend(b.clone());
-                            } else {
-                                let prev = last.content_to_text();
-                                let tools: Vec<String> = b.iter()
-                                    .map(|t| format!("[tool_use: {}({})]", t.name, t.id))
-                                    .collect();
-                                last.content = MessageContent::Text(
-                                    format!("{}\n\n{}", prev, tools.join(" ")),
-                                );
-                            }
-                        }
-                        MessageContent::ToolResultBlocks(b) => {
-                            if let MessageContent::ToolResultBlocks(a) = &mut last.content {
-                                a.extend(b.clone());
-                            } else {
-                                let prev = last.content_to_text();
-                                let results: Vec<String> = b.iter()
-                                    .map(|r| {
-                                        let texts: Vec<String> = r.content.iter()
-                                            .map(|c| match c {
-                                                ToolResultContent::Text { text } => text.clone(),
-                                            })
-                                            .collect();
-                                        format!("[tool_result: {}] {}", r.tool_use_id, texts.join(" "))
-                                    })
-                                    .collect();
-                                last.content = MessageContent::Text(
-                                    format!("{}\n\n{}", prev, results.join(" ")),
-                                );
-                            }
-                        }
-                        MessageContent::Summary(b) => {
-                            if let MessageContent::Summary(a) = &mut last.content {
-                                a.push_str("\n\n");
-                                a.push_str(b);
-                            } else {
-                                let prev = last.content_to_text();
-                                last.content = MessageContent::Text(
-                                    format!("{}\n\n{}", prev, b),
-                                );
-                            }
-                        }
-                        _ => {
-                            // Fallback: serialize both to text and concatenate
-                            // (handles CompactBoundary and any future types)
-                            let prev = last.content_to_text();
-                            let curr = msg.content_to_text();
-                            last.content = MessageContent::Text(
-                                format!("{}\n\n{}", prev, curr),
-                            );
-                        }
+                        continue;
                     }
-                    continue;
+                    // should_merge == false: types are incompatible.
+                    // Keep as separate entries (no merging, no conversion).
                 }
             }
             merged.push(msg);

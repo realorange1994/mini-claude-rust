@@ -77,7 +77,7 @@ fn permission_gate_auto_allows_everything() {
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
-    registry.register(ExecTool);
+    registry.register(ExecTool::new());
     registry.register(FileWriteTool);
 
     let tools = registry.all_tools();
@@ -126,7 +126,7 @@ fn permission_gate_plan_blocks_write() {
     let registry = Registry::new();
     registry.register(FileWriteTool);
     registry.register(FileEditTool);
-    registry.register(ExecTool);
+    registry.register(ExecTool::new());
 
     let tools = registry.all_tools();
 
@@ -147,7 +147,7 @@ fn permission_gate_plan_blocks_write() {
 
 #[test]
 fn exec_tool_check_permissions_dangerous_rm() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("rm -rf /home"));
     let result = tool.check_permissions(&params);
@@ -158,7 +158,7 @@ fn exec_tool_check_permissions_dangerous_rm() {
 
 #[test]
 fn exec_tool_check_permissions_git_destruction() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("rm -rf .git"));
     let result = tool.check_permissions(&params);
@@ -174,7 +174,7 @@ fn exec_tool_check_permissions_git_destruction() {
 
 #[test]
 fn exec_tool_check_permissions_shutdown() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("shutdown now"));
     let result = tool.check_permissions(&params);
@@ -184,7 +184,7 @@ fn exec_tool_check_permissions_shutdown() {
 
 #[test]
 fn exec_tool_check_permissions_safe_command() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("ls -la"));
     let result = tool.check_permissions(&params);
@@ -194,7 +194,7 @@ fn exec_tool_check_permissions_safe_command() {
 
 #[test]
 fn exec_tool_check_permissions_git_status() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("git status"));
     let result = tool.check_permissions(&params);
@@ -203,7 +203,7 @@ fn exec_tool_check_permissions_git_status() {
 
 #[test]
 fn exec_tool_check_permissions_echo() {
-    let tool = ExecTool;
+    let tool = ExecTool::new();
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("echo hello"));
     let result = tool.check_permissions(&params);
@@ -274,7 +274,7 @@ fn permission_gate_auto_allows_dangerous_commands() {
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
-    registry.register(ExecTool);
+    registry.register(ExecTool::new());
     let tool = registry.get("exec").unwrap();
 
     let mut params = HashMap::new();

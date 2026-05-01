@@ -151,6 +151,10 @@ pub struct AgentLoop {
     skill_tracker: Arc<RwLock<SkillTracker>>,
     /// Rate limit state parsed from API response headers
     rate_limit_state: RateLimitState,
+    /// Optional custom system prompt (used by sub-agents)
+    custom_system_prompt: Option<String>,
+    /// Counter for tool uses (for sub-agent reporting)
+    tools_used: std::sync::atomic::AtomicUsize,
 }
 
 impl AgentLoop {
@@ -223,6 +227,8 @@ impl AgentLoop {
             rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
+            custom_system_prompt: None,
+            tools_used: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -314,6 +320,8 @@ impl AgentLoop {
             rate_limit_state: RateLimitState::default(),
             skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
+            custom_system_prompt: None,
+            tools_used: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -470,18 +478,24 @@ impl AgentLoop {
         // Note: skill_loader is behind &self, so we skip refresh_if_changed here
         // (it requires &mut self on Loader). Skills are refreshed at startup.
 
-        // Build system prompt with skill tracker
-        let tracker = self.skill_tracker.blocking_read();
-        let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
-        let system_prompt = crate::config::build_system_prompt(
-            &*self.registry.blocking_read(),
-            &self.config.permission_mode,
-            &self.config.project_dir,
-            self.config.skill_loader.as_ref(),
-            Some(&tracker),
-            session_memory,
-        );
-        drop(tracker);
+        // Build system prompt — use custom one if set (sub-agents), otherwise build from registry
+        let system_prompt = if let Some(ref custom) = self.custom_system_prompt {
+            custom.clone()
+        } else {
+            let tracker = self.skill_tracker.blocking_read();
+            let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
+            let prompt = crate::config::build_system_prompt(
+                &*self.registry.blocking_read(),
+                &self.config.permission_mode,
+                &self.config.project_dir,
+                &self.config.model,
+                self.config.skill_loader.as_ref(),
+                Some(&tracker),
+                session_memory,
+            );
+            drop(tracker);
+            prompt
+        };
 
         // Get messages and tools for API call
         let messages = self.entries_to_messages();
@@ -2098,6 +2112,113 @@ impl AgentLoop {
         let count = context.len();
         context.clear();
         count
+    }
+
+    /// Get a reference to the config
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Get a reference to the registry (for sub-agent spawning)
+    pub fn registry(&self) -> &Arc<RwLock<Registry>> {
+        &self.registry
+    }
+
+    /// Get the number of tools used (for sub-agent reporting)
+    pub fn tools_used_count(&self) -> usize {
+        self.tools_used.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get the last assistant text from the conversation context as a partial result.
+    /// Used when the agent's Run returns empty.
+    pub fn get_partial_result(&self) -> String {
+        let ctx = self.context.blocking_read();
+        for entry in ctx.entries().iter().rev() {
+            if entry.role.as_str() == "assistant" {
+                if let MessageContent::Text(text) = &entry.content {
+                    if !text.is_empty() {
+                        return text.clone();
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
+    /// Create a new AgentLoop for a sub-agent with a custom system prompt.
+    /// Reuses the parent's API key, base URL, and HTTP client configuration.
+    pub fn new_for_sub_agent(
+        config: Config,
+        registry: Registry,
+        system_prompt: &str,
+    ) -> Result<Self> {
+        let api_key = config.api_key.clone().unwrap_or_else(|| {
+            std::env::var("ANTHROPIC_API_KEY")
+                .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
+                .unwrap_or_default()
+        });
+
+        if api_key.is_empty() {
+            return Err(anyhow!("ANTHROPIC_API_KEY environment variable is not set"));
+        }
+
+        let base_url = config.base_url.clone().unwrap_or_else(|| {
+            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+        });
+
+        let client = build_http_client(&api_key)
+            .ok_or_else(|| anyhow!("failed to build HTTP client (invalid API key?)"))?;
+
+        let max_turns = config.max_turns;
+        let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
+        let context = ConversationContext::new(config.clone());
+        let gate = PermissionGate::new(config.clone());
+
+        // Create sub-agent transcript in separate directory
+        let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S-sub").to_string();
+        let transcript_dir = PathBuf::from(".claude").join("transcripts").join("sub-agents");
+        let _ = std::fs::create_dir_all(&transcript_dir);
+        let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
+        let transcript = Transcript::new(&transcript_path);
+        let _ = transcript.add_system(format!("sub-agent: model={}, mode={}", gate.config.model, gate.config.permission_mode));
+
+        let session_memory = config.session_memory.clone();
+        let compactor = RwLock::new(
+            Compactor::new()
+                .with_threshold(config.auto_compact_threshold)
+                .with_buffer(config.auto_compact_buffer)
+                .with_max_tokens(crate::compact::model_context_window(&gate.config.model))
+                .with_session_memory(session_memory)
+                .with_reactive_threshold(config.reactive_compact_threshold)
+        );
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
+
+        Ok(Self {
+            config: gate.config.clone(),
+            registry: Arc::new(RwLock::new(registry)),
+            gate,
+            context: Arc::new(RwLock::new(context)),
+            client,
+            use_stream: true,
+            max_tool_chars: 8192,
+            max_turns,
+            base_url,
+            api_key,
+            transcript,
+            compactor,
+            file_history,
+            rt,
+            interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rate_limit_state: RateLimitState::default(),
+            skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
+            last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
+            custom_system_prompt: Some(system_prompt.to_string()),
+            tools_used: std::sync::atomic::AtomicUsize::new(0),
+        })
     }
 }
 

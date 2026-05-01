@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod agent_sub;
 pub mod compact;
 pub mod config;
 pub mod context;
@@ -13,4 +14,6 @@ pub mod skills;
 pub mod session_memory;
 pub mod streaming;
 pub mod tools;
+pub mod task_store;
 pub mod transcript;
+pub mod work_task;

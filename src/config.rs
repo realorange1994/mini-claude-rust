@@ -22,7 +22,7 @@ pub struct Config {
     pub allowed_commands: Vec<String>,
     pub denied_patterns: Vec<String>,
     pub project_dir: PathBuf,
-    pub mcp_manager: Option<McpManager>,
+    pub mcp_manager: Option<Arc<McpManager>>,
     pub skill_loader: Option<SkillLoader>,
     pub file_history: Option<Arc<FileHistory>>,
     // Compaction config
@@ -202,7 +202,7 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
                     mcp_manager.register(&name, &cmd, &args, env);
                 }
             }
-            cfg.mcp_manager = Some(mcp_manager);
+            cfg.mcp_manager = Some(Arc::new(mcp_manager));
         }
     }
 
@@ -210,7 +210,7 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
     let mcp_path = project_dir.join(".mcp.json");
     if let Ok(data) = std::fs::read_to_string(&mcp_path) {
         if let Ok(mcp_cfg) = serde_json::from_str::<McpConfigFile>(&data) {
-            let mcp_manager = cfg.mcp_manager.get_or_insert_with(|| crate::mcp::Manager::new());
+            let mcp_manager = cfg.mcp_manager.get_or_insert_with(|| Arc::new(crate::mcp::Manager::new()));
             for (name, entry) in mcp_cfg.mcp_servers {
                 if let Some(url) = entry.url {
                     mcp_manager.register_remote(&name, &url, entry.env.unwrap_or_default());
@@ -280,6 +280,7 @@ impl CachedSystemPrompt {
         registry: &Registry,
         permission_mode: &PermissionMode,
         project_dir: &Path,
+        model_name: &str,
         skill_loader: Option<&SkillLoader>,
         skill_tracker: Option<&SkillTracker>,
         session_memory: Option<&SessionMemory>,
@@ -292,7 +293,7 @@ impl CachedSystemPrompt {
 
         // Rebuild the prompt
         let prompt = build_system_prompt(
-            registry, permission_mode, project_dir, skill_loader, skill_tracker, session_memory,
+            registry, permission_mode, project_dir, model_name, skill_loader, skill_tracker, session_memory,
         );
 
         // Cache it
@@ -318,6 +319,7 @@ pub fn build_system_prompt(
     registry: &Registry,
     permission_mode: &PermissionMode,
     project_dir: &Path,
+    model_name: &str,
     skill_loader: Option<&SkillLoader>,
     skill_tracker: Option<&SkillTracker>,
     session_memory: Option<&SessionMemory>,
@@ -326,7 +328,7 @@ pub fn build_system_prompt(
     let rust_version = concat!("rustc ", env!("CARGO_PKG_VERSION"));
 
     let mut prompt = format!(
-        r#"You are miniClaudeCode, a lightweight AI coding assistant that operates in the terminal.
+        r#"You are miniClaudeCode (model: {}), a lightweight AI coding assistant that operates in the terminal.
 
 ## Environment
 - OS: {} / {} / {}
@@ -336,6 +338,7 @@ pub fn build_system_prompt(
 
 You have access to the following tools to help the user with software engineering tasks:
 "#,
+        model_name,
         std::env::consts::OS,
         rust_version,
         std::env::consts::ARCH,
@@ -363,11 +366,18 @@ You have access to the following tools to help the user with software engineerin
     prompt.push_str("8. For file edits, provide enough context in old_string to uniquely match.\n");
     prompt.push_str("9. Be concise and direct in your responses.\n");
     prompt.push_str("10. On Windows, use PowerShell syntax and commands (e.g., Get-ChildItem, Test-Path, Copy-Item). On Unix, use bash commands.\n");
-    prompt.push_str("11. Prefer built-in tools over exec commands. For git operations, use the git tool instead of exec. For file searches, use grep and glob instead of exec. Always choose the most appropriate built-in tool when available.\n\n");
+    prompt.push_str("11. Prefer built-in tools over exec commands. For git operations, use the git tool instead of exec. For file searches, use grep and glob instead of exec. Always choose the most appropriate built-in tool when available.\n");
+    prompt.push_str("12. **Sub-Agent Dispatching** -- When the user requests dispatching, delegating, or assigning a task to a sub-agent (indicated by keywords like: 派遣, 安排, 让, 要, 使, dispatch, delegate, spawn, launch agent, sub-agent), you MUST use the \"agent\" tool. Do NOT use mcp_call_tool, coze_llm, minimax_llm, or any MCP tool for sub-agent dispatching. The \"agent\" tool creates autonomous sub-agents with their own context and tool access. MCP LLM tools are only for calling external LLM APIs (generation/embedding/search), NOT for creating sub-agents.\n\n");
 
     // Common tool parameter
     prompt.push_str("## Tool Parameters\n\n");
     prompt.push_str("All tools accept an optional **`timeout`** parameter (integer, seconds, range 1-300, default 30) to override the execution timeout. Use a larger timeout for operations that may take longer, such as scanning large directories with `grep` or `glob`.\n\n");
+
+    // Task Management Rules
+    prompt.push_str("## Task Management Rules\n\n");
+    prompt.push_str("13. **When to Create Tasks** -- Use task_create for complex multi-step tasks (3+ distinct steps or actions). When the user provides multiple tasks (numbered or comma-separated), immediately capture them as tasks. When starting work on a task, mark it as in_progress BEFORE beginning work. After completing a task, mark it as completed and add any new follow-up tasks discovered.\n");
+    prompt.push_str("14. **Task Workflow** -- Create tasks with clear, specific subjects in imperative form (e.g., \"Fix authentication bug\"). Use task_update to set status: pending → in_progress → completed. ONLY mark as completed when FULLY accomplished — if tests fail, implementation is partial, or you encountered unresolved errors, keep the task in_progress. If blocked, create a new task describing what needs to be resolved. After completing a task, check task_list to find the next available task. Do not batch up multiple tasks before marking them as completed — mark each one done as soon as it is finished.\n");
+    prompt.push_str("15. **Background Command Execution** -- For long-running commands, use run_in_background=true with the exec tool. You will receive a task ID and output file path immediately; you do not need to check the output right away. When the background task completes, you will be notified via a task-notification message. Use task_output to retrieve results. Use task_stop to stop a running background task if needed. Do NOT use sleep to poll for results — use run_in_background and wait for the notification.\n\n");
 
     // Permission mode
     let mode_upper = permission_mode.to_string().to_uppercase();
