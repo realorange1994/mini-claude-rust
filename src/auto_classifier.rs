@@ -265,17 +265,9 @@ const SAFE_PROCESS_OPERATIONS: &[&str] = &[
 ];
 
 /// Fileops operations that are read-only and safe to auto-allow.
-/// Write/destructive operations are NOT listed here and will go through
-/// the classifier (or be blocked outright if in DANGEROUS_FILEOPS_OPERATIONS).
+/// Write/destructive operations are NOT listed here and will go through the classifier.
 const SAFE_FILEOPS_OPERATIONS: &[&str] = &[
     "read", "stat", "checksum", "exists", "ls",
-];
-
-/// Fileops operations that are so destructive they should always be blocked,
-/// even if the classifier were to allow them. These bypass the classifier
-/// entirely and are unconditionally denied.
-const DANGEROUS_FILEOPS_OPERATIONS: &[&str] = &[
-    "rmrf",
 ];
 
 /// Check if the tool call should be auto-allowed without classifier evaluation.
@@ -298,12 +290,9 @@ pub fn is_auto_allowlisted(tool_name: &str, tool_input: &HashMap<String, serde_j
         }
     }
     // Fileops: operation-level granularity — read-only ops auto-allowed,
-    // destructive ops always blocked (see is_always_blocked), rest go through classifier
+    // destructive ops go through classifier
     if tool_name == "fileops" {
         if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
-            if is_always_blocked(tool_name, tool_input) {
-                return false;
-            }
             return SAFE_FILEOPS_OPERATIONS.contains(&op);
         }
         // No operation field → go through classifier
@@ -313,18 +302,6 @@ pub fn is_auto_allowlisted(tool_name: &str, tool_input: &HashMap<String, serde_j
     if tool_name == "exec" {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             return is_safe_exec_command(cmd);
-        }
-    }
-    false
-}
-
-/// Check if the tool call should always be blocked, bypassing the classifier entirely.
-/// These are operations so destructive that even a misbehaving classifier must not allow them.
-pub fn is_always_blocked(tool_name: &str, tool_input: &HashMap<String, serde_json::Value>) -> bool {
-    // Fileops: dangerous operations like rmrf are always blocked
-    if tool_name == "fileops" {
-        if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
-            return DANGEROUS_FILEOPS_OPERATIONS.contains(&op);
         }
     }
     false
@@ -378,14 +355,6 @@ impl AutoModeClassifier {
         tool_input: &HashMap<String, serde_json::Value>,
         transcript: &str,
     ) -> ClassifierResult {
-        // Check always-blocked first (e.g., fileops rmrf — never allow regardless)
-        if is_always_blocked(tool_name, tool_input) {
-            return ClassifierResult {
-                allow: false,
-                reason: "operation is always blocked in auto mode".to_string(),
-            };
-        }
-
         // Check whitelist first (always allowed, even if classifier is disabled)
         if is_auto_allowlisted(tool_name, tool_input) {
             return ClassifierResult {
@@ -633,6 +602,15 @@ You receive a transcript of the conversation so far (user messages and previous 
 3. **Evaluate risk**: Assess the action against the categories below.
 
 ## Decision Categories
+
+## BLOCK ALWAYS Categories (reject any tool call matching these):
+
+1. **External Code Execution**: curl|bash, wget|sh, piping to shell, npm/pip from unverified sources
+2. **Irreversible Local Destruction**: rm -rf, recursive file deletion, file truncation, database drops, mkfs, dd if=
+3. **Unauthorized Persistence**: cron jobs, systemd services, shell profile modifications (~/.bashrc, ~/.zshrc, etc.)
+4. **Security Weakening**: disabling firewalls, security policies, chmod 777, set-executionpolicy bypass
+5. **Privilege Escalation**: sudo, su, runas
+6. **Unauthorized Network Services**: starting servers, listeners, port bindings
 
 ### BLOCK — Always require confirmation regardless of user intent
 - **Code from External**: Downloading and executing code from the internet (e.g., curl | bash, pip install from unverified sources, npx from unknown packages)
@@ -1008,23 +986,19 @@ mod tests {
     }
 
     #[test]
-    fn test_fileops_always_blocked() {
-        // rmrf is always blocked regardless of classifier state
+    fn test_fileops_rmrf_not_allowlisted() {
+        // rmrf is NOT auto-allowlisted — it goes through the classifier (like official Claude Code)
         let mut input = HashMap::new();
         input.insert("operation".to_string(), serde_json::json!("rmrf"));
         input.insert("path".to_string(), serde_json::json!("/some/path"));
-        assert!(is_always_blocked("fileops", &input));
         assert!(!is_auto_allowlisted("fileops", &input));
 
-        // Other operations are NOT always blocked
-        for op in ["read", "rm", "mv", "stat", "exists"] {
+        // Other non-read-only operations also NOT allowlisted
+        for op in ["rm", "mv", "cp"] {
             let mut input = HashMap::new();
             input.insert("operation".to_string(), serde_json::json!(op));
-            assert!(!is_always_blocked("fileops", &input));
+            assert!(!is_auto_allowlisted("fileops", &input));
         }
-        // Non-fileops tools are never always blocked
-        assert!(!is_always_blocked("exec", &HashMap::new()));
-        assert!(!is_always_blocked("write_file", &HashMap::new()));
     }
 
     #[test]
@@ -1048,14 +1022,15 @@ mod tests {
     }
 
     #[test]
-    fn test_classifier_always_block_fileops_rmrf() {
+    fn test_classifier_fileops_rmrf_with_disabled_classifier() {
+        // rmrf is not allowlisted, so it goes through classifier.
+        // With disabled classifier, it falls through to fail-closed (block).
         let classifier = AutoModeClassifier::new("", "", ""); // disabled
         let mut input = HashMap::new();
         input.insert("operation".to_string(), serde_json::json!("rmrf"));
         input.insert("path".to_string(), serde_json::json!("/tmp/test"));
         let result = classifier.classify("fileops", &input, "");
         assert!(!result.allow);
-        assert_eq!(result.reason, "operation is always blocked in auto mode");
     }
 
     #[test]
