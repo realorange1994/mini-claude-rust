@@ -5,6 +5,186 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::collections::HashMap as StdHashMap;
+
+// Standalone utility functions (callable from system_prompt builder too)
+
+/// Walk up from dir to find the .git directory or file. Returns the root path.
+pub fn find_git_root(dir: &str) -> Result<String, String> {
+    let mut current = PathBuf::from(dir);
+    loop {
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return Ok(current.to_str().map(|s| s.to_string())
+                .ok_or_else(|| "Invalid path encoding".to_string())?);
+        }
+        if !current.pop() {
+            return Err("No git repository found".to_string());
+        }
+    }
+}
+
+/// Run `git rev-parse --abbrev-ref HEAD` to get current branch name.
+pub fn get_branch(dir: &str) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+    cmd.current_dir(dir);
+    let output = cmd.output().map_err(|e| format!("Failed to run git: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err("Failed to get current branch".to_string())
+    }
+}
+
+/// Check if the repo at dir is a bare repository.
+pub fn is_bare_repo(dir: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-parse", "--is-bare-repository"]);
+    cmd.current_dir(dir);
+    cmd.output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<bool>().ok())
+        .unwrap_or(false)
+}
+
+/// Check if dir is inside a git repository by finding the .git root.
+pub fn is_git_repo(dir: &str) -> bool {
+    find_git_root(dir).is_ok()
+}
+
+/// Run `git status --porcelain -u` and return a map of file -> status.
+pub fn get_git_status(dir: &str) -> Result<StdHashMap<String, String>, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["status", "--porcelain", "-u"]);
+    cmd.current_dir(dir);
+    let output = cmd.output().map_err(|e| format!("Failed to run git status: {}", e))?;
+    if !output.status.success() {
+        return Err("Failed to get git status".to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = StdHashMap::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 3 {
+            let status = trimmed[..2].to_string();
+            let file = trimmed[3..].to_string();
+            result.insert(file, status);
+        }
+    }
+    Ok(result)
+}
+
+/// Check if there are any uncommitted changes in the repo.
+pub fn has_uncommitted_changes(dir: &str) -> bool {
+    get_git_status(dir).map(|s| !s.is_empty()).unwrap_or(false)
+}
+
+/// Try to get the default branch via origin/HEAD, falling back to "main".
+pub fn get_default_branch(dir: &str) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+    cmd.current_dir(dir);
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Some(idx) = stdout.rfind('/') {
+                return Ok(stdout[idx + 1..].to_string());
+            }
+            return Ok(stdout);
+        }
+    }
+    Ok("main".to_string())
+}
+
+/// Get the current commit hash (full 40 chars).
+pub fn get_current_commit_hash(dir: &str) -> Result<String, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]);
+    cmd.current_dir(dir);
+    let output = cmd.output().map_err(|e| format!("Failed to run git rev-parse: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err("Failed to get commit hash".to_string())
+    }
+}
+
+/// Check if the repo is dirty: has uncommitted changes or unstaged diff.
+pub fn is_dirty(dir: &str) -> bool {
+    if has_uncommitted_changes(dir) {
+        return true;
+    }
+    let mut cmd = Command::new("git");
+    cmd.args(["diff", "--quiet"]);
+    cmd.current_dir(dir);
+    cmd.output()
+        .map(|o| !o.status.success())
+        .unwrap_or(false)
+}
+
+/// Return a formatted git context string for system prompt injection.
+pub fn get_git_context() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_str().map(|s| s.to_string()).unwrap_or_default())
+        .unwrap_or_default();
+
+    if !is_git_repo(&cwd) {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+
+    if let Ok(root) = find_git_root(&cwd) {
+        parts.push(format!("- Git Root: {}", root));
+    }
+    if let Ok(branch) = get_branch(&cwd) {
+        parts.push(format!("- Git Branch: {}", branch));
+    }
+    if let Ok(hash) = get_current_commit_hash(&cwd) {
+        let short = if hash.len() >= 12 { &hash[..12] } else { &hash };
+        parts.push(format!("- Git Commit: {}", short));
+    }
+    if is_dirty(&cwd) {
+        parts.push("- Git Dirty: true".to_string());
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("\n## Git Context\n{}\n", parts.join("\n"))
+    }
+}
+
+/// Return a compact git context string for user-facing prompt injection.
+pub fn get_git_context_for_prompt() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_str().map(|s| s.to_string()).unwrap_or_default())
+        .unwrap_or_default();
+
+    if !is_git_repo(&cwd) {
+        return String::new();
+    }
+
+    let mut parts = Vec::new();
+
+    if let Ok(branch) = get_branch(&cwd) {
+        parts.push(format!("- Git Branch: {}", branch));
+    }
+    if let Ok(hash) = get_current_commit_hash(&cwd) {
+        let short = if hash.len() >= 12 { &hash[..12] } else { &hash };
+        parts.push(format!("- Git Commit: {}", short));
+    }
+    if is_dirty(&cwd) {
+        parts.push("- Git Dirty: true".to_string());
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", parts.join("\n"))
+    }
+}
 
 pub struct GitTool;
 
@@ -32,7 +212,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Execute Git version control operations. Supports clone, init, add, rm, mv, restore, switch, commit, push, pull, fetch, branch, checkout, merge, rebase, cherry-pick, revert, stash, clean, reset, tag, status, diff, log, shortlog, blame, reflog, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations."
+        "Execute Git version control operations. Supports clone, init, add, rm, mv, restore, switch, commit, push, pull, fetch, branch, checkout, merge, rebase, cherry-pick, revert, stash, clean, reset, tag, status, diff, log, shortlog, blame, reflog, remote, show, describe, ls-files, ls-tree, rev-parse, rev-list, and worktree operations, and use operation='info' to get current repository state (branch, commit, dirty status, default branch, git root)."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -45,7 +225,7 @@ impl Tool for GitTool {
                     "enum": ["clone", "init", "add", "rm", "mv", "restore", "switch", "commit", "push", "pull", "fetch", 
                              "branch", "checkout", "merge", "rebase", "cherry-pick", "revert", "stash", "clean",
                              "reset", "tag", "status", "diff", "log", "shortlog", "blame", "reflog",
-                             "remote", "show", "describe", "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree"]
+                             "remote", "show", "describe", "ls-files", "ls-tree", "rev-parse", "rev-list", "worktree", "info"]
                 },
                 "repo": {
                     "type": "string",
@@ -182,6 +362,60 @@ impl Tool for GitTool {
                 .or_else(|| params.get("path").and_then(|v| v.as_str()))
                 .map(PathBuf::from)
         };
+
+        // Handle "info" operation - repository state summary
+        if operation == "info" {
+            let dir = work_dir.as_ref()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+                .or_else(|| std::env::current_dir().ok().and_then(|p| p.to_str().map(|s| s.to_string())))
+                .unwrap_or_else(|| ".".to_string());
+
+            if !is_git_repo(&dir) {
+                return ToolResult::error(format!("Error: not a git repository: {}", dir));
+            }
+
+            let mut lines = Vec::new();
+
+            match find_git_root(&dir) {
+                Ok(root) => lines.push(format!("Git Root: {}", root)),
+                Err(_) => lines.push("Git Root: (unknown)".to_string()),
+            }
+            match get_branch(&dir) {
+                Ok(branch) => lines.push(format!("Branch: {}", branch)),
+                Err(_) => lines.push("Branch: (detached HEAD)".to_string()),
+            }
+            match get_default_branch(&dir) {
+                Ok(default) => lines.push(format!("Default Branch: {}", default)),
+                Err(_) => lines.push("Default Branch: (unknown)".to_string()),
+            }
+            match get_current_commit_hash(&dir) {
+                Ok(hash) => {
+                    let short = if hash.len() >= 12 { hash[..12].to_string() } else { hash };
+                    lines.push(format!("Commit: {}", short));
+                }
+                Err(_) => lines.push("Commit: (unknown)".to_string()),
+            }
+            lines.push(format!("Dirty: {}", is_dirty(&dir)));
+            lines.push(format!("Bare: {}", is_bare_repo(&dir)));
+            match get_git_status(&dir) {
+                Ok(status_map) if !status_map.is_empty() => {
+                    lines.push("Status:".to_string());
+                    let mut entries: Vec<_> = status_map.iter().collect();
+                    entries.sort_by(|a, b| a.0.cmp(b.0));
+                    for (file, status) in entries {
+                        lines.push(format!(" {} {}", status, file));
+                    }
+                }
+                Ok(_) => {
+                    lines.push("Status: (clean)".to_string());
+                }
+                Err(_) => {
+                    lines.push("Status: (unable to retrieve)".to_string());
+                }
+            }
+            return ToolResult::ok(lines.join("\n"));
+        }
 
         // Check remote configuration for operations that need it
         if matches!(operation, "push" | "pull" | "fetch") {
@@ -1859,4 +2093,74 @@ mod tests {
         let result = tool.execute(params);
         assert!(!result.is_error, "merge failed: {}", result.output);
     }
+
+    #[test]
+    fn test_git_info_clean() {
+        let (_temp, base) = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("info".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "info failed: {}", result.output);
+        assert!(result.output.contains("Git Root:"), "Should contain Git Root");
+        assert!(result.output.contains("Branch:"), "Should contain Branch");
+        assert!(result.output.contains("Commit:"), "Should contain Commit");
+        assert!(result.output.contains("Dirty:"), "Should contain Dirty");
+        assert!(result.output.contains("Bare:"), "Should contain Bare");
+        assert!(result.output.contains("Status:"), "Should contain Status");
+    }
+
+    #[test]
+    fn test_git_info_dirty() {
+        let (_temp, base) = setup_test_repo();
+        fs::write(format!("{}/init.txt", base), "dirty content").unwrap();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("info".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "info failed: {}", result.output);
+        assert!(result.output.contains("Dirty: true"), "Should show dirty status");
+    }
+
+    #[test]
+    fn test_git_info_not_repo() {
+        let temp = TempDir::new().unwrap();
+        let non_repo = temp.path().to_str().unwrap().replace("\\", "/");
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("info".to_string()));
+        params.insert("directory".to_string(), Value::String(non_repo));
+        let result = tool.execute(params);
+        assert!(result.is_error, "info on non-repo should error");
+    }
+
+    #[test]
+    fn test_utility_functions() {
+        let (_temp, base) = setup_test_repo();
+        assert!(is_git_repo(&base), "Should be a git repo");
+        let root = find_git_root(&base).unwrap();
+        assert!(!root.is_empty(), "Should find git root");
+        let branch = get_branch(&base).unwrap();
+        assert!(!branch.is_empty(), "Should get branch name");
+        assert!(!is_bare_repo(&base), "Normal repo should not be bare");
+        let hash = get_current_commit_hash(&base).unwrap();
+        assert_eq!(hash.len(), 40, "Commit hash should be 40 chars");
+        let default = get_default_branch(&base).unwrap();
+        assert!(!default.is_empty(), "Should get default branch");
+        assert!(!has_uncommitted_changes(&base), "Clean repo should have no changes");
+        assert!(!is_dirty(&base), "Clean repo should not be dirty");
+    }
+
+    #[test]
+    fn test_get_git_status_util() {
+        let (_temp, base) = setup_test_repo();
+        let status = get_git_status(&base).unwrap();
+        assert!(status.is_empty(), "Clean repo should have empty status");
+        fs::write(format!("{}/new_status.txt", base), "new").unwrap();
+        let status = get_git_status(&base).unwrap();
+        assert!(!status.is_empty(), "Should have status after adding file");
+    }
+
 }

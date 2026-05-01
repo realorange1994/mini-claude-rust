@@ -13,7 +13,519 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-// ─── Background task callback type ────────────────────────────────────────────
+// ─── Security Helper Functions ─────────────────────────────────────────────────
+
+/// Safe environment variable names that are allowed in command substitution.
+const SAFE_ENV_VARS: &[&str] = &[
+    "HOME", "PATH", "USER", "PWD", "SHELL", "TERM", "EDITOR", "VISUAL", "PAGER",
+    "GOPATH", "GOROOT", "JAVA_HOME", "NODE_PATH", "PYTHONPATH", "PYTHONHOME",
+    "VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME", "RUST_BACKTRACE",
+    "CI", "CI_COMMIT_SHA", "CI_JOB_ID", "CI_PIPELINE_ID",
+    "GITHUB_TOKEN", "GITHUB_RUN_ID", "GITHUB_ACTIONS",
+    "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+    "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP",
+    "HOSTNAME", "OSTYPE", "MACHTYPE", "ARCH",
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA",
+    "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+];
+
+/// Detect command substitution patterns: $(), backticks, <(), >(), $((, dangerous ${VAR}.
+fn detect_command_substitution(cmd: &str) -> Option<String> {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    for (i, c) in cmd.char_indices() {
+        if escaped { escaped = false; continue; }
+        match c {
+            '\\' if !in_single_quote => { escaped = true; }
+            '\'' if !in_double_quote => { in_single_quote = !in_single_quote; }
+            '"' if !in_single_quote => { in_double_quote = !in_double_quote; }
+            '$' if !in_single_quote && !in_double_quote => {
+                if i + 1 < cmd.len() {
+                    let next = cmd.chars().nth(i + 1);
+                    match next {
+                        Some('(') => {
+                            let rest: String = cmd[i + 2..].chars().take(20).collect();
+                            if rest.starts_with("(") || rest.starts_with("((") {
+                                return Some("$() command substitution".to_string());
+                            }
+                            if rest.starts_with("<(") || rest.starts_with(">(") {
+                                return Some("process substitution".to_string());
+                            }
+                        }
+                        Some('{') => {
+                            let end = cmd[i + 2..].find('}');
+                            if let Some(end_idx) = end {
+                                let var_content = &cmd[i + 2..i + 2 + end_idx];
+                                let safe_patterns = [":-", ":=", ":?"];
+                                let is_safe_pattern = safe_patterns.iter().any(|p| var_content.contains(p));
+                                if is_safe_pattern { continue; }
+                                let var_name = var_content.split(|c| c == ':' || c == '-' || c == '=' || c == '?').next().unwrap_or(var_content);
+                                if !is_safe_variable(var_name) {
+                                    return Some(format!("${{{}}} variable substitution", var_name));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            '`' if !in_single_quote && !in_double_quote => {
+                return Some("backtick command substitution".to_string());
+            }
+            _ => {}
+        }
+    }
+    if cmd.contains('`') { return Some("backtick command substitution".to_string()); }
+    None
+}
+
+/// Check if an environment variable name is safe to expand.
+fn is_safe_variable(name: &str) -> bool {
+    if SAFE_ENV_VARS.iter().any(|&s| s == name) { return true; }
+    if name.chars().all(|c| c.is_ascii_digit()) { return true; }
+    let special_vars = ["?", "!", "0", "#", "@", "*", "-", "_", "$"];
+    if special_vars.contains(&name) { return true; }
+    false
+}
+
+/// Strip safe wrapper commands from the command string.
+fn strip_safe_wrappers(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    static WRAPPERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let wrappers = WRAPPERS.get_or_init(|| {
+        vec!["timeout", "nice", "nohup", "env", "stdbuf", "ionice",
+             "unbuffer", "command", "builtin", "time", "sudo", "doas"]
+    });
+    let mut result = trimmed.to_string();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let lower = result.to_lowercase();
+        for wrapper in wrappers.iter() {
+            if lower.starts_with(*wrapper) {
+                let rest = result[wrapper.len()..].trim_start();
+                if *wrapper == "timeout" {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if !parts.is_empty() && parts[0].chars().all(|c| c.is_ascii_digit()) {
+                        result = parts[1..].join(" ");
+                    } else { result = rest.to_string(); }
+                    changed = true; break;
+                }
+                if *wrapper == "nice" {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.first() == Some(&"-n") && parts.len() > 2 {
+                        result = parts[2..].join(" ");
+                    } else if parts.first().map(|s| s.starts_with('-')).unwrap_or(false) && !parts.is_empty() && parts[0].len() > 1 {
+                        result = parts[1..].join(" ");
+                    } else { result = rest.to_string(); }
+                    changed = true; break;
+                }
+                if *wrapper == "env" {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    let mut start_idx = 0;
+                    for (idx, part) in parts.iter().enumerate() {
+                        if part.contains('=') { start_idx = idx + 1; } else { break; }
+                    }
+                    if start_idx < parts.len() { result = parts[start_idx..].join(" "); }
+                    else { result = parts.join(" "); }
+                    changed = true; break;
+                }
+                if !rest.is_empty() {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    let mut start_idx = 0;
+                    for (idx, part) in parts.iter().enumerate() {
+                        if part.starts_with('-') { start_idx = idx + 1; } else { break; }
+                    }
+                    if start_idx < parts.len() {
+                        result = parts[start_idx..].join(" ");
+                        changed = true; break;
+                    }
+                }
+            }
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Split compound commands on shell operators while respecting quoted strings.
+fn split_compound_command(cmd: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    let chars: Vec<(usize, char)> = cmd.char_indices().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        let (_idx, c) = chars[i];
+        if escaped { current.push(c); escaped = false; i += 1; continue; }
+        match c {
+            '\\' if !in_single_quote => { escaped = true; current.push(c); }
+            '\'' if !in_double_quote => { in_single_quote = !in_single_quote; current.push(c); }
+            '"' if !in_single_quote => { in_double_quote = !in_double_quote; current.push(c); }
+            '&' if !in_single_quote && !in_double_quote => {
+                if i + 1 < len && chars[i + 1].1 == '&' {
+                    let t = current.trim();
+                    if !t.is_empty() { result.push(t.to_string()); }
+                    current.clear(); i += 2; continue;
+                }
+                current.push(c);
+            }
+            '|' if !in_single_quote && !in_double_quote => {
+                if i + 1 < len && chars[i + 1].1 == '|' {
+                    let t = current.trim();
+                    if !t.is_empty() { result.push(t.to_string()); }
+                    current.clear(); i += 2; continue;
+                }
+                let t = current.trim();
+                if !t.is_empty() { result.push(t.to_string()); }
+                current.clear();
+            }
+            ';' if !in_single_quote && !in_double_quote => {
+                let t = current.trim();
+                if !t.is_empty() { result.push(t.to_string()); }
+                current.clear();
+            }
+            '\n' if !in_single_quote && !in_double_quote => {
+                let t = current.trim();
+                if !t.is_empty() { result.push(t.to_string()); }
+                current.clear();
+            }
+            _ => { current.push(c); }
+        }
+        i += 1;
+    }
+    let t = current.trim();
+    if !t.is_empty() { result.push(t.to_string()); }
+    if result.is_empty() { result.push(cmd.trim().to_string()); }
+    result
+}
+
+/// Extract the base command from a potentially modified command string.
+fn extract_base_command(cmd: &str) -> String {
+    let stripped = strip_safe_wrappers(cmd);
+    let parts: Vec<&str> = stripped.split_whitespace().collect();
+    if parts.is_empty() { return String::new(); }
+    let mut start_idx = 0;
+    for (idx, part) in parts.iter().enumerate() {
+        if part.contains('=') { start_idx = idx + 1; } else { break; }
+    }
+    let remaining: Vec<&str> = if start_idx < parts.len() { parts[start_idx..].to_vec() } else { parts.clone() };
+    if remaining.is_empty() { return String::new(); }
+    let binary = remaining[0];
+    if binary.contains('/') || binary.contains('\\') {
+        if let Some(last_slash) = binary.rfind(|c| c == '/' || c == '\\') {
+            let base = &binary[last_slash + 1..];
+            if remaining.len() > 1 { let next = remaining[1]; if !next.starts_with('-') { return format!("{} {}", base, next); } }
+            return base.to_string();
+        }
+    }
+    if remaining.len() > 1 { let next = remaining[1]; if !next.starts_with('-') { return format!("{} {}", binary, next); } }
+    binary.to_string()
+}
+
+/// Check if a command is read-only (does not modify any state).
+#[allow(dead_code)]
+fn is_read_only_command(cmd: &str) -> bool {
+    let base = extract_base_command(cmd).to_lowercase();
+    let read_only = ["ls","cat","head","tail","wc","find","grep","rg","echo","pwd","which",
+        "env","date","type","file","stat","du","df","free","uname","hostname","id","whoami",
+        "uptime","history","tree","xxd","hexdump","od","sort","uniq","diff","comm","jq",
+        "git status","git log","git diff","git branch","git show","git tag","git remote -v",
+        "gh pr view","gh issue view","gh pr list","gh issue list",
+        "go version","go env","cargo --version","npm --version","node --version",
+        "python --version","pip list","pip show"];
+    if read_only.contains(&base.as_str()) { return true; }
+    if base.starts_with("git branch") { return !cmd.contains("-d") && !cmd.contains("-D") && !cmd.contains("-m") && !cmd.contains("-M"); }
+    if base.starts_with("git stash") { return !cmd.contains("drop") && !cmd.contains("clear") && !cmd.contains("pop"); }
+    if base.starts_with("git clean") { return !cmd.contains("-f") && !cmd.contains("--force"); }
+    if base.starts_with("git reset") { return !cmd.contains("--hard") && !cmd.contains("--merge"); }
+    false
+}
+
+/// Destructive command pattern with description.
+struct DestructivePattern { pattern: &'static str, description: &'static str }
+
+const DESTRUCTIVE_PATTERNS: &[DestructivePattern] = &[
+    DestructivePattern { pattern: r"^\s*rm\s", description: "rm - removes files" },
+    DestructivePattern { pattern: r"^\s*rmdir\s", description: "rmdir - removes directories" },
+    DestructivePattern { pattern: r"^\s*unlink\s", description: "unlink - removes file link" },
+    DestructivePattern { pattern: r"^\s*del\s", description: "del - Windows file deletion" },
+    DestructivePattern { pattern: r"^\s*erase\s", description: "erase - removes files" },
+    DestructivePattern { pattern: r"^\s*shred\s", description: "shred - securely deletes files" },
+    DestructivePattern { pattern: r"^\s*wipefs\s", description: "wipefs - erases filesystem signatures" },
+    DestructivePattern { pattern: r"^\s*dd\s+.*\bof=", description: "dd with output file - disk operation" },
+    DestructivePattern { pattern: r"^\s*mkfs", description: "mkfs - creates filesystem" },
+    DestructivePattern { pattern: r"^\s*format\s", description: "format - formats disk" },
+    DestructivePattern { pattern: r"^\s*fdisk\s", description: "fdisk - disk partition tool" },
+    DestructivePattern { pattern: r"^\s*parted\s", description: "parted - partition editor" },
+    DestructivePattern { pattern: r"git\s+push\s+.*-f", description: "git push --force" },
+    DestructivePattern { pattern: r"git\s+push\s+.*--force", description: "git push --force" },
+    DestructivePattern { pattern: r"git\s+push\s+.*-F", description: "git push with force flag" },
+    DestructivePattern { pattern: r"git\s+reset\s+--hard", description: "git reset --hard" },
+    DestructivePattern { pattern: r"git\s+reset\s+--merge", description: "git reset --merge" },
+    DestructivePattern { pattern: r"git\s+clean\s+.*-f", description: "git clean -f (force clean)" },
+    DestructivePattern { pattern: r"git\s+clean\s+.*-fd", description: "git clean -fd" },
+    DestructivePattern { pattern: r"git\s+checkout\s+\.", description: "git checkout . (discard changes)" },
+    DestructivePattern { pattern: r"git\s+checkout\s+--\s*\.", description: "git checkout . (discard changes)" },
+    DestructivePattern { pattern: r"git\s+stash\s+drop", description: "git stash drop (delete stash)" },
+    DestructivePattern { pattern: r"git\s+stash\s+clear", description: "git stash clear (delete all stashes)" },
+    DestructivePattern { pattern: r"git\s+branch\s+-[dD]\s", description: "git branch -d/-D (delete branch)" },
+    DestructivePattern { pattern: r"git\s+worktree\s+remove", description: "git worktree remove" },
+    DestructivePattern { pattern: r"git\s+filter-branch", description: "git filter-branch (history rewrite)" },
+    DestructivePattern { pattern: r"git\s+filter-repo", description: "git filter-repo (history rewrite)" },
+    DestructivePattern { pattern: r"kubectl\s+delete", description: "kubectl delete (removes resources)" },
+    DestructivePattern { pattern: r"kubectl\s+apply\s+.*--force", description: "kubectl apply --force" },
+    DestructivePattern { pattern: r"kubectl\s+rollout\s+undo", description: "kubectl rollout undo" },
+    DestructivePattern { pattern: r"docker\s+rm\s", description: "docker rm (remove containers)" },
+    DestructivePattern { pattern: r"docker\s+rmi\s", description: "docker rmi (remove images)" },
+    DestructivePattern { pattern: r"docker\s+container\s+rm", description: "docker container rm" },
+    DestructivePattern { pattern: r"docker\s+image\s+rm", description: "docker image rm" },
+    DestructivePattern { pattern: r"docker\s+volume\s+rm", description: "docker volume rm" },
+    DestructivePattern { pattern: r"docker\s+network\s+rm", description: "docker network rm" },
+    DestructivePattern { pattern: r"docker\s+prune\s+.*-f", description: "docker prune (cleanup)" },
+    DestructivePattern { pattern: r"docker\s+system\s+prune", description: "docker system prune" },
+    DestructivePattern { pattern: r"podman\s+rm\s", description: "podman rm" },
+    DestructivePattern { pattern: r"podman\s+rmi\s", description: "podman rmi" },
+    DestructivePattern { pattern: r"npm\s+uninstall\s", description: "npm uninstall (removes packages)" },
+    DestructivePattern { pattern: r"npm\s+rm\s", description: "npm rm (remove packages)" },
+    DestructivePattern { pattern: r"yarn\s+remove\s", description: "yarn remove" },
+    DestructivePattern { pattern: r"pnpm\s+remove\s", description: "pnpm remove" },
+    DestructivePattern { pattern: r"pip\s+uninstall\s", description: "pip uninstall (removes packages)" },
+    DestructivePattern { pattern: r"pip3\s+uninstall\s", description: "pip uninstall" },
+    DestructivePattern { pattern: r"gem\s+uninstall\s", description: "gem uninstall" },
+    DestructivePattern { pattern: r"cargo\s+clean\s", description: "cargo clean (removes build artifacts)" },
+    DestructivePattern { pattern: r"cargo\s+remove\s", description: "cargo remove (removes dependencies)" },
+    DestructivePattern { pattern: r"terraform\s+destroy\s", description: "terraform destroy (destroys infrastructure)" },
+    DestructivePattern { pattern: r"terraform\s+apply\s+.*-destroy", description: "terraform apply -destroy" },
+    DestructivePattern { pattern: r"terraform\s+state\s+rm", description: "terraform state rm (removes from state)" },
+    DestructivePattern { pattern: r"vagrant\s+destroy", description: "vagrant destroy (removes VMs)" },
+    DestructivePattern { pattern: r"vagrant\s+halt", description: "vagrant halt (stops VMs)" },
+    DestructivePattern { pattern: r"DROP\s+TABLE", description: "DROP TABLE (database)" },
+    DestructivePattern { pattern: r"DROP\s+DATABASE", description: "DROP DATABASE (database)" },
+    DestructivePattern { pattern: r"TRUNCATE\s+TABLE", description: "TRUNCATE TABLE (database)" },
+    DestructivePattern { pattern: r"DELETE\s+FROM", description: "DELETE FROM (database operation)" },
+    DestructivePattern { pattern: r"shutdown\s", description: "shutdown (system shutdown)" },
+    DestructivePattern { pattern: r"reboot\s", description: "reboot (system restart)" },
+    DestructivePattern { pattern: r"poweroff\s", description: "poweroff (system power off)" },
+    DestructivePattern { pattern: r"init\s+0", description: "init 0 (halt system)" },
+    DestructivePattern { pattern: r"init\s+6", description: "init 6 (reboot system)" },
+    DestructivePattern { pattern: r"systemctl\s+poweroff", description: "systemctl poweroff" },
+    DestructivePattern { pattern: r"systemctl\s+reboot", description: "systemctl reboot" },
+    DestructivePattern { pattern: r"systemctl\s+kill\s", description: "systemctl kill" },
+    DestructivePattern { pattern: r"service\s+.*\s+stop", description: "service stop" },
+    DestructivePattern { pattern: r"killall\s", description: "killall (kill processes)" },
+    DestructivePattern { pattern: r"pkill\s", description: "pkill (kill by name)" },
+    DestructivePattern { pattern: r"kill\s+-9\s", description: "kill -9 (force kill)" },
+    DestructivePattern { pattern: r">\s*/dev/", description: "redirect to device (dangerous)" },
+    DestructivePattern { pattern: r">\s*/proc/", description: "redirect to proc (dangerous)" },
+    DestructivePattern { pattern: r">\s*/sys/", description: "redirect to sys (dangerous)" },
+    DestructivePattern { pattern: r"rm\s+-[rf]{1,2}\s", description: "rm -rf (recursive force delete)" },
+    DestructivePattern { pattern: r"rm\s+--recursive\s", description: "rm --recursive" },
+    DestructivePattern { pattern: r"del\s+/[fqs]\s", description: "del with force flag (Windows)" },
+    DestructivePattern { pattern: r"del\s+/s", description: "del /s (recursive delete Windows)" },
+    DestructivePattern { pattern: r"rmrf\s", description: "rmrf (recursive delete)" },
+    DestructivePattern { pattern: r"rm\s+-rf\s+/\s", description: "rm -rf / (delete all)" },
+    DestructivePattern { pattern: r"chmod\s+777", description: "chmod 777 (world writable)" },
+    DestructivePattern { pattern: r"chmod\s+-R\s+777", description: "chmod -R 777 (recursive world writable)" },
+    DestructivePattern { pattern: r"chown\s+.*\s+-R\s+", description: "chown recursive" },
+];
+
+/// Check if a command is destructive. Returns (is_destructive, reason).
+fn is_destructive_command(cmd: &str) -> (bool, String) {
+    let stripped = strip_safe_wrappers(cmd);
+    let lower = stripped.to_lowercase();
+    let parts = split_compound_command(&stripped);
+    let primary = parts.first().map(|s| s.to_lowercase()).unwrap_or(lower);
+    for dp in DESTRUCTIVE_PATTERNS {
+        if let Ok(re) = Regex::new(dp.pattern) {
+            if re.is_match(&primary) { return (true, dp.description.to_string()); }
+        }
+    }
+    (false, String::new())
+}
+
+/// Extract the targets (non-flag arguments) from a deletion command.
+fn extract_deletion_targets(cmd: &str) -> Vec<String> {
+    let stripped = strip_safe_wrappers(cmd);
+    let parts: Vec<&str> = stripped.split_whitespace().collect();
+    if parts.is_empty() { return Vec::new(); }
+    let mut start_idx = 1;
+    for part in parts.iter().skip(1) {
+        if part.starts_with('-') {
+            let flag_content = if part.starts_with("--") { &part[2..] } else { &part[1..] };
+            if flag_content.is_empty() { start_idx += 1; continue; }
+            let single_flags = ["-r", "-R", "-f", "--recursive", "--force", "--no-preserve-root", "-d", "-v", "--verbose", "-i", "--interactive", "-I", "--one-file-system"];
+            if single_flags.contains(part) || flag_content.chars().all(|c| "rfRfvdviI".contains(c)) {
+                start_idx += 1;
+            } else { start_idx += 1; }
+        } else if *part == "--" { start_idx += 1; break; } else { break; }
+    }
+    let mut targets = Vec::new();
+    for part in parts.iter().skip(start_idx) {
+        if !part.starts_with('-') && *part != "--" { targets.push(part.to_string()); }
+    }
+    targets
+}
+
+/// Paths that are considered dangerous to delete.
+const DANGEROUS_PATHS: &[&str] = &[
+    "/", "/.", "~", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+    "/var", "/home", "/root", "/opt", "/boot", "/sys", "/proc", "/dev",
+    "/run", "/tmp", "/var/tmp", "/var/log", "/var/cache", "/srv", "/mnt",
+    "/media", "/lost+found", "/snap",
+    "C:\\", "C:/", "D:\\", "D:/", "C:\\Windows", "C:\\Program Files",
+    "C:\\Program Files (x86)", "C:\\ProgramData", "C:\\Users",
+    "C:\\System Volume Information",
+    ".git", ".gitconfig", ".gitignore", ".gitmodules", ".github",
+    ".claude", ".clauderc", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "Makefile", "CMakeLists.txt", "build.gradle", "pom.xml",
+    "requirements.txt", "Pipfile", "pyproject.toml", "setup.py", "setup.cfg",
+    "rust-toolchain.toml", ".vscode", ".idea",
+];
+
+/// Check if a path is considered dangerous for deletion.
+fn is_dangerous_deletion_path(path: &str) -> Option<String> {
+    let normalized = path.trim();
+    if normalized.is_empty() { return None; }
+    for dangerous in DANGEROUS_PATHS {
+        if normalized.eq_ignore_ascii_case(dangerous) {
+            return Some(format!("Dangerous path '{}' would be deleted", path));
+        }
+        let with_slash = format!("{}/", dangerous);
+        if normalized.eq_ignore_ascii_case(&with_slash) {
+            return Some(format!("Dangerous path '{}' would be deleted", path));
+        }
+    }
+    if normalized.contains('*') || normalized.contains('?') {
+        if normalized.starts_with('/') || normalized.starts_with('*') {
+            return Some(format!("Glob pattern '{}' could match dangerous paths", path));
+        }
+        if normalized.starts_with('~') || normalized.starts_with("$HOME") {
+            return Some(format!("Pattern '{}' matches home directory", path));
+        }
+    }
+    if contains_path_escape(path) {
+        return Some(format!("Path '{}' contains traversal that could escape", path));
+    }
+    if normalized.len() >= 2 {
+        let first_char = normalized.chars().next().unwrap();
+        if normalized.chars().nth(1) == Some(':') && first_char.is_alphabetic() {
+            let drive_upper = normalized[..2].to_uppercase();
+            if drive_upper.starts_with('C') || drive_upper.starts_with('D') || drive_upper.starts_with('E') {
+                let rest = &normalized[2..];
+                if rest.is_empty() || rest == "\\" || rest == "/" {
+                    return Some(format!("Dangerous Windows path '{}' would be deleted", path));
+                }
+            }
+        }
+    }
+    let lower = normalized.to_lowercase();
+    if lower.contains(".git/objects") || lower.contains(".git/refs") || lower.contains("/.git/") {
+        return Some(format!("Git internal directory '{}' would be deleted", path));
+    }
+    None
+}
+
+/// Validate that deletion paths in a command are safe.
+fn validate_deletion_paths(cmd: &str) -> Option<String> {
+    let base = extract_base_command(cmd).to_lowercase();
+    let deletion_commands = ["rm", "rmdir", "unlink", "del", "erase"];
+    if !deletion_commands.iter().any(|&d| base.starts_with(d)) { return None; }
+    let targets = extract_deletion_targets(cmd);
+    for target in targets {
+        if let Some(err) = is_dangerous_deletion_path(&target) { return Some(err); }
+    }
+    None
+}
+
+/// Extract quoted regions (single, double, backtick) from a command.
+fn extract_quoted_regions(cmd: &str) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    let mut quote_start: Option<usize> = None;
+    for (i, c) in cmd.char_indices() {
+        if escaped { escaped = false; continue; }
+        match c {
+            '\\' if !in_single_quote => { escaped = true; }
+            '\'' if !in_double_quote => {
+                if in_single_quote { if let Some(start) = quote_start.take() { regions.push((start, i)); } in_single_quote = false; }
+                else { quote_start = Some(i); in_single_quote = true; }
+            }
+            '"' if !in_single_quote => {
+                if in_double_quote { if let Some(start) = quote_start.take() { regions.push((start, i)); } in_double_quote = false; }
+                else { quote_start = Some(i); in_double_quote = true; }
+            }
+            '`' => {
+                if in_single_quote || in_double_quote { continue; }
+                if let Some(start) = quote_start { regions.push((start, i)); quote_start = None; }
+                else { quote_start = Some(i); }
+            }
+            _ => {}
+        }
+    }
+    regions
+}
+
+/// Check if a byte position is within a quoted region.
+fn is_in_quoted_region(pos: usize, regions: &[(usize, usize)]) -> bool {
+    for &(start, end) in regions { if pos >= start && pos <= end { return true; } }
+    false
+}
+
+/// Detect glob patterns, bracket patterns, and brace expansion in destructive commands.
+fn detect_expansion(cmd: &str) -> Option<String> {
+    let base = extract_base_command(cmd);
+    let base_lower = base.to_lowercase();
+    let destructive_prefixes = ["rm", "del", "rmdir", "unlink", "erase", "mv", "cp", "chmod", "chown"];
+    if !destructive_prefixes.iter().any(|&p| base_lower.starts_with(p)) { return None; }
+    let quoted_regions = extract_quoted_regions(cmd);
+    for (i, c) in cmd.char_indices() {
+        if c == '*' && !is_in_quoted_region(i, &quoted_regions) {
+            return Some("Glob pattern '*' detected with destructive command (could match multiple files)".to_string());
+        }
+        if c == '?' && !is_in_quoted_region(i, &quoted_regions) {
+            return Some("Glob pattern '?' detected with destructive command".to_string());
+        }
+    }
+    for (i, c) in cmd.char_indices() {
+        if c == '[' && !is_in_quoted_region(i, &quoted_regions) {
+            let rest = &cmd[i..];
+            if let Some(end) = rest[1..].find(']') {
+                let inner = &rest[1..end + 1];
+                if inner.contains('-') || inner.chars().any(|c| c.is_ascii_alphanumeric()) {
+                    return Some(format!("Bracket pattern detected with destructive command: {}", inner));
+                }
+            }
+        }
+    }
+    for (i, c) in cmd.char_indices() {
+        if c == '{' && !is_in_quoted_region(i, &quoted_regions) {
+            let rest = &cmd[i..];
+            if rest.contains("..") || rest.contains(',') {
+                return Some("Brace expansion detected with destructive command".to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Check if an IO error is due to process exit with non-zero status.
+#[allow(dead_code)]
+fn is_exit_error(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Other
+}
+
+/// Check if a path contains directory traversal (../).
+fn contains_path_escape(path: &str) -> bool {
+    path.contains("..")
+}
+
 
 /// Background task callback: (command, working_dir) -> (task_id, output_file, error_text)
 pub type BashBgTaskCallback =
@@ -63,7 +575,7 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use `curl.exe` instead of `curl` on Windows (curl is alias to Invoke-WebRequest). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory. Supports running commands in the background with run_in_background=true."
+        "Execute a shell command. On Windows, use PowerShell syntax (`;` to separate commands, not `&&`). Use `curl.exe` instead of `curl` on Windows (curl is alias to Invoke-WebRequest). Use for running scripts, installing packages, git operations, and any shell task. Commands run in the current working directory. Supports running commands in the background with run_in_background=true. ALWAYS prefer dedicated tools for file operations. NEVER use exec for file reading when file_read exists. NEVER use exec for file editing when file_edit exists."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -80,7 +592,7 @@ impl Tool for ExecTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 120, max 600)."
+                    "description": "Timeout in seconds (default 600, max 600)."
                 },
                 "run_in_background": {
                     "type": "boolean",
@@ -92,7 +604,41 @@ impl Tool for ExecTool {
     }
 
     fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
-        let command = params.get("command")?.as_str()?.trim();
+        let command = match params.get("command").and_then(|v| v.as_str()) {
+            Some(cmd) => cmd.trim(),
+            None => return None,
+        };
+
+        // Split compound commands
+        let subcommands = split_compound_command(command);
+
+        for subcmd in &subcommands {
+            // Strip safe wrappers
+            let stripped = strip_safe_wrappers(subcmd);
+
+            // Check for command substitution
+            if let Some(reason) = detect_command_substitution(&stripped) {
+                return Some(ToolResult::error(format!("Command substitution detected: {}", reason)));
+            }
+
+            // Check for glob/brace expansion in destructive commands
+            if let Some(reason) = detect_expansion(&stripped) {
+                return Some(ToolResult::error(reason));
+            }
+
+            // Check for destructive commands
+            let (is_destructive, reason) = is_destructive_command(&stripped);
+            if is_destructive {
+                return Some(ToolResult::error(format!("Destructive command detected: {}", reason)));
+            }
+
+            // Validate deletion paths
+            if let Some(reason) = validate_deletion_paths(&stripped) {
+                return Some(ToolResult::error(reason));
+            }
+        }
+
+        // Apply existing regex patterns as additional safety net
         let lower = command.to_lowercase();
 
         // Check for dangerous patterns (cached regexes)
@@ -209,7 +755,7 @@ impl ExecTool {
         let timeout_secs = params
             .get("timeout")
             .and_then(|v| v.as_i64())
-            .unwrap_or(120)
+            .unwrap_or(600)
             .clamp(1, 600) as u64;
 
         let working_dir = params

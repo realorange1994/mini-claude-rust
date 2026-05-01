@@ -38,6 +38,7 @@ pub use list_dir::ListDirTool;
 pub use grep_tool::GrepTool;
 pub use glob_tool::GlobTool;
 pub use git_tool::GitTool;
+pub use git_tool::{find_git_root, get_branch, is_bare_repo, is_git_repo, get_git_status, has_uncommitted_changes, get_default_branch, get_current_commit_hash, is_dirty, get_git_context, get_git_context_for_prompt};
 pub use runtime_info::RuntimeInfoTool;
 pub use web_search::WebSearchTool;
 

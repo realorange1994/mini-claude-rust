@@ -760,17 +760,17 @@ impl StallDetector {
     pub fn new() -> Self {
         Self {
             last_event: RwLock::new(Instant::now()),
-            stall_timeout: RwLock::new(Duration::from_secs(90)),
-            startup_timeout: RwLock::new(Duration::from_secs(120)),
+            stall_timeout: RwLock::new(Duration::from_secs(300)),
+            startup_timeout: RwLock::new(Duration::from_secs(360)),
             stall_count: RwLock::new(0),
         }
     }
 
     /// Configure timeouts dynamically based on provider and context size.
-    /// - Local providers: very long timeouts (effectively no stall detection)
+    /// - Local providers: very long timeouts (effectively no stall detection): 300s/360s
     /// - Large contexts (>50K tokens): 240s stall, 300s startup
-    /// - Very large contexts (>100K tokens): 300s stall, 360s startup
-    /// - Default: 90s stall, 120s startup
+    /// - Very large contexts (>100K tokens): 300s stall, 600s startup
+    /// - Default (new): 300s stall, 360s startup (was 90s/120s)
     pub fn configure(&self, is_local: bool, context_tokens: usize) {
         let mut stall = self.stall_timeout.write().unwrap();
         let mut startup = self.startup_timeout.write().unwrap();
@@ -780,12 +780,12 @@ impl StallDetector {
             *startup = Duration::from_secs(600);
         } else if context_tokens > 100_000 {
             *stall = Duration::from_secs(300);
-            *startup = Duration::from_secs(360);
+            *startup = Duration::from_secs(600);
         } else if context_tokens > 50_000 {
             *stall = Duration::from_secs(240);
             *startup = Duration::from_secs(300);
         }
-        // else: keep defaults (90s / 120s)
+        // else: keep defaults (300s / 360s)
     }
 
     /// Reset timer on successful event

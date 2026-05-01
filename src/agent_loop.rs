@@ -40,7 +40,7 @@ fn build_http_client(api_key: &str) -> Option<reqwest::Client> {
         eprintln!("[WARN] Bearer token contains invalid characters for HTTP header");
     }
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(600))
         .default_headers(headers)
         .build()
         .ok()
