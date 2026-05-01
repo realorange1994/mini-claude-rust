@@ -667,16 +667,11 @@ fn spawn_background_bash(
         );
     }
 
-    // Generate task ID and output file path
-    let task_id = {
-        let id = uuid::Uuid::new_v4().to_string();
-        let hex: String = id.chars().filter(|c| *c != '-').take(8).collect();
-        format!("b{}", hex)
-    };
-    let output_file = output_dir.join(format!("{}.output", task_id));
-
-    // Create/truncate the output file with header
-    if let Err(e) = write_output_header(&output_file, &task_id, &command, &working_dir) {
+    // Create/truncate the output file with a temporary path (will be renamed after registration)
+    // First, we need to register to get the canonical task_id from TaskStore
+    // Use a placeholder for the header
+    let output_file = output_dir.join("pending.output");
+    if let Err(e) = write_output_header(&output_file, "pending", &command, &working_dir) {
         return (
             String::new(),
             String::new(),
@@ -684,14 +679,30 @@ fn spawn_background_bash(
         );
     }
 
-    // Register task in the TaskStore
+    // Register task in the TaskStore -- this generates the canonical task_id
     let output_file_str = output_file.to_string_lossy().to_string();
-    task_store.register_bash_bg_task(command.clone(), output_file_str.clone());
+    let task_id = task_store.register_bash_bg_task(command.clone(), output_file_str.clone());
+
+    // Rename the output file to use the canonical task_id
+    let final_output_file = output_dir.join(format!("{}.output", task_id));
+    let _ = std::fs::rename(&output_file, &final_output_file);
+    // Update the TaskStore entry with the correct output file path
+    let final_output_file_str = final_output_file.to_string_lossy().to_string();
+    task_store.update_output_file(&task_id, final_output_file_str.clone());
+
+    // Re-write header with correct task_id
+    if let Err(e) = write_output_header(&final_output_file, &task_id, &command, &working_dir) {
+        return (
+            String::new(),
+            String::new(),
+            format!("Error: failed to write output header: {}", e),
+        );
+    }
 
     // Spawn a dedicated background thread to run the process
     let task_store_clone = Arc::clone(task_store);
     let notification_tx_clone = notification_tx.clone();
-    let output_file_clone = output_file_str.clone();
+    let output_file_clone = final_output_file_str.clone();
     let task_id_clone = task_id.clone();
     let command_clone = command.clone();
     let working_dir_clone = working_dir.clone();
@@ -714,7 +725,7 @@ fn spawn_background_bash(
         })
         .expect("failed to spawn background task thread");
 
-    (task_id, output_file_str, String::new())
+    (task_id, final_output_file_str, String::new())
 }
 
 /// Detect shell inline (no caching -- for spawned threads).

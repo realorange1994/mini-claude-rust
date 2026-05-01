@@ -1313,6 +1313,11 @@ impl AgentLoop {
 
         let mut backoff_ms = INITIAL_BACKOFF_MS;
 
+        // Respect use_stream flag: if disabled, skip streaming entirely
+        if !self.use_stream {
+            return self.call_with_non_streaming_fallback(system_prompt, messages, tools).await;
+        }
+
         // Always try streaming first -- it's more reliable across different
         // API/proxy configurations. Non-streaming can hang on some proxies
         // that don't flush the response until the entire body is ready.
@@ -1662,8 +1667,8 @@ impl AgentLoop {
             );
         }
 
-        // Display thinking if present
-        if !thinking.is_empty() {
+        // Display thinking if present (only in streaming mode)
+        if !thinking.is_empty() && self.use_stream {
             let preview = truncate_at(thinking.lines().next().unwrap_or(""), 120);
             eprintln!("\n[THINK] {}", preview);
         }

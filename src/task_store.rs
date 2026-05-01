@@ -134,6 +134,15 @@ impl TaskStore {
         }
     }
 
+    /// Update the output file path for a task.
+    pub fn update_output_file(&self, id: &str, output_file: String) {
+        let tasks = self.tasks.lock().unwrap();
+        if let Some(task_arc) = tasks.get(id) {
+            let mut task = task_arc.lock().unwrap();
+            task.output_file = Some(output_file);
+        }
+    }
+
     /// Get a clone of the shared Arc<Mutex<TaskState>> for a task.
     pub fn get_task(&self, id: &str) -> Option<Arc<Mutex<TaskState>>> {
         let tasks = self.tasks.lock().unwrap();
