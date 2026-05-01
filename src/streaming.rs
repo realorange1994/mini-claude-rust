@@ -1208,14 +1208,15 @@ pub fn parse_anthropic_message(
                     }
                     "text" => {
                         if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            // Push text as a text chunk
-                            collect.handle(StreamChunk {
+                            let chunk = StreamChunk {
                                 chunk_type: ChunkType::Text,
                                 content: text.to_string(),
                                 id: None,
                                 name: None,
                                 usage: None,
-                            });
+                            };
+                            collect.handle(chunk.clone());
+                            term.handle(chunk);
                         }
                     }
                     "tool_use" => {
