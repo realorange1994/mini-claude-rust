@@ -84,6 +84,10 @@ fn config_custom_values() {
         reactive_compact_threshold: 5000,
         sub_agent_max_turns: 50,
         sub_agent_enabled: true,
+        auto_classifier_enabled: true,
+        auto_classifier_model: String::new(),
+        auto_classifier_max_tokens: 128,
+        auto_denial_limit: 3,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));

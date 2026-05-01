@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod agent_sub;
+pub mod auto_classifier;
 pub mod compact;
 pub mod config;
 pub mod context;
@@ -16,4 +17,5 @@ pub mod streaming;
 pub mod tools;
 pub mod task_store;
 pub mod transcript;
+pub mod transcript_builder;
 pub mod work_task;

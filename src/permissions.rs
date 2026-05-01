@@ -1,7 +1,11 @@
+use crate::auto_classifier::{AutoModeClassifier, is_auto_allowlisted};
+use crate::context::ConversationContext;
 use crate::tools::ToolResult;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Permission mode for tool execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,11 +136,29 @@ fn contains_shell_metacharacters(s: &str) -> bool {
 /// PermissionGate checks if tool execution is allowed
 pub struct PermissionGate {
     pub config: crate::config::Config,
+    classifier: Option<AutoModeClassifier>,
+    transcript_src: Option<Arc<tokio::sync::RwLock<ConversationContext>>>,
+    denial_count: AtomicUsize,
 }
 
 impl PermissionGate {
     pub fn new(config: crate::config::Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            classifier: None,
+            transcript_src: None,
+            denial_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Set the auto mode classifier.
+    pub fn set_classifier(&mut self, classifier: AutoModeClassifier) {
+        self.classifier = Some(classifier);
+    }
+
+    /// Set the transcript source for the classifier.
+    pub fn set_transcript_source(&mut self, src: Arc<tokio::sync::RwLock<ConversationContext>>) {
+        self.transcript_src = Some(src);
     }
 
     /// Check if a command is safe (read-only, no approval needed)
@@ -238,8 +260,8 @@ impl PermissionGate {
 
         match self.config.permission_mode {
             PermissionMode::Auto => {
-                // All allowed in auto mode (security check already done above)
-                None
+                // Use auto mode classifier (if available) or fall back to allow-all
+                self.check_auto_mode(tool, &params)
             }
             PermissionMode::Plan => {
                 // Only read-only tools in plan mode
@@ -299,12 +321,75 @@ impl PermissionGate {
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.config.permission_mode = mode;
     }
+
+    /// Auto mode permission check using the classifier.
+    /// Safe tools are auto-allowed. Other tools are evaluated by the LLM classifier.
+    /// After consecutive denials exceeding the limit, falls back to interactive prompt.
+    /// When classifier is nil/disabled: auto-allow (legacy behavior).
+    fn check_auto_mode(
+        &self,
+        tool: &dyn crate::tools::Tool,
+        params: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<ToolResult> {
+        let tool_name = tool.name();
+
+        // Fast path: whitelisted tools are always allowed
+        if is_auto_allowlisted(tool_name) {
+            self.denial_count.store(0, Ordering::SeqCst);
+            return None;
+        }
+
+        // If classifier is not available, fall back to legacy behavior: allow all
+        let classifier = match &self.classifier {
+            Some(c) if c.is_enabled() => c,
+            _ => return None, // No classifier configured: auto mode allows all tools (old behavior)
+        };
+
+        // Build transcript for classifier context
+        let transcript = if let Some(src) = &self.transcript_src {
+            // Try to get a read lock (non-blocking to avoid deadlocks)
+            match src.try_read() {
+                Ok(ctx) => crate::transcript_builder::build_compact_transcript(&ctx, 20),
+                Err(_) => String::new(), // Lock contention: skip transcript
+            }
+        } else {
+            String::new()
+        };
+
+        // Convert params from HashMap<String, Value> for classifier
+        let result = classifier.classify(tool_name, params, &transcript);
+
+        if !result.allow {
+            let count = self.denial_count.fetch_add(1, Ordering::SeqCst) + 1;
+            let denial_limit = self.config.auto_denial_limit;
+            // After consecutive denials, fall back to interactive prompt
+            if count >= denial_limit {
+                eprintln!(
+                    "  [auto-classifier] {} consecutive denials, falling back to manual approval",
+                    count
+                );
+                if self.ask_user(tool_name, params, None) {
+                    self.denial_count.store(0, Ordering::SeqCst);
+                    return None;
+                }
+                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+            }
+            return Some(ToolResult::error(format!("Permission denied: {}", result.reason)));
+        }
+
+        // Allowed: reset denial count
+        self.denial_count.store(0, Ordering::SeqCst);
+        None
+    }
 }
 
 impl Clone for PermissionGate {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            classifier: None, // Classifiers are not cloned (they hold HTTP clients)
+            transcript_src: self.transcript_src.clone(),
+            denial_count: AtomicUsize::new(self.denial_count.load(Ordering::SeqCst)),
         }
     }
 }

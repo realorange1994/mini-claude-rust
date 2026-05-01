@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::context::{ConversationContext, ConversationEntry, MessageContent, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
+use crate::auto_classifier::AutoModeClassifier;
 use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
@@ -178,8 +179,25 @@ impl AgentLoop {
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
-        let context = ConversationContext::new(config.clone());
-        let gate = PermissionGate::new(config.clone());
+        let mut context = Arc::new(RwLock::new(ConversationContext::new(config.clone())));
+        let mut gate = PermissionGate::new(config.clone());
+
+        // Wire auto mode classifier if enabled
+        if config.auto_classifier_enabled && config.permission_mode == crate::permissions::PermissionMode::Auto {
+            let classifier_model = if config.auto_classifier_model.is_empty() {
+                config.model.clone()
+            } else {
+                config.auto_classifier_model.clone()
+            };
+            let classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            if classifier.is_enabled() {
+                eprintln!("  [auto-classifier] enabled (model={})", classifier_model);
+            } else {
+                eprintln!("  [auto-classifier] disabled (no API key or model)");
+            }
+            gate.set_classifier(classifier);
+            gate.set_transcript_source(Arc::clone(&context));
+        }
 
         // Initialize transcript writer (matching Go's behavior)
         let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -212,7 +230,7 @@ impl AgentLoop {
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
             gate,
-            context: Arc::new(RwLock::new(context)),
+            context,
             client,
             use_stream,
             max_tool_chars: 8192,
@@ -259,7 +277,7 @@ impl AgentLoop {
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
-        let gate = PermissionGate::new(config.clone());
+        let mut gate = PermissionGate::new(config.clone());
 
         // Read transcript and rebuild context
         let transcript = Transcript::new(&transcript_path.to_path_buf());
@@ -314,6 +332,21 @@ impl AgentLoop {
             );
         }
 
+        // Wrap context in Arc<RwLock> after preflight compression
+        let context = Arc::new(RwLock::new(context));
+
+        // Wire auto mode classifier if enabled
+        if config.auto_classifier_enabled && config.permission_mode == crate::permissions::PermissionMode::Auto {
+            let classifier_model = if config.auto_classifier_model.is_empty() {
+                config.model.clone()
+            } else {
+                config.auto_classifier_model.clone()
+            };
+            let classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            gate.set_classifier(classifier);
+            gate.set_transcript_source(Arc::clone(&context));
+        }
+
         let compactor = RwLock::new(compactor);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -325,7 +358,7 @@ impl AgentLoop {
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
             gate,
-            context: Arc::new(RwLock::new(context)),
+            context,
             client,
             use_stream,
             max_tool_chars: 8192,
@@ -630,6 +663,10 @@ impl AgentLoop {
             if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok("[Interrupted by user]".to_string());
             }
+
+            // Reset streaming state for this turn; will be set to true by
+            // try_stream_once if streaming actually succeeds.
+            self.last_call_was_streaming.store(false, std::sync::atomic::Ordering::SeqCst);
 
             if !budget.consume() {
                 break;
@@ -1485,6 +1522,11 @@ impl AgentLoop {
             eprintln!("[DEBUG] Stream finish_reason={}", reason);
         }
 
+        // Mark that this call actually used streaming, so the caller (main.rs)
+        // knows the TerminalHandler already printed output to stderr and should
+        // NOT print the returned text to stdout.
+        self.last_call_was_streaming.store(true, std::sync::atomic::Ordering::SeqCst);
+
         Ok((tool_calls, text))
     }
 
@@ -2190,6 +2232,7 @@ impl AgentLoop {
         config: Config,
         registry: Registry,
         system_prompt: &str,
+        use_stream: bool,
     ) -> Result<Self> {
         let api_key = config.api_key.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
@@ -2242,7 +2285,7 @@ impl AgentLoop {
             gate,
             context: Arc::new(RwLock::new(context)),
             client,
-            use_stream: true,
+            use_stream,
             max_tool_chars: 8192,
             max_turns,
             base_url,

@@ -49,6 +49,11 @@ pub struct Config {
     // Sub-agent config
     pub sub_agent_max_turns: u32,   // default 50
     pub sub_agent_enabled: bool,    // default true
+    // Auto mode classifier settings
+    pub auto_classifier_enabled: bool,    // enable LLM classifier in auto mode (default true)
+    pub auto_classifier_model: String,    // model for classifier (default: same as main model)
+    pub auto_classifier_max_tokens: usize, // max tokens for classifier response (default 128)
+    pub auto_denial_limit: usize,         // consecutive denials before fallback (default 3)
 }
 
 impl Default for Config {
@@ -115,6 +120,10 @@ impl Default for Config {
             reactive_compact_threshold: 5000,
             sub_agent_max_turns: 50,
             sub_agent_enabled: true,
+            auto_classifier_enabled: true,
+            auto_classifier_model: String::new(),
+            auto_classifier_max_tokens: 128,
+            auto_denial_limit: 3,
         }
     }
 }

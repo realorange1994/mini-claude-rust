@@ -299,6 +299,7 @@ pub fn spawn_sub_agent_sync(
     disallowed_tools: &[String],
     inherit_context: bool,
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
+    parent_use_stream: bool,
 ) -> (String, String, String, usize, u64) {
     let start = std::time::Instant::now();
 
@@ -352,7 +353,7 @@ pub fn spawn_sub_agent_sync(
         };
 
         std::thread::spawn(move || {
-            match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned) {
+            match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, parent_use_stream) {
                 Ok(child_loop) => {
                     // Apply fork mode: inject parent context entries into child
                     if !parent_entries.is_empty() {
@@ -408,7 +409,7 @@ pub fn spawn_sub_agent_sync(
     }
 
     // Synchronous path: run the child agent loop
-    match AgentLoop::new_for_sub_agent(child_config, child_registry, &child_sys_prompt) {
+    match AgentLoop::new_for_sub_agent(child_config, child_registry, &child_sys_prompt, parent_use_stream) {
         Ok(child_loop) => {
             // Apply fork mode: clone parent context entries into child
             if inherit_context {
