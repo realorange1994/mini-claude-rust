@@ -450,7 +450,7 @@ fn format_action_for_classifier(
 }
 
 /// Extract text content from an Anthropic API response.
-/// Handles both the tool_use and text block formats.
+/// Handles text, tool_use, and thinking block formats.
 fn extract_text_from_response(text: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
         if let Some(content) = parsed.get("content").and_then(|c| c.as_array()) {
@@ -460,6 +460,12 @@ fn extract_text_from_response(text: &str) -> String {
                     match block_type {
                         "text" => {
                             if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                all_text.push_str(t);
+                            }
+                        }
+                        "thinking" => {
+                            // MiniMax returns reasoning in thinking blocks
+                            if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
                                 all_text.push_str(t);
                             }
                         }
