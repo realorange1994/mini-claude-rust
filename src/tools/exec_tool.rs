@@ -327,21 +327,43 @@ const DESTRUCTIVE_PATTERNS: &[DestructivePattern] = &[
     DestructivePattern { pattern: r"del\s+/[fqs]\s", description: "del with force flag (Windows)" },
     DestructivePattern { pattern: r"del\s+/s", description: "del /s (recursive delete Windows)" },
     DestructivePattern { pattern: r"rmrf\s", description: "rmrf (recursive delete)" },
-    DestructivePattern { pattern: r"rm\s+-rf\s+/\s", description: "rm -rf / (delete all)" },
+    DestructivePattern { pattern: r"rm\s+-rf\s+/", description: "rm -rf / (delete all)" },
     DestructivePattern { pattern: r"chmod\s+777", description: "chmod 777 (world writable)" },
     DestructivePattern { pattern: r"chmod\s+-R\s+777", description: "chmod -R 777 (recursive world writable)" },
     DestructivePattern { pattern: r"chown\s+.*\s+-R\s+", description: "chown recursive" },
+    // PowerShell destructive cmdlets
+    DestructivePattern { pattern: r"remove-item\s", description: "Remove-Item (PowerShell delete)" },
+    DestructivePattern { pattern: r"\bri\s+", description: "ri alias (PowerShell Remove-Item)" },
+    DestructivePattern { pattern: r"remove-itemproperty\s", description: "Remove-ItemProperty (PowerShell)" },
+    // Docker destructive operations
+    DestructivePattern { pattern: r"docker\s+system\s+prune", description: "docker system prune (remove all unused data)" },
+    DestructivePattern { pattern: r"docker\s+(container|image|volume|network)\s+prune", description: "docker prune (remove resources)" },
+    DestructivePattern { pattern: r"docker\s+rm\s", description: "docker rm (remove container)" },
+    DestructivePattern { pattern: r"docker\s+rmi\s", description: "docker rmi (remove image)" },
+    DestructivePattern { pattern: r"docker\s+volume\s+rm\s", description: "docker volume rm" },
+    // Git destructive operations via exec (bypasses git_tool security)
+    DestructivePattern { pattern: r"git\s+push\s+.*--force", description: "git push --force (force push)" },
+    DestructivePattern { pattern: r"git\s+push\s+-f\b", description: "git push -f (force push)" },
+    DestructivePattern { pattern: r"git\s+clean\s+-[fd]", description: "git clean -fd (remove untracked files)" },
+    DestructivePattern { pattern: r"git\s+reset\s+--hard", description: "git reset --hard (discard changes)" },
+    DestructivePattern { pattern: r"git\s+checkout\s+--force", description: "git checkout --force" },
+    DestructivePattern { pattern: r"git\s+rebase\s+--interactive", description: "git rebase --interactive (rewrites history)" },
+    DestructivePattern { pattern: r"git\s+filter-branch", description: "git filter-branch (rewrites history)" },
+    DestructivePattern { pattern: r"git\s+reflog\s+expire", description: "git reflog expire (lose recovery)" },
 ];
 
 /// Check if a command is destructive. Returns (is_destructive, reason).
 fn is_destructive_command(cmd: &str) -> (bool, String) {
     let stripped = strip_safe_wrappers(cmd);
-    let lower = stripped.to_lowercase();
     let parts = split_compound_command(&stripped);
-    let primary = parts.first().map(|s| s.to_lowercase()).unwrap_or(lower);
-    for dp in DESTRUCTIVE_PATTERNS {
-        if let Ok(re) = Regex::new(dp.pattern) {
-            if re.is_match(&primary) { return (true, dp.description.to_string()); }
+    // Check ALL subcommands, not just the first one — a safe first command
+    // followed by a destructive one (e.g. "git status && rm -rf /") must be caught.
+    for part in &parts {
+        let part_lower = part.to_lowercase();
+        for dp in DESTRUCTIVE_PATTERNS {
+            if let Ok(re) = Regex::new(dp.pattern) {
+                if re.is_match(&part_lower) { return (true, dp.description.to_string()); }
+            }
         }
     }
     (false, String::new())
@@ -433,7 +455,7 @@ fn is_dangerous_deletion_path(path: &str) -> Option<String> {
 /// Validate that deletion paths in a command are safe.
 fn validate_deletion_paths(cmd: &str) -> Option<String> {
     let base = extract_base_command(cmd).to_lowercase();
-    let deletion_commands = ["rm", "rmdir", "unlink", "del", "erase"];
+    let deletion_commands = ["rm", "rmdir", "unlink", "del", "erase", "remove-item", "ri", "rd"];
     if !deletion_commands.iter().any(|&d| base.starts_with(d)) { return None; }
     let targets = extract_deletion_targets(cmd);
     for target in targets {
@@ -655,6 +677,16 @@ impl Tool for ExecTool {
                 r"\b(shutdown|reboot|poweroff)\b",
                 r":\(\)\s*\{.*\};\s*:",
                 r"&\S*&\S*&",
+                // PowerShell destructive cmdlets
+                r"\bremov(?:e|ed)-item\b",
+                r"\bremov(?:e|ed)-itemproperty\b",
+                r"\bdocker\s+system\s+prune\b",
+                r"\bdocker\s+\S+\s+prune\b",
+                // Git destructive via exec
+                r"\bgit\s+push\s+.*--force\b",
+                r"\bgit\s+push\s+-f\b",
+                r"\bgit\s+clean\s+-[fd]",
+                r"\bgit\s+reset\s+--hard\b",
             ].iter()
             .map(|p| Regex::new(p).unwrap())
             .collect()
@@ -675,6 +707,10 @@ impl Tool for ExecTool {
                 r"rmdir.*\.git",
                 r"del.*\.git",
                 r"rmrf.*\.git",
+                r"remove-item.*\.git",
+                r"\bri\s+.*\.git",
+                r"rd\s+/s.*\.git",
+                r"git\s+clean\s+-[fd].*\.git",
             ].iter()
             .map(|p| Regex::new(p).unwrap())
             .collect()
@@ -694,6 +730,11 @@ impl Tool for ExecTool {
                 r"rm\s+-rf\s+/",
                 r"rm\s+-rf\s+C:\\Users",
                 r"del\s+/[fq]\s+\w+\\.*",
+                r"remove-item.*~",
+                r"remove-item.*C:\\Users",
+                r"remove-item.*/home",
+                r"\bri\s+.*~",
+                r"\bri\s+.*C:\\Users",
             ].iter()
             .map(|p| Regex::new(p).unwrap())
             .collect()
