@@ -204,6 +204,9 @@ fn main() -> Result<()> {
         tools::register_agent_tool(&registry, spawn_func);
     }
 
+    // Finalize: populate ToolSearchTool's shared tools list with all registered tools
+    registry.finalize_tool_search();
+
     // Handle --resume flag
     let resume_path = args.resume.as_ref().map(|s| find_transcript(s)).flatten();
 
@@ -215,6 +218,7 @@ fn main() -> Result<()> {
         tools::register_memory_tools(&resume_registry, &session_memory_arc);
         tools::register_task_tools(&resume_registry, &work_task_store);
         tools::register_bash_task_tools(&resume_registry, task_store);
+        resume_registry.finalize_tool_search();
 
         match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, use_stream, &transcript_path, true) {
             Ok(agent) => {
@@ -462,6 +466,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                             tools::register_memory_tools(&registry, sm);
                         }
                         tools::register_task_tools(&registry, &work_task_store);
+                        registry.finalize_tool_search();
 
                         match agent_loop::AgentLoop::from_transcript(
                             agent.config.clone(),

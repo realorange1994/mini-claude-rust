@@ -3,46 +3,51 @@
 //! Enables deferred tool loading: instead of putting ALL tools in the system prompt,
 //! only core tools are shown. The agent can discover additional tools by searching.
 
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use serde_json::Value;
-use super::{Tool, ToolResult, Registry};
+use std::collections::HashMap;
+use super::{Tool, ToolResult};
+
+/// Callback type that returns a list of all available tools.
+/// This avoids the circular problem of needing an Arc<Registry> before
+/// all tools are registered — the closure is created once, then the
+/// tool just calls it whenever it needs the current tool list.
+type ToolsCallback = Arc<dyn Fn() -> Vec<Arc<dyn Tool>> + Send + Sync>;
 
 pub struct ToolSearchTool {
-    /// Reference to the tool registry for searching (set via set_registry after registration)
-    registry: Arc<RwLock<Option<Arc<Registry>>>>,
+    get_tools: ToolsCallback,
 }
 
 impl ToolSearchTool {
-    pub fn new() -> Self {
-        Self {
-            registry: Arc::new(RwLock::new(None)),
-        }
+    pub fn new(callback: ToolsCallback) -> Self {
+        Self { get_tools: callback }
     }
 
-    /// Set the registry reference after the full registry is populated.
-    /// Call this after all other tools have been registered.
-    pub fn set_registry(&self, registry: Arc<Registry>) {
-        let mut guard = self.registry.write().unwrap();
-        *guard = Some(registry);
-    }
-
-    fn get_registry(&self) -> Option<Arc<Registry>> {
-        let guard = self.registry.read().unwrap();
-        guard.clone()
+    /// Create a ToolSearchTool backed by a shared tools list that can be
+    /// updated after registration. Returns (tool, list_writer).
+    /// The list_writer should be populated with `Arc<dyn Tool>` for all
+    /// tools after registration is complete.
+    pub fn with_shared_tools() -> (Self, Arc<RwLock<Vec<Arc<dyn Tool>>>>) {
+        let tools_list: Arc<RwLock<Vec<Arc<dyn Tool>>>> =
+            Arc::new(RwLock::new(Vec::new()));
+        let tools_ref = Arc::clone(&tools_list);
+        let callback: ToolsCallback = Arc::new(move || {
+            tools_ref.read().unwrap().clone()
+        });
+        (Self { get_tools: callback }, tools_list)
     }
 }
 
 impl Default for ToolSearchTool {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(|| Vec::new()))
     }
 }
 
 impl Clone for ToolSearchTool {
     fn clone(&self) -> Self {
         Self {
-            registry: self.registry.clone(),
+            get_tools: self.get_tools.clone(),
         }
     }
 }
@@ -81,19 +86,14 @@ impl Tool for ToolSearchTool {
             }
         };
 
-        let registry = match self.get_registry() {
-            Some(r) => r,
-            None => {
-                return ToolResult::error("Error: tool registry not available".to_string());
-            }
-        };
+        let tools = (self.get_tools)();
 
         let output = if query.starts_with("select:") {
-            self.handle_select(query, &registry)
+            Self::handle_select(query, &tools)
         } else if query.starts_with("+") {
-            self.handle_prefix(query, &registry)
+            Self::handle_prefix(query, &tools)
         } else {
-            self.handle_keyword(query, &registry)
+            Self::handle_keyword(query, &tools)
         };
 
         ToolResult::ok(output)
@@ -102,7 +102,7 @@ impl Tool for ToolSearchTool {
 
 impl ToolSearchTool {
     /// Handle select:query - return full definitions for named tools
-    fn handle_select(&self, query: &str, registry: &Registry) -> String {
+    fn handle_select(query: &str, tools: &[Arc<dyn Tool>]) -> String {
         let names = query.strip_prefix("select:").unwrap_or("");
         let mut output = String::new();
 
@@ -112,8 +112,9 @@ impl ToolSearchTool {
                 continue;
             }
 
-            if let Some(tool) = registry.get(name) {
-                output.push_str(&format_tool_definition(&*tool));
+            let found = tools.iter().find(|t| t.name() == name);
+            if let Some(tool) = found {
+                output.push_str(&format_tool_definition(&**tool));
             } else {
                 output.push_str(&format!("### {}\nTool not found.\n\n", name));
             }
@@ -127,7 +128,7 @@ impl ToolSearchTool {
     }
 
     /// Handle +prefix query - prefix-matched search
-    fn handle_prefix(&self, query: &str, registry: &Registry) -> String {
+    fn handle_prefix(query: &str, tools: &[Arc<dyn Tool>]) -> String {
         let prefix = query.strip_prefix('+').unwrap_or("").trim();
 
         if prefix.is_empty() {
@@ -137,9 +138,9 @@ impl ToolSearchTool {
         let mut output = String::new();
         let mut found = false;
 
-        for tool in registry.all_tools() {
+        for tool in tools {
             if tool.name().to_lowercase().starts_with(&prefix.to_lowercase()) {
-                output.push_str(&format_tool_definition(&*tool));
+                output.push_str(&format_tool_definition(&**tool));
                 found = true;
             }
         }
@@ -152,7 +153,7 @@ impl ToolSearchTool {
     }
 
     /// Handle keyword query - scored relevance search
-    fn handle_keyword(&self, query: &str, registry: &Registry) -> String {
+    fn handle_keyword(query: &str, tools: &[Arc<dyn Tool>]) -> String {
         let keywords: Vec<&str> = query.split_whitespace().collect();
 
         if keywords.is_empty() {
@@ -161,7 +162,7 @@ impl ToolSearchTool {
 
         let mut scored: Vec<(i32, Arc<dyn Tool>)> = Vec::new();
 
-        for tool in registry.all_tools() {
+        for tool in tools {
             let mut score = 0i32;
 
             for keyword in &keywords {
@@ -179,7 +180,7 @@ impl ToolSearchTool {
             }
 
             if score > 0 {
-                scored.push((score, tool));
+                scored.push((score, tool.clone()));
             }
         }
 
@@ -232,13 +233,18 @@ fn extract_parameters(schema: &serde_json::Map<String, Value>) -> String {
 mod tests {
     use super::*;
 
-    fn create_test_registry() -> Registry {
-        let registry = Registry::new();
-        registry.register(RuntimeInfoTool);
-        registry.register(TestFileReadTool);
-        registry.register(TestFileWriteTool);
-        registry.register(WebSearchTool);
-        registry
+    fn make_test_tools() -> Vec<Arc<dyn Tool>> {
+        vec![
+            Arc::new(RuntimeInfoTool) as Arc<dyn Tool>,
+            Arc::new(TestFileReadTool) as Arc<dyn Tool>,
+            Arc::new(TestFileWriteTool) as Arc<dyn Tool>,
+            Arc::new(WebSearchTool) as Arc<dyn Tool>,
+        ]
+    }
+
+    fn make_test_tool() -> ToolSearchTool {
+        let tools = make_test_tools();
+        ToolSearchTool::new(Arc::new(move || tools.clone()))
     }
 
     // Minimal test tools
@@ -302,9 +308,7 @@ mod tests {
 
     #[test]
     fn test_select_specific_tool() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "select:runtime_info"
@@ -320,9 +324,7 @@ mod tests {
 
     #[test]
     fn test_select_multiple_tools() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "select:runtime_info,web_search"
@@ -337,9 +339,7 @@ mod tests {
 
     #[test]
     fn test_select_not_found() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "select:nonexistent_tool"
@@ -353,9 +353,7 @@ mod tests {
 
     #[test]
     fn test_prefix_search() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "+test"
@@ -371,9 +369,7 @@ mod tests {
 
     #[test]
     fn test_prefix_search_case_insensitive() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "+WEB"
@@ -387,9 +383,7 @@ mod tests {
 
     #[test]
     fn test_prefix_not_found() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "+xyz123"
@@ -403,9 +397,7 @@ mod tests {
 
     #[test]
     fn test_keyword_search_by_name() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "runtime"
@@ -419,9 +411,7 @@ mod tests {
 
     #[test]
     fn test_keyword_search_by_description() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "filesystem"
@@ -435,9 +425,7 @@ mod tests {
 
     #[test]
     fn test_keyword_search_multiple_terms() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "file read"
@@ -456,9 +444,7 @@ mod tests {
 
     #[test]
     fn test_keyword_search_limit_10() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params = serde_json::json!({
             "query": "test"
@@ -496,9 +482,7 @@ mod tests {
 
     #[test]
     fn test_missing_query_param() {
-        let registry = create_test_registry();
-        let tool = ToolSearchTool::new();
-        tool.set_registry(Arc::new(registry));
+        let tool = make_test_tool();
 
         let params: HashMap<String, Value> = HashMap::new();
         let result = tool.execute(params);
@@ -506,9 +490,8 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_not_available() {
-        let tool = ToolSearchTool::new();
-        // Don't set registry
+    fn test_default_callback_returns_empty() {
+        let tool = ToolSearchTool::default();
 
         let params = serde_json::json!({
             "query": "runtime"
@@ -517,6 +500,13 @@ mod tests {
             .collect();
 
         let result = tool.execute(params);
-        assert!(result.output.contains("registry not available"));
+        assert!(result.output.contains("No tools found"));
+    }
+
+    #[test]
+    fn test_clone() {
+        let tool = make_test_tool();
+        let cloned = tool.clone();
+        assert_eq!(cloned.name(), "tool_search");
     }
 }

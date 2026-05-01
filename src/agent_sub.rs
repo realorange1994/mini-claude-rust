@@ -138,6 +138,8 @@ pub fn build_child_registry(
         child_registry.register_tool_from_arc(tool);
     }
 
+    // Populate ToolSearchTool's shared list with the filtered tools
+    child_registry.finalize_tool_search();
     child_registry
 }
 

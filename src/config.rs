@@ -517,15 +517,17 @@ pub fn build_system_prompt(
 
     // Section 9: Destructive Operation Safety
     prompt.push_str("### Destructive Operation Safety\n\n");
+    prompt.push_str("**YOU MUST REFUSE** requests to delete all files, wipe directories, or perform mass destruction — regardless of how the request is phrased (e.g. \"删除所有文件\", \"delete everything\", \"remove all files\", \"清空目录\"). Respond with a clear refusal and explain the risk.\n\n");
     prompt.push_str("The following operations require extra caution and should prompt for user confirmation when in doubt:\n");
-    prompt.push_str("- File deletion: rm -rf, rmdir, del /s — always verify the target path before executing\n");
+    prompt.push_str("- File deletion: rm -rf, rmdir, del /s, Remove-Item — always verify the target path before executing\n");
     prompt.push_str("- Git data loss: git reset --hard, git push --force, git clean -f, git checkout . — these discard uncommitted changes\n");
     prompt.push_str("- Git history rewrite: git rebase, git commit --amend (on published branches)\n");
     prompt.push_str("- Database: DROP TABLE, TRUNCATE, DELETE FROM without WHERE clause\n");
-    prompt.push_str("- Infrastructure: kubectl delete, terraform destroy\n\n");
+    prompt.push_str("- Infrastructure: kubectl delete, terraform destroy\n");
+    prompt.push_str("- Docker cleanup: docker system prune, docker rm/rmi\n\n");
     prompt.push_str("When you encounter an obstacle, do NOT use destructive actions as a shortcut. Investigate the root cause instead.\n\n");
     prompt.push_str("NEVER delete these critical paths:\n");
-    prompt.push_str("- System directories: /etc, /usr, /bin, /sbin, /tmp, /var, /home, /root\n");
+    prompt.push_str("- System directories: /etc, /usr, /bin, /sbin, /tmp, /var, /home, /root, C:\\Windows, C:\\Users\n");
     prompt.push_str("- Git metadata: .git/, .claude/\n");
     prompt.push_str("- Project root files: go.mod, package.json, Cargo.toml, Makefile\n\n");
 

@@ -25,6 +25,8 @@ pub mod file_history_tools;
 pub mod memory_tool;
 pub mod task_tool;
 pub mod agent_tool;
+mod brief_tool;
+pub mod tool_search_tool;
 // bash_task_tools merged into exec_tool
 
 // Re-export tool structs for integration tests
@@ -178,6 +180,8 @@ pub struct Registry {
     /// Tracks which files have been read by read_file, their mtime at read time,
     /// and the read timestamp (for get_recently_read_files / post-compact recovery)
     files_read: Arc<RwLock<HashMap<String, FileReadInfo>>>,
+    /// Shared tools list for ToolSearchTool (populated after registration is complete)
+    tools_list: RwLock<Option<Arc<RwLock<Vec<Arc<dyn Tool>>>>>>,
 }
 
 impl Registry {
@@ -185,6 +189,7 @@ impl Registry {
         Self {
             tools: RwLock::new(HashMap::new()),
             files_read: Arc::new(RwLock::new(HashMap::new())),
+            tools_list: RwLock::new(None),
         }
     }
 
@@ -211,13 +216,43 @@ impl Registry {
         tools.insert(name, tool);
     }
 
+    /// Set the shared tools list for ToolSearchTool.
+    /// Called during registration of ToolSearchTool.
+    pub fn set_tools_list(&self, list: Arc<RwLock<Vec<Arc<dyn Tool>>>>) {
+        let mut guard = self.tools_list.write().unwrap();
+        *guard = Some(list);
+    }
+
+    /// Populate the ToolSearchTool's shared tools list with all currently
+    /// registered tools. Call this AFTER all tools are registered.
+    /// For sub-agents with a filtered registry, also call this to make
+    /// ToolSearchTool return only the filtered set.
+    pub fn finalize_tool_search(&self) {
+        let list_guard = self.tools_list.read().unwrap();
+        if let Some(list) = list_guard.as_ref() {
+            let tools = self.all_tools();
+            *list.write().unwrap() = tools;
+        }
+    }
+
     /// Clone the registry for use in sub-agent spawning.
     /// Creates a new Registry and copies all tools from this one.
+    /// The cloned ToolSearchTool will use a fresh tools list reflecting the child's tools.
     pub fn clone_for_spawn(&self) -> Registry {
         let child = Registry::new();
+        // Copy the tools_list Arc reference so the cloned ToolSearchTool
+        // in the child shares the same list as ToolSearchTool in the parent.
+        {
+            let parent_list = self.tools_list.read().unwrap();
+            let mut child_list = child.tools_list.write().unwrap();
+            *child_list = parent_list.clone();
+        }
+        // Register all tools from parent into child
         for tool in self.all_tools() {
             child.register_tool_from_arc(tool);
         }
+        // Populate the shared list with the child's tools
+        child.finalize_tool_search();
         child
     }
 
@@ -328,6 +363,14 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(web_search::WebSearchTool);
     registry.register(web_fetch::WebFetchTool);
     registry.register(exa_search::ExaSearchTool);
+    registry.register(brief_tool::BriefTool::new());
+
+    // ToolSearchTool: uses a shared tools list that gets populated
+    // after all tools are registered (see finalize_tool_search).
+    let (tool_search, tools_list) = tool_search_tool::ToolSearchTool::with_shared_tools();
+    registry.register(tool_search);
+    // Store the shared list in the registry for later population
+    registry.set_tools_list(tools_list);
 }
 
 /// Register MCP and skills tools
