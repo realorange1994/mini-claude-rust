@@ -957,11 +957,19 @@ impl AgentLoop {
                                         let registry = registry_clone.blocking_read();
 
                                         // Path traversal protection: file tools must stay within project directory
-        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir"];
+        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir", "glob", "grep"];
         if path_tools.contains(&tool_name.as_str()) {
             if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                 if !path.is_empty() {
                     if let Err(e) = crate::tools::is_path_allowed(path) {
+                        return ToolResult::error(e);
+                    }
+                }
+            }
+            // Check "directory" parameter for glob tool
+            if let Some(dir) = params.get("directory").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    if let Err(e) = crate::tools::is_path_allowed(dir) {
                         return ToolResult::error(e);
                     }
                 }
@@ -1789,7 +1797,7 @@ impl AgentLoop {
         let tool = registry.get(name).ok_or_else(|| anyhow!("Tool not found: {}", name))?;
 
         // Path traversal protection: file tools must stay within project directory
-        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir"];
+        let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir", "glob", "grep"];
         if path_tools.contains(&name) {
             if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                 if !path.is_empty() {
