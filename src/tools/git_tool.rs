@@ -191,42 +191,42 @@ pub fn get_git_context_for_prompt() -> String {
 // ---------------------------------------------------------------------------
 
 /// Returns (true, reason) if the given git operation with flags is dangerous.
-fn is_dangerous_git_operation(operation: &str, flags: &[String]) -> (bool, String) {
+fn is_dangerous_git_operation(operation: &str, flags: &[String]) -> Option<String> {
     match operation {
         "push" => {
             if flags.iter().any(|f| f == "--force" || f == "-f" || f == "--force-with-lease") {
-                return (true, "Force push detected".to_string());
+                return Some("Force push is not allowed: it can overwrite remote history and cause data loss".to_string());
             }
-            (false, String::new())
         }
         "reset" => {
-            if flags.iter().any(|f| f == "--hard") {
-                return (true, "git reset --hard will discard uncommitted changes".to_string());
+            if flags.iter().any(|f| f == "--hard" || f == "--merge") {
+                return Some(format!("git reset {} is not allowed: it discards uncommitted changes permanently", flags.iter().find(|f| *f == "--hard" || *f == "--merge").unwrap()));
             }
-            (false, String::new())
         }
         "clean" => {
-            let has_force = flags.iter().any(|f| f == "-f" || f == "--force");
-            let has_recursive = flags.iter().any(|f| f == "-d" || f == "-fd" || f == "-xdf" || f.contains('d'));
-            if has_force && has_recursive {
-                return (true, "git clean -fd will delete untracked files and directories".to_string());
+            // Block any clean with force/delete flags
+            if flags.iter().any(|f| f == "-f" || f == "-d" || f == "-x" || f == "-df" || f == "-xdf" || f == "-fd") {
+                return Some("git clean with force/delete flags is not allowed: it permanently removes untracked files".to_string());
             }
-            (false, String::new())
+        }
+        "checkout" => {
+            if flags.iter().any(|f| f == "--force" || f == "-f") {
+                return Some("git checkout --force is not allowed: it discards local changes".to_string());
+            }
         }
         "commit" => {
             if flags.iter().any(|f| f == "--amend") {
-                return (true, "Commit --amend rewrites history".to_string());
+                return Some("git commit --amend is not allowed: it rewrites git history".to_string());
             }
-            (false, String::new())
         }
         "rebase" => {
             if flags.iter().any(|f| f == "--interactive" || f == "-i") {
-                return (true, "Interactive rebase rewrites history".to_string());
+                return Some("Interactive rebase is not allowed: it rewrites git history".to_string());
             }
-            (false, String::new())
         }
-        _ => (false, String::new()),
+        _ => {}
     }
+    None
 }
 
 /// Validate that all flags are allowed for the given operation.
@@ -236,17 +236,17 @@ fn validate_git_flags(operation: &str, flags: &[String]) -> Option<String> {
         "status" => vec![],
         "diff" => vec!["--cached", "--staged", "--stat", "--name-only", "--name-status", "--stat-width"],
         "log" => vec!["--oneline", "--graph", "--all", "--decorate", "--simplify-by-decoration"],
-        "push" => vec!["--force", "-f", "--force-with-lease", "--set-upstream", "-u", "--dry-run", "--verbose"],
+        "push" => vec!["--set-upstream", "-u", "--dry-run", "--verbose"],
         "pull" => vec!["--rebase", "--ff-only", "--no-ff", "--squash", "--verbose"],
         "commit" => vec!["--amend", "--no-edit", "--allow-empty", "--signoff", "-a"],
         "branch" => vec!["-d", "-D", "-m", "-M", "-a", "-r", "--list", "-v", "--merged", "--no-merged"],
-        "checkout" => vec!["-b", "-B", "--force", "-f", "--detach"],
+        "checkout" => vec!["-b", "-B", "--detach"],
         "merge" => vec!["--no-ff", "--squash", "--abort", "--continue", "--no-commit"],
-        "rebase" => vec!["--interactive", "-i", "--continue", "--abort", "--skip", "--hard", "--soft", "--mixed"],
+        "rebase" => vec!["--interactive", "-i", "--continue", "--abort", "--skip"],
         "stash" => vec!["-u", "--include-untracked", "--all", "--keep-index"],
-        "clean" => vec!["-f", "-d", "-x", "-df", "-xdf", "--dry-run"],
-        "reset" => vec!["--soft", "--mixed", "--hard", "--merge", "--keep"],
-        "tag" => vec!["-d", "-f", "-a", "-m", "-s", "-l", "--list", "--sort"],
+        "clean" => vec!["--dry-run"],
+        "reset" => vec!["--soft", "--mixed", "--keep"],
+        "tag" => vec!["-d", "-a", "-m", "-s", "-l", "--list", "--sort"],
         "fetch" => vec!["--all", "--prune", "--tags", "--dry-run"],
         "revert" => vec!["--no-commit", "--continue", "--abort", "--mainline"],
         "cherry-pick" => vec!["--continue", "--abort", "--skip", "--no-commit", "--mainline"],
@@ -272,9 +272,8 @@ fn validate_git_flags(operation: &str, flags: &[String]) -> Option<String> {
 
 /// Check flags permission; returns Some(ToolResult::error) if disallowed.
 fn check_git_flags_permission(operation: &str, flags: &[String]) -> Option<ToolResult> {
-    // Dangerous-operation check
-    let (dangerous, reason) = is_dangerous_git_operation(operation, flags);
-    if dangerous {
+    // Dangerous-operation check (blocking)
+    if let Some(reason) = is_dangerous_git_operation(operation, flags) {
         return Some(ToolResult::error(format!(
             "Permission denied: {} (operation: {})",
             reason, operation
@@ -498,8 +497,8 @@ impl Tool for GitTool {
             return None;
         }
 
-        // For git operations, check flags
-        let flags: Vec<String> = params
+        // For git operations, collect all effective flags
+        let mut effective_flags: Vec<String> = params
             .get("flags")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -509,7 +508,26 @@ impl Tool for GitTool {
             })
             .unwrap_or_default();
 
-        check_git_flags_permission(operation, &flags)
+        // Map boolean params to their flag equivalents for security checking
+        // clean: force → -f, recursive → -d
+        if operation == "clean" {
+            if params.get("force").and_then(|v| v.as_bool()).unwrap_or(false) && !effective_flags.contains(&"-f".to_string()) {
+                effective_flags.push("-f".to_string());
+            }
+            if params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) && !effective_flags.contains(&"-d".to_string()) {
+                effective_flags.push("-d".to_string());
+            }
+        }
+        // reset: target like --hard, --soft, --mixed
+        if operation == "reset" {
+            if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
+                if target.starts_with("--") && !effective_flags.contains(&target.to_string()) {
+                    effective_flags.push(target.to_string());
+                }
+            }
+        }
+
+        check_git_flags_permission(operation, &effective_flags)
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -2456,43 +2474,41 @@ mod tests {
     #[test]
     fn test_is_dangerous_git_operation() {
         // Force push is dangerous
-        let (dangerous, reason) = is_dangerous_git_operation("push", &["--force".to_string()]);
-        assert!(dangerous, "Force push should be dangerous");
-        assert!(reason.contains("Force push"), "Reason should mention force push");
+        let result = is_dangerous_git_operation("push", &["--force".to_string()]);
+        assert!(result.is_some(), "Force push should be dangerous");
+        assert!(result.unwrap().contains("Force push"), "Reason should mention force push");
 
         // Normal push is not dangerous
-        let (dangerous, _) = is_dangerous_git_operation("push", &[]);
-        assert!(!dangerous, "Normal push should not be dangerous");
+        let result = is_dangerous_git_operation("push", &[]);
+        assert!(result.is_none(), "Normal push should not be dangerous");
 
         // reset --hard is dangerous
-        let (dangerous, reason) = is_dangerous_git_operation("reset", &["--hard".to_string()]);
-        assert!(dangerous, "reset --hard should be dangerous");
-        assert!(reason.contains("--hard"), "Reason should mention --hard");
+        let result = is_dangerous_git_operation("reset", &["--hard".to_string()]);
+        assert!(result.is_some(), "reset --hard should be dangerous");
+        assert!(result.unwrap().contains("--hard"), "Reason should mention --hard");
 
         // reset --soft is not dangerous
-        let (dangerous, _) = is_dangerous_git_operation("reset", &["--soft".to_string()]);
-        assert!(!dangerous, "reset --soft should not be dangerous");
+        let result = is_dangerous_git_operation("reset", &["--soft".to_string()]);
+        assert!(result.is_none(), "reset --soft should not be dangerous");
 
         // clean -fd is dangerous
-        let (dangerous, reason) = is_dangerous_git_operation("clean", &["-f".to_string(), "-d".to_string()]);
-        assert!(dangerous, "clean -fd should be dangerous");
-        assert!(reason.contains("clean"), "Reason should mention clean");
+        let result = is_dangerous_git_operation("clean", &["-f".to_string(), "-d".to_string()]);
+        assert!(result.is_some(), "clean -fd should be dangerous");
+        assert!(result.unwrap().contains("clean"), "Reason should mention clean");
 
         // commit --amend is dangerous
-        let (dangerous, reason) = is_dangerous_git_operation("commit", &["--amend".to_string()]);
-        assert!(dangerous, "commit --amend should be dangerous");
-        assert!(reason.contains("amend"), "Reason should mention amend");
+        let result = is_dangerous_git_operation("commit", &["--amend".to_string()]);
+        assert!(result.is_some(), "commit --amend should be dangerous");
+        assert!(result.unwrap().contains("amend"), "Reason should mention amend");
 
         // rebase -i is dangerous
-        let (dangerous, reason) = is_dangerous_git_operation("rebase", &["--interactive".to_string()]);
-        assert!(dangerous, "rebase --interactive should be dangerous");
-        assert!(reason.contains("rebase"), "Reason should mention rebase");
+        let result = is_dangerous_git_operation("rebase", &["--interactive".to_string()]);
+        assert!(result.is_some(), "rebase --interactive should be dangerous");
+        assert!(result.unwrap().contains("rebase"), "Reason should mention rebase");
 
         // Safe operations
-        let (dangerous, _) = is_dangerous_git_operation("status", &[]);
-        assert!(!dangerous, "status should not be dangerous");
-        let (dangerous, _) = is_dangerous_git_operation("log", &[]);
-        assert!(!dangerous, "log should not be dangerous");
+        assert!(is_dangerous_git_operation("status", &[]).is_none(), "status should not be dangerous");
+        assert!(is_dangerous_git_operation("log", &[]).is_none(), "log should not be dangerous");
     }
 
     #[test]
@@ -2581,6 +2597,73 @@ mod tests {
 
         let result = tool.check_permissions(&params);
         assert!(result.is_some(), "git push --force should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_clean_force_recursive() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clean".to_string()));
+        params.insert("force".to_string(), Value::Bool(true));
+        params.insert("recursive".to_string(), Value::Bool(true));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git clean -fd (via force+recursive params) should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_clean_dry_run_allowed() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("clean".to_string()));
+        params.insert("dry_run".to_string(), Value::Bool(true));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_none(), "git clean --dry-run should be allowed");
+    }
+
+    #[test]
+    fn test_check_permissions_reset_hard() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("reset".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--hard".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git reset --hard should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_commit_amend() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("commit".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--amend".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git commit --amend should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_rebase_interactive() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("rebase".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--interactive".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git rebase --interactive should be permission-denied");
+    }
+
+    #[test]
+    fn test_check_permissions_push_force_with_lease() {
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("push".to_string()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--force-with-lease".to_string())]));
+
+        let result = tool.check_permissions(&params);
+        assert!(result.is_some(), "git push --force-with-lease should be permission-denied");
     }
 
     #[test]
