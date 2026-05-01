@@ -10,6 +10,7 @@ pub mod prompt_caching;
 pub mod context_references;
 pub mod rate_limit;
 pub mod skills;
+pub mod session_memory;
 pub mod streaming;
 pub mod tools;
 pub mod transcript;

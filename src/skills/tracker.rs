@@ -91,6 +91,11 @@ impl SkillTracker {
     pub fn used_count(&self) -> usize {
         self.used_skills.len()
     }
+
+    /// Get names of skills that have been read, for post-compact recovery
+    pub fn get_read_skill_names(&self) -> Vec<String> {
+        self.read_skills.iter().cloned().collect()
+    }
 }
 
 #[cfg(test)]

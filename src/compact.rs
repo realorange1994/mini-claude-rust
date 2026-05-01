@@ -7,6 +7,9 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 use crate::context::{
     CompactTrigger, ConversationContext, Message, MessageContent, MessageRole,
@@ -109,6 +112,9 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
             15
         }
         MessageContent::Summary(text) => {
+            3 + estimate_tokens_typed(text)
+        }
+        MessageContent::Attachment(text) => {
             3 + estimate_tokens_typed(text)
         }
     }
@@ -423,31 +429,52 @@ pub struct CompactionResult {
 /// Compact prompt template (inspired by Claude Code's getCompactPrompt)
 const COMPACT_SYSTEM_PROMPT: &str = "You are a helpful AI assistant tasked with summarizing conversations.";
 
-const COMPACT_USER_PROMPT: &str = r#"Summarize the following conversation history. Your summary should:
+const COMPACT_USER_PROMPT: &str = r#"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
-1. Capture the user's main request and goals
-2. Note key decisions made and discoveries found
-3. List files that were read, modified, or created
-4. Describe the current state of work and what remains
-5. Be concise but complete -- the next AI should be able to continue seamlessly
+Analyze the conversation below, then produce a structured summary.
 
-Do NOT include:
-- Individual tool call details or raw outputs
-- Intermediate exploration steps
-- Redundant or outdated information
+First, write your analysis inside <analysis> tags:
+- Chronologically review each message
+- Identify the user's requests, approaches tried, decisions made
+- Note technical details: file paths, function names, error messages
+- Track what worked and what didn't
 
-Write the summary as a coherent narrative that preserves enough context for the conversation to continue productively."#;
+Then, write your summary inside <summary> tags with these REQUIRED fields:
+
+1. Primary Request and Intent: What the user asked for and their goals
+2. Key Technical Concepts: Important concepts, patterns, or technologies discussed
+3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names)
+4. Errors and Fixes: Any errors encountered and how they were resolved
+5. Problem Solving: What approaches were tried, what worked, what didn't
+6. All User Messages: List every user message (paraphrased if long)
+7. Pending Tasks: What remains to be done
+8. Current Work: What was actively being worked on when context ran out
+9. Optional Next Step: What should be done next to continue the work
+
+Example format:
+<analysis>
+Reviewing message 1: user asked to implement X...
+Reviewing message 2: assistant read file Y and found Z...
+</analysis>
+<summary>
+1. Primary Request and Intent: ...
+2. Key Technical Concepts: ...
+</summary>"#;
 
 /// Iterative variant used when a previous summary already exists.
-const COMPACT_USER_PROMPT_ITERATIVE: &str = r#"You previously summarized this conversation. An updated version follows.
+const COMPACT_USER_PROMPT_ITERATIVE: &str = r#"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
-Update the previous summary to incorporate new information, decisions, or changes.
-Preserve all critical context from the previous summary while adding new developments.
+Below is the previous summary followed by new conversation messages. Update the summary by:
+- Merging new information into existing fields
+- Updating progress on tasks mentioned in the previous summary
+- Adding new files, errors, or decisions that appeared in the new messages
+- Removing information that is no longer relevant
+- Preserving all user messages (add new ones, keep existing ones)
 
 Previous Summary:
 {previous_summary}
 
-New conversation content follows. Update the summary to incorporate the new information."#;
+Write your analysis in <analysis> tags, then the updated summary in <summary> tags with the same 9-field structure."#;
 
 // --- Sensitive info redaction (A3) ---
 
@@ -465,11 +492,14 @@ pub fn redact_sensitive_text(text: &str) -> String {
     for &key in SENSITIVE_KEYS {
         // Pattern 1: "key": "value" (JSON-style)
         let json_key = format!("\"{}\"", key);
-        while let Some(start) = result.find(&json_key) {
+        let mut search_from = 0;
+        while let Some(rel_start) = result[search_from..].find(&json_key) {
+            let start = search_from + rel_start;
             let after_key = &result[start + json_key.len()..];
             let trimmed = after_key.trim_start();
             if !trimmed.starts_with(':') {
-                break;
+                search_from = start + json_key.len();
+                continue;
             }
             let after_colon = trimmed[1..].trim_start();
             if after_colon.starts_with('"') {
@@ -477,13 +507,15 @@ pub fn redact_sensitive_text(text: &str) -> String {
                     let value_start = start + json_key.len()
                         + (after_key.len() - after_key.trim_start().len());
                     let value_end = value_start + 1 + 1 + end_offset; // colon + space + closing quote
-                    result.replace_range(value_start..=value_end, ": \"[REDACTED]\"");
-                    // Continue the while loop to redact all occurrences, not just the first
+                    let replacement = ": \"[REDACTED]\"";
+                    result.replace_range(value_start..=value_end, replacement);
+                    // Advance past the replacement to avoid re-matching the same key
+                    search_from = value_start + replacement.len();
                 } else {
                     break;
                 }
             } else {
-                break;
+                search_from = start + json_key.len();
             }
         }
 
@@ -576,6 +608,9 @@ pub async fn compact_conversation(
                     }
                 }
             }
+            MessageContent::Attachment(text) => {
+                *text = redact_sensitive_text(text);
+            }
             _ => {}
         }
     }
@@ -634,8 +669,10 @@ pub async fn compact_conversation(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to parse compact response: {}", e))?;
 
-    // Extract the summary text from the response and redact sensitive info
+    // Extract the summary text from the response, strip analysis blocks,
+    // extract <summary> content, and redact sensitive info
     let summary_text = extract_summary_text(&body)
+        .map(|t| extract_summary_from_compact_output(&t))
         .map(|t| redact_sensitive_text(&t))
         .ok_or_else(|| anyhow::anyhow!("No summary text in compact response"))?;
 
@@ -696,6 +733,31 @@ fn extract_summary_text(body: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Strip `<analysis>...</analysis>` blocks and extract `<summary>...</summary>` content
+/// from the LLM's compaction response.
+/// If no `<summary>` tags are found, returns the full text with analysis blocks removed.
+fn extract_summary_from_compact_output(text: &str) -> String {
+    fn analysis_re() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"(?s)<analysis>.*?</analysis>").unwrap())
+    }
+    fn summary_re() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"(?s)<summary>(.*?)</summary>").unwrap())
+    }
+
+    // Strip <analysis>...</analysis> entirely
+    let cleaned = analysis_re().replace_all(text, "");
+
+    // Extract content from <summary>...</summary>
+    if let Some(caps) = summary_re().captures(&cleaned) {
+        return caps[1].trim().to_string();
+    }
+
+    // Fallback: if no <summary> tags, return cleaned text
+    cleaned.trim().to_string()
+}
+
 /// Convert a Message to API format (for sending to the compact API)
 fn message_to_api(msg: &Message) -> Option<serde_json::Value> {
     match &msg.content {
@@ -735,6 +797,10 @@ fn message_to_api(msg: &Message) -> Option<serde_json::Value> {
             }))
         }
         MessageContent::Summary(text) => Some(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": text}]
+        })),
+        MessageContent::Attachment(text) => Some(serde_json::json!({
             "role": "user",
             "content": [{"type": "text", "text": text}]
         })),
@@ -923,9 +989,6 @@ impl Compactor {
                     self.llm_compact_failed_count = 0;
                     self.phase = CompactPhase::None;
 
-                    // Set cooldown: record post-compact token count
-                    self.post_compact_tokens = Some(result.post_compact_tokens);
-
                     // Replace context with boundary + summary + recent tail messages.
                     // This preserves the most recent conversation context while
                     // replacing older messages with the summary, matching the
@@ -944,7 +1007,13 @@ impl Compactor {
                     // Previously this only counted boundary + summary, underestimating
                     // the token count and causing compaction thrashing when tail
                     // messages added significant tokens.
-                    let _post_tokens = estimate_total_tokens(&new_messages);
+                    let post_tokens = estimate_total_tokens(&new_messages);
+
+                    // Set cooldown: record post-compact token count from the
+                    // full rebuilt message set (including tail), matching Go's
+                    // agent_loop.go which calls BuildMessages() and measures
+                    // the actual post-compact token count.
+                    self.post_compact_tokens = Some(post_tokens);
 
                     context.replace_messages(new_messages);
 
@@ -1723,5 +1792,38 @@ mod tests {
         let prompt = COMPACT_USER_PROMPT_ITERATIVE.replace("{previous_summary}", "Old summary");
         assert!(prompt.contains("Old summary"));
         assert!(prompt.contains("update"));
+    }
+
+    #[test]
+    fn test_extract_summary_from_compact_output() {
+        // Test with analysis + summary blocks
+        let input = r#"Some preamble text
+<analysis>
+Reviewing message 1: user asked to do X
+Reviewing message 2: assistant did Y
+</analysis>
+<summary>
+1. Primary Request and Intent: User wanted X
+2. Key Technical Concepts: Y
+3. Files and Code Sections: Z
+</summary>
+Some trailing text"#;
+        let result = extract_summary_from_compact_output(input);
+        assert!(result.contains("1. Primary Request and Intent"));
+        assert!(result.contains("3. Files and Code Sections"));
+        assert!(!result.contains("<analysis>"));
+        assert!(!result.contains("<summary>"));
+        assert!(!result.contains("Reviewing message"));
+
+        // Test with no tags -- should return cleaned text
+        let plain = "Just a plain text summary without any tags.";
+        let result2 = extract_summary_from_compact_output(plain);
+        assert_eq!(result2, "Just a plain text summary without any tags.");
+
+        // Test with only summary tags (no analysis)
+        let summary_only = "<summary>\n1. Primary Request: Foo\n</summary>";
+        let result3 = extract_summary_from_compact_output(summary_only);
+        assert!(result3.contains("1. Primary Request: Foo"));
+        assert!(!result3.contains("<summary>"));
     }
 }

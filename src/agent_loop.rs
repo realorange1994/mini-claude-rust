@@ -460,12 +460,14 @@ impl AgentLoop {
 
         // Build system prompt with skill tracker
         let tracker = self.skill_tracker.blocking_read();
+        let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
         let system_prompt = crate::config::build_system_prompt(
             &*self.registry.blocking_read(),
             &self.config.permission_mode,
             &self.config.project_dir,
             self.config.skill_loader.as_ref(),
             Some(&tracker),
+            session_memory,
         );
         drop(tracker);
 
@@ -542,6 +544,10 @@ impl AgentLoop {
                         ("user".to_string(),
                         vec![serde_json::json!({"type": "text", "text": text})])
                     }
+                    MessageContent::Attachment(text) => {
+                        ("user".to_string(),
+                        vec![serde_json::json!({"type": "text", "text": text})])
+                    }
                     MessageContent::CompactBoundary { .. } => {
                         // Skip compact boundaries in API messages -- they're metadata only
                         return None;
@@ -585,6 +591,18 @@ impl AgentLoop {
 
             // Run compaction before API call (matching Go's CompactContext)
             // Uses async LLM-driven compaction when threshold is reached
+
+            // Phase 0: Micro-compact — clear old tool results every turn (cheap, no LLM call)
+            if self.config.micro_compact_enabled {
+                let keep_recent = self.config.micro_compact_keep_recent;
+                let placeholder = self.config.micro_compact_placeholder.clone();
+                let mut ctx = self.context.write().await;
+                let cleared = ctx.micro_compact_entries(keep_recent, &placeholder);
+                if cleared > 0 {
+                    eprintln!("[micro-compact] Cleared {} old tool results", cleared);
+                }
+            }
+
             if self.config.auto_compact_enabled {
                 {
                     let mut ctx = self.context.write().await;
@@ -604,6 +622,13 @@ impl AgentLoop {
                             format!("{:?}", stats.phase),
                             stats.estimated_tokens_saved,
                         );
+
+                        // Phase 2: Post-compact recovery — re-inject critical context
+                        let recovered_paths = self.post_compact_recovery().await;
+
+                        // Phase 3: History snip — preserve recent messages verbatim
+                        let snip_count = self.config.post_compact_history_snip_count;
+                        ctx.add_history_snip(snip_count, &recovered_paths);
                     }
                 }
 
@@ -1726,11 +1751,159 @@ impl AgentLoop {
             &output[last_end..])
     }
 
-    /// Close releases resources (MCP servers, etc.)
+    /// Post-compact recovery re-injects critical context after compaction.
+    /// This prevents the model from losing awareness of files it was working on
+    /// and skills it was using, reducing wasted turns re-reading them.
+    /// Returns the list of recovered file paths (for deduplication in AddHistorySnip).
+    async fn post_compact_recovery(&self) -> Vec<String> {
+
+        if !self.config.post_compact_recover_files {
+            return vec![];
+        }
+
+        let mut recovered_paths = Vec::new();
+
+        // --- File content recovery ---
+        let registry = self.registry.read().await;
+        let max_files = if self.config.post_compact_max_files == 0 {
+            5
+        } else {
+            self.config.post_compact_max_files
+        };
+        let max_file_chars = if self.config.post_compact_max_file_chars == 0 {
+            50_000
+        } else {
+            self.config.post_compact_max_file_chars
+        };
+
+        let paths = registry.get_recently_read_files(max_files);
+        drop(registry);
+
+        let mut total_chars = 0;
+        let mut files_recovered = 0;
+        let mut paths_to_remark = Vec::new();
+
+        for path in &paths {
+            // Expand the normalized path back to a real path
+            let real_path = if std::path::Path::new(path).is_absolute() {
+                path.clone()
+            } else {
+                self.config.project_dir.join(path).to_string_lossy().to_string()
+            };
+
+            if let Ok(data) = std::fs::read_to_string(&real_path) {
+                let content = if total_chars + data.len() > max_file_chars {
+                    let remaining = max_file_chars - total_chars;
+                    if remaining < 200 {
+                        break;
+                    }
+                    let truncated: String = data.chars().take(remaining).collect();
+                    format!("{}\n... [truncated]", truncated)
+                } else {
+                    data.clone()
+                };
+
+                let attachment = format!(
+                    "[Post-compact file recovery: {}]\n```\n{}\n```",
+                    path, content
+                );
+                {
+                    let mut ctx_mut = self.context.write().await;
+                    ctx_mut.add_attachment(attachment);
+                }
+                total_chars += data.len();
+                files_recovered += 1;
+                recovered_paths.push(path.clone());
+                paths_to_remark.push(path.clone());
+            }
+        }
+
+        // Re-mark files as read so edit checks still work
+        if !paths_to_remark.is_empty() {
+            let registry = self.registry.read().await;
+            for path in &paths_to_remark {
+                registry.mark_file_read(path);
+            }
+        }
+
+        if files_recovered > 0 {
+            eprintln!(
+                "[post-compact] Recovered {} files ({} chars)",
+                files_recovered, total_chars
+            );
+        }
+
+        // --- Skill content recovery ---
+        if let Some(loader) = &self.config.skill_loader {
+            let max_skill_chars = if self.config.post_compact_max_skill_chars == 0 {
+                5_000
+            } else {
+                self.config.post_compact_max_skill_chars
+            };
+            let max_total_skill_chars = if self.config.post_compact_max_total_skill_chars == 0 {
+                25_000
+            } else {
+                self.config.post_compact_max_total_skill_chars
+            };
+
+            let read_skills = {
+                let tracker = self.skill_tracker.read().await;
+                tracker.get_read_skill_names()
+            };
+
+            let mut total_skill_chars = 0;
+            let mut skills_recovered = 0;
+
+            for name in &read_skills {
+                let content = match loader.load_skill(name) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                if content.is_empty() {
+                    continue;
+                }
+
+                let truncated = if content.len() > max_skill_chars {
+                    let truncated: String = content.chars().take(max_skill_chars).collect();
+                    format!("{}\n... [truncated]", truncated)
+                } else {
+                    content.clone()
+                };
+
+                if total_skill_chars + truncated.len() > max_total_skill_chars {
+                    break;
+                }
+
+                let attachment = format!(
+                    "[Post-compact skill recovery: {}]\n{}",
+                    name, truncated
+                );
+                {
+                    let mut ctx_mut = self.context.write().await;
+                    ctx_mut.add_attachment(attachment);
+                }
+                total_skill_chars += truncated.len();
+                skills_recovered += 1;
+            }
+
+            if skills_recovered > 0 {
+                eprintln!(
+                    "[post-compact] Recovered {} skills ({} chars)",
+                    skills_recovered, total_skill_chars
+                );
+            }
+        }
+
+        recovered_paths
+    }
+
+    /// Close releases resources (MCP servers, session memory, etc.)
     pub fn close(&self) {
         if let Some(ref mgr) = self.config.mcp_manager {
             mgr.stop_all();
         }
+        // Session memory is stopped on drop via Arc; the flush loop
+        // uses its own Drop impl. No explicit stop needed here.
     }
 
     /// Get the transcript filename for resume hint

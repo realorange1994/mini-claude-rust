@@ -93,6 +93,9 @@ pub enum MessageContent {
     /// Summary of compressed conversation history (role: user)
     /// This is injected after compaction to preserve semantic continuity
     Summary(String),
+    /// Attachment content for post-compact recovery (role: user)
+    /// Re-injects file/skill content after compaction
+    Attachment(String),
 }
 
 /// A single message in the conversation history.
@@ -145,6 +148,7 @@ impl Message {
             MessageContent::CompactBoundary { trigger, pre_compact_tokens } => {
                 format!("[compact boundary: {}, {} tokens]", trigger, pre_compact_tokens)
             }
+            MessageContent::Attachment(a) => a.clone(),
         }
     }
 
@@ -254,6 +258,14 @@ impl ConversationContext {
         self.messages.push(Message::new(
             MessageRole::User,
             MessageContent::Summary(content),
+        ));
+    }
+
+    /// Add an attachment message (post-compact recovery of file/skill content)
+    pub fn add_attachment(&mut self, content: String) {
+        self.messages.push(Message::new(
+            MessageRole::User,
+            MessageContent::Attachment(content),
         ));
     }
 
@@ -558,6 +570,106 @@ impl ConversationContext {
             merged.push(msg);
         }
         self.messages = merged;
+    }
+
+    /// Micro-compact: clears content of old tool results beyond the keep_recent window.
+    /// Returns the number of tool result entries that were cleared.
+    /// Tool use IDs are preserved to maintain pairing validity.
+    pub fn micro_compact_entries(&mut self, keep_recent: usize, placeholder: &str) -> usize {
+        let keep_recent = if keep_recent == 0 { 5 } else { keep_recent };
+        let placeholder = if placeholder.is_empty() {
+            "[Old tool result content cleared]"
+        } else {
+            placeholder
+        };
+
+        // Count tool_result entries from the end (recent first)
+        let mut recent_count = 0;
+        let mut cleared = 0;
+
+        // Iterate backwards to find tool result entries
+        for i in (0..self.messages.len()).rev() {
+            if let MessageContent::ToolResultBlocks(blocks) = &mut self.messages[i].content {
+                if recent_count < keep_recent {
+                    recent_count += 1;
+                    continue;
+                }
+                // Clear this tool result: replace content with placeholder, keep ToolUseIDs
+                for block in blocks.iter_mut() {
+                    block.content = vec![ToolResultContent::Text {
+                        text: placeholder.to_string(),
+                    }];
+                }
+                cleared += 1;
+            }
+        }
+        cleared
+    }
+
+    /// AddHistorySnip preserves the most recent conversation entries verbatim
+    /// after compaction. Entries are added as user-role text messages with a
+    /// [history-snip] prefix. skip_paths contains file paths recovered by
+    /// PostCompactRecovery; ToolResultBlocks entries referencing those paths
+    /// are skipped to avoid duplication.
+    pub fn add_history_snip(&mut self, count: usize, skip_paths: &[String]) {
+        let count = if count == 0 { 3 } else { count };
+
+        // Find the most recent CompactBoundary
+        let boundary_idx = self.messages.iter().rposition(|m| m.is_compact_boundary());
+        let Some(boundary_idx) = boundary_idx else { return };
+
+        // Collect up to 'count' entries before the boundary as owned (role_str, text) tuples
+        // so we can release the immutable borrow before pushing to self.messages
+        let mut snip_entries: Vec<(String, String)> = Vec::new();
+        for i in (0..boundary_idx).rev() {
+            if snip_entries.len() >= count {
+                break;
+            }
+            let msg = &self.messages[i];
+            match &msg.content {
+                MessageContent::CompactBoundary { .. }
+                | MessageContent::Summary(_)
+                | MessageContent::Attachment(_) => {
+                    continue;
+                }
+                MessageContent::ToolResultBlocks(blocks) => {
+                    // Skip entries that reference recovered file paths
+                    if !skip_paths.is_empty() {
+                        let skip = blocks.iter().any(|b| {
+                            b.content.iter().any(|c| {
+                                if let ToolResultContent::Text { text } = c {
+                                    skip_paths.iter().any(|p| text.contains(p))
+                                } else {
+                                    false
+                                }
+                            })
+                        });
+                        if skip {
+                            continue;
+                        }
+                    }
+                    let role_str = msg.role.as_str().to_string();
+                    let text = msg.content_to_text();
+                    snip_entries.insert(0, (role_str, text));
+                }
+                _ => {
+                    let role_str = msg.role.as_str().to_string();
+                    let text = msg.content_to_text();
+                    snip_entries.insert(0, (role_str, text));
+                }
+            }
+        }
+
+        // Append snip entries after the boundary as preserved text messages
+        for (role_str, text) in snip_entries {
+            if text.is_empty() {
+                continue;
+            }
+            self.messages.push(Message::new(
+                MessageRole::User,
+                MessageContent::Text(format!("[history-snip {}] {}", role_str, text)),
+            ));
+        }
     }
 }
 

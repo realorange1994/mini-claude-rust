@@ -9,6 +9,7 @@ pub use crate::mcp::Manager as McpManager;
 pub use crate::skills::Loader as SkillLoader;
 pub use crate::skills::SkillTracker;
 pub use crate::filehistory::FileHistory;
+pub use crate::session_memory::SessionMemory;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,6 +30,20 @@ pub struct Config {
     pub auto_compact_threshold: f64,
     pub auto_compact_buffer: usize,
     pub max_compact_output_tokens: usize,
+    // Micro-compact config (Phase 1: time-based tool result clearing)
+    pub micro_compact_enabled: bool,
+    pub micro_compact_keep_recent: usize,
+    pub micro_compact_placeholder: String,
+    // Post-compact recovery config (Phase 2)
+    pub post_compact_recover_files: bool,
+    pub post_compact_max_files: usize,
+    pub post_compact_max_file_chars: usize,
+    pub post_compact_max_skill_chars: usize,
+    pub post_compact_max_total_skill_chars: usize,
+    // History snip config (Phase 3)
+    pub post_compact_history_snip_count: usize,
+    // Session memory (Phase 4)
+    pub session_memory: Option<Arc<SessionMemory>>,
 }
 
 impl Default for Config {
@@ -82,6 +97,16 @@ impl Default for Config {
             auto_compact_threshold: 0.75,
             auto_compact_buffer: 13_000,
             max_compact_output_tokens: 20_000,
+            micro_compact_enabled: true,
+            micro_compact_keep_recent: 5,
+            micro_compact_placeholder: "[Old tool result content cleared]".to_string(),
+            post_compact_recover_files: true,
+            post_compact_max_files: 5,
+            post_compact_max_file_chars: 50_000,
+            post_compact_max_skill_chars: 5_000,
+            post_compact_max_total_skill_chars: 25_000,
+            post_compact_history_snip_count: 3,
+            session_memory: None,
         }
     }
 }
@@ -331,6 +356,7 @@ impl CachedSystemPrompt {
         project_dir: &Path,
         skill_loader: Option<&SkillLoader>,
         skill_tracker: Option<&SkillTracker>,
+        session_memory: Option<&SessionMemory>,
     ) -> String {
         if !self.dirty.load(std::sync::atomic::Ordering::SeqCst) {
             if let Some(cached) = self.cached.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -340,7 +366,7 @@ impl CachedSystemPrompt {
 
         // Rebuild the prompt
         let prompt = build_system_prompt(
-            registry, permission_mode, project_dir, skill_loader, skill_tracker,
+            registry, permission_mode, project_dir, skill_loader, skill_tracker, session_memory,
         );
 
         // Cache it
@@ -368,6 +394,7 @@ pub fn build_system_prompt(
     project_dir: &Path,
     skill_loader: Option<&SkillLoader>,
     skill_tracker: Option<&SkillTracker>,
+    session_memory: Option<&SessionMemory>,
 ) -> String {
     // Use compile-time version (avoids spawning rustc on every API call)
     let rust_version = concat!("rustc ", env!("CARGO_PKG_VERSION"));
@@ -432,6 +459,14 @@ You have access to the following tools to help the user with software engineerin
             prompt.push_str("\n## Project Instructions (from CLAUDE.md)\n\n");
             prompt.push_str(content.trim());
             prompt.push('\n');
+        }
+    }
+
+    // Session memory section (Phase 4)
+    if let Some(memory) = session_memory {
+        let mem_section = memory.format_for_prompt();
+        if !mem_section.is_empty() {
+            prompt.push_str(&mem_section);
         }
     }
 

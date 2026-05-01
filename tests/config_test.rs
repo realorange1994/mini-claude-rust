@@ -71,6 +71,16 @@ fn config_custom_values() {
         auto_compact_threshold: 0.8,
         auto_compact_buffer: 10_000,
         max_compact_output_tokens: 15_000,
+        micro_compact_enabled: true,
+        micro_compact_keep_recent: 5,
+        micro_compact_placeholder: "[Old tool result content cleared]".to_string(),
+        post_compact_recover_files: true,
+        post_compact_max_files: 5,
+        post_compact_max_file_chars: 50_000,
+        post_compact_max_skill_chars: 5_000,
+        post_compact_max_total_skill_chars: 25_000,
+        post_compact_history_snip_count: 3,
+        session_memory: None,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));
@@ -320,6 +330,7 @@ fn build_system_prompt_contains_environment_info() {
         std::path::Path::new("."),
         None,
         None,
+        None,
     );
 
     assert!(prompt.contains("miniClaudeCode"));
@@ -336,6 +347,7 @@ fn build_system_prompt_contains_tools() {
         &registry,
         &PermissionMode::Ask,
         std::path::Path::new("."),
+        None,
         None,
         None,
     );
@@ -360,6 +372,7 @@ fn build_system_prompt_contains_permission_mode() {
             std::path::Path::new("."),
             None,
             None,
+            None,
         );
         assert!(prompt.contains(desc_keyword), "Should contain {} mode", desc_keyword);
     }
@@ -373,6 +386,7 @@ fn build_system_prompt_empty_registry() {
         &registry,
         &PermissionMode::Ask,
         std::path::Path::new("."),
+        None,
         None,
         None,
     );
@@ -392,6 +406,7 @@ fn build_system_prompt_with_claude_md() {
         &registry,
         &PermissionMode::Ask,
         dir.path(),
+        None,
         None,
         None,
     );

@@ -133,10 +133,19 @@ fn main() -> Result<()> {
         .join("snapshots");
     cfg.file_history = Some(Arc::new(FileHistory::new_with_dir(&snapshots_dir)));
 
+    // Initialize SessionMemory (Phase 4)
+    let session_memory = miniclaudecode_rust::session_memory::SessionMemory::new(
+        &std::env::current_dir().unwrap_or_default(),
+    );
+    session_memory.start_flush_loop();
+    let session_memory_arc = Arc::new(session_memory);
+    cfg.session_memory = Some(Arc::clone(&session_memory_arc));
+
     // Register all tools
     let registry = tools::Registry::new();
     tools::register_builtin_tools(&registry);
     tools::register_mcp_and_skills(&registry, &cfg);
+    tools::register_memory_tools(&registry, &session_memory_arc);
 
     // Handle --resume flag
     let resume_path = args.resume.as_ref().map(|s| find_transcript(s)).flatten();
@@ -146,6 +155,7 @@ fn main() -> Result<()> {
         let resume_registry = tools::Registry::new();
         tools::register_builtin_tools(&resume_registry);
         tools::register_mcp_and_skills(&resume_registry, &cfg);
+        tools::register_memory_tools(&resume_registry, &session_memory_arc);
 
         match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, args.stream, &transcript_path, true) {
             Ok(agent) => {
@@ -349,6 +359,9 @@ fn run_interactive(mut agent: agent_loop::AgentLoop) {
                         let registry = tools::Registry::new();
                         tools::register_builtin_tools(&registry);
                         tools::register_mcp_and_skills(&registry, &agent.config);
+                        if let Some(ref sm) = agent.config.session_memory {
+                            tools::register_memory_tools(&registry, sm);
+                        }
 
                         match agent_loop::AgentLoop::from_transcript(
                             agent.config.clone(),

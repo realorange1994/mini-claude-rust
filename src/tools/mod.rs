@@ -22,6 +22,7 @@ mod exa_search;
 mod mcp_tools;
 pub mod skill_tools;
 pub mod file_history_tools;
+pub mod memory_tool;
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
@@ -159,12 +160,19 @@ pub trait Tool: Send + Sync {
     fn execute(&self, params: HashMap<String, serde_json::Value>) -> ToolResult;
 }
 
+/// FileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
+#[derive(Clone)]
+struct FileReadInfo {
+    mtime: SystemTime,
+    read_time: SystemTime,
+}
+
 /// Registry collects tool instances and provides lookup
 pub struct Registry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
-    /// Tracks which files have been read by read_file and their mtime at read time
-    /// (for read-before-edit and stale-detection)
-    files_read: Arc<RwLock<HashMap<String, SystemTime>>>,
+    /// Tracks which files have been read by read_file, their mtime at read time,
+    /// and the read timestamp (for get_recently_read_files / post-compact recovery)
+    files_read: Arc<RwLock<HashMap<String, FileReadInfo>>>,
 }
 
 impl Registry {
@@ -191,13 +199,15 @@ impl Registry {
         tools.values().cloned().collect()
     }
 
-    /// Mark a file as having been read, storing its current mtime
+    /// Mark a file as having been read, storing its current mtime and the read timestamp
     pub fn mark_file_read(&self, path: &str) {
         let normalized = normalize_file_path(path);
         let mtime = std::fs::metadata(expand_path(path))
             .ok()
-            .and_then(|m| m.modified().ok());
-        self.files_read.write().unwrap().insert(normalized, mtime.unwrap_or(SystemTime::UNIX_EPOCH));
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let read_time = SystemTime::now();
+        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time });
     }
 
     /// Check if a file has been read before and hasn't been modified since
@@ -212,15 +222,15 @@ impl Registry {
         }
 
         let guard = self.files_read.read().unwrap();
-        let stored_mtime = guard.get(&normalized).copied();
+        let stored_info = guard.get(&normalized).cloned();
         drop(guard);
 
-        let stored = stored_mtime.ok_or("Error: file has not been read yet. Read it first with read_file before editing.".to_string())?;
+        let stored = stored_info.ok_or("Error: file has not been read yet. Read it first with read_file before editing.".to_string())?;
 
         match std::fs::metadata(&fp) {
             Ok(meta) => {
                 let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                if current_mtime == stored {
+                if current_mtime == stored.mtime {
                     Ok(())
                 } else {
                     Err("Error: file has been modified since read, either by the user or by a linter. Read it again before attempting to write it.".to_string())
@@ -239,6 +249,25 @@ impl Registry {
     /// Clear the read-file tracking (e.g., on /clear)
     pub fn clear_files_read(&self) {
         self.files_read.write().unwrap().clear();
+    }
+
+    /// Returns paths of recently read files, sorted by most recently read first.
+    /// Returns up to max_files paths. Used by post-compact recovery to re-inject
+    /// file content after compaction.
+    pub fn get_recently_read_files(&self, max_files: usize) -> Vec<String> {
+        let guard = self.files_read.read().unwrap();
+        let mut entries: Vec<_> = guard.iter()
+            .map(|(path, info)| (path.clone(), info.read_time))
+            .collect();
+        drop(guard);
+
+        // Sort by read_time descending (most recent first)
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+        entries.into_iter()
+            .take(max_files)
+            .map(|(path, _)| path)
+            .collect()
     }
 }
 
@@ -310,6 +339,12 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
         registry.register(file_history_tools::FileHistoryBatchTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryCheckoutTool::new(arc_history.clone()));
     }
+}
+
+/// Register memory tools (Phase 4: Session Memory)
+pub fn register_memory_tools(registry: &Registry, session_memory: &Arc<crate::session_memory::SessionMemory>) {
+    registry.register(memory_tool::MemoryAddTool::new(Arc::clone(session_memory)));
+    registry.register(memory_tool::MemorySearchTool::new(Arc::clone(session_memory)));
 }
 
 // ─── Shared utility functions ───
