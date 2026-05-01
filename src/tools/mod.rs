@@ -610,7 +610,9 @@ pub fn is_path_allowed(path: &str) -> Result<(), String> {
 
     let rel = abs_resolved.strip_prefix(&abs_wd)
         .map_err(|_| format!("path {:?} is outside the project directory", path))?;
-    if rel.as_os_str().is_empty() || rel.starts_with("..") {
+    // rel is empty when path equals the project directory itself (e.g. "."),
+    // which is perfectly valid — only block paths that escape via ".."
+    if rel.starts_with("..") {
         Err(format!("path {:?} is outside the project directory", path))
     } else {
         Ok(())

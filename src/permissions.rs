@@ -334,7 +334,7 @@ impl PermissionGate {
         let tool_name = tool.name();
 
         // Fast path: whitelisted tools are always allowed
-        if is_auto_allowlisted(tool_name) {
+        if is_auto_allowlisted(tool_name, params) {
             self.denial_count.store(0, Ordering::SeqCst);
             return None;
         }
