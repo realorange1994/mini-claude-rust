@@ -310,9 +310,15 @@ impl AutoModeClassifier {
         result
     }
 
-    /// Make an LLM API call to classify the tool action.
-    /// Uses the Anthropic tool_use feature to force structured JSON output,
-    /// avoiding unreliable text parsing.
+    /// Make an LLM API call to classify the tool action using a two-stage approach
+    /// modeled after upstream yoloClassifier.ts:
+    ///
+    ///   Stage 1 (fast): 2112 max_tokens (64 base + 2048 thinking padding) — quick
+    ///   allow/block decision. If allowed → return immediately. If blocked →
+    ///   escalate to Stage 2 for more thorough analysis.
+    ///
+    ///   Stage 2 (thinking): 6144 max_tokens (4096 base + 2048 thinking padding) —
+    ///   full chain-of-thought reasoning with richer prompt. Verdict is final.
     fn call_classifier(
         &self,
         tool_name: &str,
@@ -335,23 +341,38 @@ impl AutoModeClassifier {
         user_msg.push_str("## New action to classify:\n");
         user_msg.push_str(&action_desc);
 
-        // Build the messages payload
-        let messages = serde_json::json!([
-            {
-                "role": "user",
-                "content": user_msg,
+        // Stage 1: fast classification
+        match self.call_stage(&user_msg, 2112, "Classify whether the tool action should be allowed or blocked") {
+            Some(result) if result.allow => {
+                // Fast path: allowed by stage 1
+                eprintln!("  [auto-classifier] Stage 1 ALLOWED: {} ({})", action_desc, result.reason);
+                result
             }
-        ]);
+            Some(_) => {
+                // Stage 1 blocked — escalate to stage 2 for full reasoning
+                eprintln!("  [auto-classifier] Stage 1 blocked, escalating to Stage 2 reasoning");
+                self.call_stage_2(&user_msg, &action_desc)
+            }
+            None => {
+                // Stage 1 failed — escalate to stage 2
+                eprintln!("  [auto-classifier] Stage 1 parse failure, escalating to Stage 2 reasoning");
+                self.call_stage_2(&user_msg, &action_desc)
+            }
+        }
+    }
 
-        // Build the request body with tool_use for structured output
+    /// Stage 1: fast classification call.
+    fn call_stage(&self, user_msg: &str, max_tokens: u32, tool_desc: &str) -> Option<ClassifierResult> {
+        let messages = serde_json::json!([{ "role": "user", "content": user_msg }]);
+
         let body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 256,
+            "max_tokens": max_tokens,
             "system": AUTO_CLASSIFIER_SYSTEM_PROMPT,
             "messages": messages,
             "tools": [{
                 "name": "classify_action",
-                "description": "Classify whether the tool action should be allowed or blocked",
+                "description": tool_desc,
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -368,15 +389,10 @@ impl AutoModeClassifier {
                     "required": ["decision", "reason"]
                 }
             }],
-            "tool_choice": {
-                "type": "tool",
-                "name": "classify_action"
-            }
+            "tool_choice": { "type": "tool", "name": "classify_action" }
         });
 
-        // Build the URL
         let url = format!("{}/v1/messages", self.base_url);
-
         let response = self
             .client
             .post(&url)
@@ -387,78 +403,56 @@ impl AutoModeClassifier {
             .json(&body)
             .send();
 
-        match response {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    if let Ok(text) = resp.text() {
-                        // Try to parse tool_use response first (Anthropic structured output)
-                        if let Some(result) = parse_tool_use_response(&text) {
-                            let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
-                            eprintln!(
-                                "  [auto-classifier] {}: {} ({})",
-                                status, action_desc, result.reason
-                            );
-                            return result;
-                        }
-                        // Extract text content from Anthropic-style response
-                        let text_content = extract_text_from_response(&text);
-                        // Try to parse the extracted text as classifier JSON
-                        if let Some(result) = parse_classifier_response(&text_content) {
-                            let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
-                            eprintln!(
-                                "  [auto-classifier] {}: {} ({})",
-                                status, action_desc, result.reason
-                            );
-                            return result;
-                        }
-                        // Fallback: try parsing the raw response text as JSON
-                        if let Some(result) = parse_classifier_response(&text) {
-                            let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
-                            eprintln!(
-                                "  [auto-classifier] {}: {} ({})",
-                                status, action_desc, result.reason
-                            );
-                            return result;
-                        }
-                    }
-                    // Failed to parse response: fail-open (technical issue, not security)
-                    eprintln!(
-                        "  [auto-classifier] Parse failure, allowing: {}",
-                        action_desc
-                    );
-                    ClassifierResult {
-                        allow: true,
-                        reason: "classifier returned unparseable response; action allowed by default".to_string(),
-                    }
-                } else {
-                    // API returned an error: fail-open
-                    let status = resp.status();
-                    let error_text = resp.text().unwrap_or_default();
-                    eprintln!(
-                        "  [auto-classifier] API error: {} - {}",
-                        status, &error_text[..error_text.len().min(200)]
-                    );
-                    ClassifierResult {
-                        allow: true,
-                        reason: format!(
-                            "classifier unavailable (API error {}); action allowed by default",
-                            status
-                        ),
-                    }
-                }
+        self.parse_stage_response(response)
+    }
+
+    /// Stage 2: thinking classification call with richer prompt.
+    fn call_stage_2(&self, user_msg: &str, action_desc: &str) -> ClassifierResult {
+        let stage2_prompt = format!(
+            "{}\n\n## Analysis required:\nProvide a detailed security analysis of this action. Consider: is the action clearly requested by the user? Could it have unintended consequences? Does it modify the system state or download external code? Explain your reasoning step by step, then provide your verdict.",
+            user_msg
+        );
+
+        match self.call_stage(&stage2_prompt, 6144, "Classify whether the tool action should be allowed or blocked, providing detailed reasoning") {
+            Some(result) => {
+                let status = if result.allow { "ALLOWED" } else { "BLOCKED" };
+                eprintln!("  [auto-classifier] Stage 2 {}: {} ({})", status, action_desc, result.reason);
+                result
             }
-            Err(err) => {
-                // Network error: fail-open
-                eprintln!("  [auto-classifier] API error: {}", err);
+            None => {
+                // Stage 2 parse failure: fail-open (technical issue, not security)
+                eprintln!("  [auto-classifier] Stage 2 parse failure, allowing: {}", action_desc);
                 ClassifierResult {
                     allow: true,
-                    reason: format!(
-                        "classifier unavailable ({}); action allowed by default",
-                        err
-                    ),
+                    reason: "classifier stage 2 returned unparseable response; action allowed by default".to_string(),
                 }
             }
         }
+    }
+
+    /// Parse the API response and extract a ClassifierResult.
+    fn parse_stage_response(&self, response: Result<reqwest::blocking::Response, reqwest::Error>) -> Option<ClassifierResult> {
+        let resp = response.ok()?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let error_text = resp.text().unwrap_or_default();
+            eprintln!("  [auto-classifier] API error: {} - {}", status, &error_text[..error_text.len().min(200)]);
+            return None;
+        }
+
+        let text = resp.text().ok()?;
+        // Try to parse tool_use response first (Anthropic structured output)
+        if let Some(result) = parse_tool_use_response(&text) {
+            return Some(result);
+        }
+        // Extract text content from Anthropic-style response
+        let text_content = extract_text_from_response(&text);
+        // Try to parse the extracted text as classifier JSON
+        if let Some(result) = parse_classifier_response(&text_content) {
+            return Some(result);
+        }
+        // Fallback: try parsing the raw response text as JSON
+        parse_classifier_response(&text)
     }
 
     /// Generate a cache key from the tool name and input.
