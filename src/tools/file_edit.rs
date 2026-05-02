@@ -150,6 +150,22 @@ impl Tool for FileEditTool {
         };
 
         let count = content_norm.matches(&old_str_norm).count();
+        let (mut count, mut old_str_norm, mut new_str_norm) = if count == 0 {
+            // Try desanitized version (matching official: reverse sanitized tokens)
+            let desanitized_old = desanitize(&old_str_norm);
+            if desanitized_old != old_str_norm {
+                let c = content_norm.matches(&desanitized_old).count();
+                if c > 0 {
+                    (c, desanitized_old, desanitize(&new_str_norm))
+                } else {
+                    (0, old_str_norm, new_str_norm)
+                }
+            } else {
+                (0, old_str_norm, new_str_norm)
+            }
+        } else {
+            (count, old_str_norm, new_str_norm)
+        };
         if count == 0 {
             return ToolResult::error(format!(
                 "Error: old_text not found in {}. Verify the file content.",
@@ -211,4 +227,35 @@ fn strip_trailing_whitespace(s: &str) -> String {
         .map(|line| line.trim_end_matches(|c| c == ' ' || c == '\t'))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Desanitized token mappings.
+const DESANITIZATIONS: &[(&str, &str)] = &[
+    ("<fnr>", "<function_results>"),
+    ("<n>", "<name>"),
+    ("</n>", "</name>"),
+    ("<o>", "<output>"),
+    ("</o>", "</output>"),
+    ("<e>", "<error>"),
+    ("</e>", "</error>"),
+    ("<s>", "<system>"),
+    ("</s>", "</system>"),
+    ("<r>", "<result>"),
+    ("</r>", "</result>"),
+    ("< META_START >", "<META_START>"),
+    ("< META_END >", "<META_END>"),
+    ("< EOT >", "<EOT>"),
+    ("< META >", "<META>"),
+    ("< SOS >", "<SOS>"),
+    ("\n\nH:", "\n\nHuman:"),
+    ("\n\nA:", "\n\nAssistant:"),
+];
+
+/// Applies all known desanitization reversals to a string.
+fn desanitize(s: &str) -> String {
+    let mut result = s.to_string();
+    for (from, to) in DESANITIZATIONS {
+        result = result.replace(from, to);
+    }
+    result
 }
