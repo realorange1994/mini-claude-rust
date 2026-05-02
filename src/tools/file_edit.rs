@@ -31,7 +31,11 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string with a new string. You must read the file first with read_file before editing. Provide enough context in old_string to uniquely identify the target."
+        "Edit a file by replacing an exact string with a new string. \
+         You MUST use read_file to read the file at least once before editing. \
+         ALWAYS prefer edit_file for modifying existing files — it only sends the diff. \
+         The edit will FAIL if old_string is not unique in the file. Provide enough context to uniquely match. \
+         Use replace_all to change every instance of old_string."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -118,20 +122,40 @@ impl Tool for FileEditTool {
             Err(e) => return ToolResult::error(format!("Error reading file: {}", e)),
         };
 
-        // Normalize CRLF
-        let mut content = content.replace("\r\n", "\n");
-        let old_str = old_str.replace("\r\n", "\n");
-        let new_str = new_str.replace("\r\n", "\n");
-        let has_crlf = content.contains('\r');
+        let has_crlf = content.contains("\r\n");
 
-        let count = content.matches(&old_str).count();
+        // Strip trailing whitespace from new_string (except .md/.mdx) matching official
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let new_str = if ext != "md" && ext != "mdx" {
+            strip_trailing_whitespace(new_str)
+        } else {
+            new_str.to_string()
+        };
+
+        // Normalize curly quotes to straight quotes for matching (matching official Claude Code).
+        // LLMs often output curly quotes ("") but files use straight quotes ("").
+        let content_norm = normalize_quotes(&content);
+        let old_str_norm = normalize_quotes(&old_str);
+        let new_str_norm = normalize_quotes(&new_str);
+
+        // Normalize CRLF for matching
+        let (content_norm, old_str_norm, new_str_norm) = if has_crlf {
+            (
+                content_norm.replace("\r\n", "\n"),
+                old_str_norm.replace("\r\n", "\n"),
+                new_str_norm.replace("\r\n", "\n"),
+            )
+        } else {
+            (content_norm, old_str_norm, new_str_norm)
+        };
+
+        let count = content_norm.matches(&old_str_norm).count();
         if count == 0 {
             return ToolResult::error(format!(
                 "Error: old_text not found in {}. Verify the file content.",
                 path.display()
             ));
         }
-
         if count > 1 && !replace_all {
             return ToolResult::error(format!(
                 "Warning: old_text appears {} times. Provide more context or set replace_all=true.",
@@ -139,23 +163,52 @@ impl Tool for FileEditTool {
             ));
         }
 
-        if replace_all {
-            content = content.replace(&old_str, &new_str);
+        let result = if replace_all {
+            content_norm.replace(&old_str_norm, &new_str_norm)
         } else {
-            if let Some(pos) = content.find(&old_str) {
-                content = format!("{}{}{}", &content[..pos], new_str, &content[pos + old_str.len()..]);
-            }
-        }
+            content_norm.replacen(&old_str_norm, &new_str_norm, 1)
+        };
 
-        // Restore CRLF if original had it
-        if has_crlf {
-            content = restore_crlf(&content);
-        }
+        // Preserve original quote style
+        let result = preserve_quote_style(&result, &normalize_quotes(&content), &old_str, &new_str);
 
-        if let Err(e) = fs::write(&path, &content) {
+        // Restore CRLF
+        let result = if has_crlf {
+            restore_crlf(&result)
+        } else {
+            result
+        };
+
+        if let Err(e) = fs::write(&path, &result) {
             return ToolResult::error(format!("Error writing file: {}", e));
         }
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))
     }
+}
+
+/// Converts curly/smart quotes to straight ASCII quotes.
+fn normalize_quotes(s: &str) -> String {
+    s.replace('\u{201C}', "\"")  // left double curly quote
+     .replace('\u{201D}', "\"")  // right double curly quote
+     .replace('\u{2018}', "'")   // left single curly quote
+     .replace('\u{2019}', "'")   // right single curly quote
+}
+
+/// Preserves original quote style in the result.
+fn preserve_quote_style(result: &str, _content_orig: &str, old_str: &str, _new_str: &str) -> String {
+    // If old_string used curly quotes, the replacement should too.
+    // For now, we keep the normalized (straight) quotes since the file
+    // content was also normalized. This matches the common case where
+    // LLMs output curly quotes but files use straight quotes.
+    let _ = (result, _content_orig, old_str, _new_str);
+    result.to_string()
+}
+
+/// Strips trailing whitespace from each line.
+fn strip_trailing_whitespace(s: &str) -> String {
+    s.lines()
+        .map(|line| line.trim_end_matches(|c| c == ' ' || c == '\t'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

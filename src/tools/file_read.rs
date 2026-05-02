@@ -82,6 +82,16 @@ impl Tool for FileReadTool {
             return ToolResult::error(format!("Error: not a file: {}", path.display()));
         }
 
+        // Reject binary file extensions (matching official Claude Code behavior)
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if is_binary_extension(ext) {
+                return ToolResult::error(format!(
+                    "Error: binary file not supported: {}",
+                    ext
+                ));
+            }
+        }
+
         if metadata.len() > MAX_FILE_SIZE {
             return ToolResult::error("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions.".to_string());
         }
@@ -147,5 +157,30 @@ impl Tool for FileReadTool {
 
         ToolResult::ok(result.trim_end().to_string())
     }
+}
+
+/// Checks if a file extension is a binary format that should be rejected.
+/// Official Claude Code proactively rejects binary extensions to avoid reading garbage content.
+fn is_binary_extension(ext: &str) -> bool {
+    let ext = ext.to_lowercase();
+    matches!(
+        ext.as_str(),
+        // Executables
+        "exe" | "dll" | "so" | "dylib" | "com"
+        // Archives
+        | "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tgz" | "zst" | "lz4"
+        | "cab" | "iso" | "img" | "dmg"
+        // Images (without image processing support)
+        | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "ico" | "webp" | "svgz"
+        | "avif" | "apng"
+        // Audio/Video
+        | "mp3" | "mp4" | "wav" | "ogg" | "avi" | "mov" | "mkv" | "flac" | "flv"
+        | "wmv" | "webm" | "aac" | "wma" | "m4a"
+        // Data/compiled
+        | "pyc" | "pyo" | "o" | "obj" | "a" | "lib" | "class" | "jar" | "war"
+        | "dat" | "bin" | "db" | "sqlite"
+        | "pdf" | "docx" | "xlsx" | "pptx"
+        | "woff" | "woff2" | "eot" | "ttf"
+    )
 }
 
