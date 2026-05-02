@@ -868,7 +868,28 @@ impl ExecTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+
+        // Extract exit code, handling signal-killed processes with 128+signal convention.
+        let exit_code = match output.status.code() {
+            Some(code) => code,
+            None => {
+                // Process was terminated by a signal (Unix).
+                // Use the standard convention: 128 + signal number.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = output.status.signal() {
+                        128 + signal
+                    } else {
+                        -1
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    -1
+                }
+            }
+        };
 
         let mut result = String::new();
         if !stdout.is_empty() {
@@ -907,10 +928,18 @@ impl ExecTool {
             result = "(no output)".to_string();
         }
 
+        let metadata = crate::tools::ToolResultMetadata {
+            tool_name: "exec".to_string(),
+            exit_code: Some(exit_code),
+            duration_ms: 0,
+            output_lines: 0,
+            truncated: false,
+        };
+
         ToolResult {
             output: result,
             is_error: !output.status.success(),
-            ..Default::default()
+            metadata,
         }
     }
 }
