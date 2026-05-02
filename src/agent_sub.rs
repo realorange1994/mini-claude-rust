@@ -4,10 +4,12 @@ use crate::agent_loop::AgentLoop;
 use crate::config::Config;
 use crate::context::{ConversationContext, Message, MessageContent};
 use crate::tools::Registry;
+use crate::tools::agent_store::{SharedAgentTaskStore, AgentTaskStatus};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// Static counter for generating unique sub-agent IDs.
 static AGENT_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -288,6 +290,9 @@ pub fn clone_context_for_fork(
 ///
 /// This is the synchronous path — it blocks until the child agent completes.
 /// Designed to be called from within a tool's execute() method.
+///
+/// When `run_in_background` is true and `agent_task_store` is provided, the agent
+/// is tracked in the store with output isolation (no terminal pollution).
 pub fn spawn_sub_agent_sync(
     parent_config: &Config,
     parent_registry: &Registry,
@@ -300,6 +305,7 @@ pub fn spawn_sub_agent_sync(
     inherit_context: bool,
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
     parent_use_stream: bool,
+    agent_task_store: Option<&SharedAgentTaskStore>,
 ) -> (String, String, String, usize, u64) {
     let start = std::time::Instant::now();
 
@@ -338,7 +344,24 @@ pub fn spawn_sub_agent_sync(
         let config = child_config.clone();
         let registry = child_registry.clone_for_spawn();
         let prompt_owned = prompt.to_string();
+        let description = prompt.chars().take(60).collect::<String>();
         let sys_prompt_owned = child_sys_prompt;
+
+        // Create task in store if available
+        let task_id = if let Some(store) = agent_task_store {
+            let task = store.create(&description, subagent_type, prompt, model);
+            let id = task.id.clone();
+            let cancel = CancellationToken::new();
+            store.start(&id, cancel);
+            Some(id)
+        } else {
+            None
+        };
+        let task_store_clone = agent_task_store.map(|s| Arc::clone(s));
+
+        // Clones to move into the thread (so we can still use task_id/task_store_clone after spawn)
+        let task_id_for_spawn = task_id.clone();
+        let task_store_for_spawn = task_store_clone.clone();
 
         // Capture parent entries for fork mode before spawning the thread
         let parent_entries: Vec<Message> = if inherit_context {
@@ -353,7 +376,20 @@ pub fn spawn_sub_agent_sync(
         };
 
         std::thread::spawn(move || {
-            match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, parent_use_stream) {
+            // Set up output capture: redirect all agent_emit! calls to the task's buffer
+            if let Some(ref tid) = task_id_for_spawn {
+                if let Some(ref store) = task_store_for_spawn {
+                    if let Some(task) = store.get(tid) {
+                        let task_for_cb = Arc::clone(&task);
+                        crate::agent_loop::set_output_capture(Arc::new(move |msg: &str| {
+                            task_for_cb.write_output(msg);
+                            task_for_cb.write_output("\n");
+                        }));
+                    }
+                }
+            }
+
+            let result = match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, false) {
                 Ok(child_loop) => {
                     // Apply fork mode: inject parent context entries into child
                     if !parent_entries.is_empty() {
@@ -391,17 +427,58 @@ pub fn spawn_sub_agent_sync(
                         drop(child_ctx); // release lock before run()
                     }
 
-                    let _result = child_loop.run(&prompt_owned);
+                    let result = child_loop.run(&prompt_owned);
+
+                    // Recover partial results if run returned empty
+                    let final_result = if result.is_empty() {
+                        child_loop.get_partial_result()
+                    } else {
+                        result
+                    };
+
+                    let tools_used = child_loop.tools_used_count();
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    Ok((final_result, tools_used, duration_ms))
                 }
                 Err(e) => {
-                    eprintln!("[agent] Failed to spawn background agent: {}", e);
+                    Err(format!("failed to create sub-agent: {e}"))
+                }
+            };
+
+            // Clear output capture before updating the task (so our task updates don't go to the buffer)
+            crate::agent_loop::clear_output_capture();
+
+            // Update task store with results
+            if let Some(ref tid) = task_id_for_spawn {
+                if let Some(ref store) = task_store_for_spawn {
+                    match &result {
+                        Ok((final_result, tools_used, duration_ms)) => {
+                            // Write the final result to the task's output buffer
+                            if let Some(task) = store.get(tid) {
+                                task.write_output(&format!("\n--- Agent Result ---\n{}\n", final_result));
+                            }
+                            store.update_stats(tid, *tools_used as u32, *duration_ms);
+                            store.complete(tid);
+                        }
+                        Err(e) => {
+                            store.fail(tid, e);
+                        }
+                    }
                 }
             }
         });
 
+        // Return with the task_id if available, otherwise use the agent_id
+        // (must be computed before the spawn since task_id is moved into the closure)
+        let return_id = if let Some(ref tid) = task_id {
+            tid.clone()
+        } else {
+            agent_id.clone()
+        };
+
         return (
-            agent_id.clone(),
-            format!("Agent launched in background.\n\nagentId: {}\nStatus: async_launched", agent_id),
+            return_id.clone(),
+            format!("Agent launched in background.\n\nagentId: {}\nStatus: async_launched", return_id),
             String::new(),
             0,
             start.elapsed().as_millis() as u64,

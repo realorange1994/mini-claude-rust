@@ -12,12 +12,59 @@ use crate::rate_limit::RateLimitState;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
 use anyhow::{anyhow, Result};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+/// Thread-local output capture: when set, all eprintln-like calls redirect to this
+/// callback instead of stderr. Used for background agent output isolation.
+thread_local! {
+    static OUTPUT_CAPTURE: RefCell<Option<Arc<dyn Fn(&str) + Send + Sync>>> = RefCell::new(None);
+}
+
+/// Set a callback that captures all output from the current thread (for background agents).
+/// After calling this, agent_eprintln() will redirect output to the callback.
+pub fn set_output_capture(callback: Arc<dyn Fn(&str) + Send + Sync>) {
+    OUTPUT_CAPTURE.with(|cap| {
+        *cap.borrow_mut() = Some(callback);
+    });
+}
+
+/// Clear the output capture callback (restore normal stderr output).
+pub fn clear_output_capture() {
+    OUTPUT_CAPTURE.with(|cap| {
+        *cap.borrow_mut() = None;
+    });
+}
+
+/// Emit a message to stderr, or to the thread-local capture if set.
+/// This is the global function used by the agent_emit! macro to redirect
+/// all background agent output away from the terminal.
+pub fn agent_eprintln(msg: &str) {
+    OUTPUT_CAPTURE.with(|cap| {
+        let borrow = cap.borrow();
+        if let Some(ref cb) = *borrow {
+            cb(msg);
+        } else {
+            eprintln!("{}", msg);
+        }
+    });
+}
+
+/// Like agent_emit! but respects the thread-local output capture.
+/// When a background agent has set output capture, this writes to the capture
+/// buffer instead of to stderr. Usage: agent_emit!("text {}", arg)
+#[macro_export]
+macro_rules! agent_emit {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        $crate::agent_loop::agent_eprintln(&msg);
+    }};
+}
 
 /// Build a reqwest client with API key headers.
 /// Returns None if the API key contains invalid header characters.
@@ -29,7 +76,7 @@ fn build_http_client(api_key: &str) -> Option<reqwest::Client> {
             key_val,
         );
     } else {
-        eprintln!("[WARN] API key contains invalid characters for HTTP header");
+        agent_emit!("[WARN] API key contains invalid characters for HTTP header");
     }
     let bearer = format!("Bearer {}", api_key);
     if let Ok(bearer_val) = bearer.parse::<reqwest::header::HeaderValue>() {
@@ -38,7 +85,7 @@ fn build_http_client(api_key: &str) -> Option<reqwest::Client> {
             bearer_val,
         );
     } else {
-        eprintln!("[WARN] Bearer token contains invalid characters for HTTP header");
+        agent_emit!("[WARN] Bearer token contains invalid characters for HTTP header");
     }
     reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
@@ -156,6 +203,8 @@ pub struct AgentLoop {
     custom_system_prompt: Option<String>,
     /// Counter for tool uses (for sub-agent reporting)
     tools_used: std::sync::atomic::AtomicUsize,
+    /// Optional output callback for background agents (suppresses eprintln when set)
+    pub output_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl AgentLoop {
@@ -191,9 +240,9 @@ impl AgentLoop {
             };
             let classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
             if classifier.is_enabled() {
-                eprintln!("  [auto-classifier] enabled (model={})", classifier_model);
+                agent_emit!("  [auto-classifier] enabled (model={})", classifier_model);
             } else {
-                eprintln!("  [auto-classifier] disabled (no API key or model)");
+                agent_emit!("  [auto-classifier] disabled (no API key or model)");
             }
             gate.set_classifier(classifier);
             gate.set_transcript_source(Arc::clone(&context));
@@ -247,6 +296,7 @@ impl AgentLoop {
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
             custom_system_prompt: None,
             tools_used: std::sync::atomic::AtomicUsize::new(0),
+            output_callback: None,
         })
     }
 
@@ -326,7 +376,7 @@ impl AgentLoop {
             if stats.phase == crate::compact::CompactPhase::None {
                 break;
             }
-            eprintln!(
+            agent_emit!(
                 "[preflight-compact] {} -> {} entries, ~{} tokens saved",
                 stats.entries_before, stats.entries_after, stats.estimated_tokens_saved
             );
@@ -375,6 +425,7 @@ impl AgentLoop {
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
             custom_system_prompt: None,
             tools_used: std::sync::atomic::AtomicUsize::new(0),
+            output_callback: None,
         })
     }
 
@@ -511,7 +562,7 @@ impl AgentLoop {
             } else {
                 if !result.warnings.is_empty() {
                     for w in &result.warnings {
-                        eprintln!("[WARN] {}", w);
+                        agent_emit!("[WARN] {}", w);
                     }
                 }
                 user_message.to_string()
@@ -682,7 +733,7 @@ impl AgentLoop {
                 let mut ctx = self.context.write().await;
                 let cleared = ctx.micro_compact_entries(keep_recent, &placeholder);
                 if cleared > 0 {
-                    eprintln!("[micro-compact] Cleared {} old tool results", cleared);
+                    agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
                 }
             }
 
@@ -713,7 +764,7 @@ impl AgentLoop {
                     ).await;
                     compactor.set_compact_threshold(saved_threshold);
                     if stats.phase != crate::compact::CompactPhase::None {
-                        eprintln!("[reactive-compact] Triggered: {} -> {} entries, ~{} tokens saved",
+                        agent_emit!("[reactive-compact] Triggered: {} -> {} entries, ~{} tokens saved",
                             stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
                         let _ = self.transcript.add_compact(
                             format!("reactive-{:?}", stats.phase),
@@ -736,7 +787,7 @@ impl AgentLoop {
                             &self.base_url,
                         ).await;
                         if stats.phase != crate::compact::CompactPhase::None {
-                            eprintln!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
+                            agent_emit!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
                                 stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
                             // Log compaction event to transcript
                             let _ = self.transcript.add_compact(
@@ -846,9 +897,9 @@ impl AgentLoop {
                                 let args_json = serde_json::to_string(&entry.params).unwrap_or_default();
                                 let input_preview = tool_arg_summary(&entry.tc.name, &args_json);
                                 if entry.tc.name == "exec" {
-                                    eprintln!("  [{}]: {}", entry.tc.name, input_preview);
+                                    agent_emit!("  [{}]: {}", entry.tc.name, input_preview);
                                 } else {
-                                    eprintln!("  [{}] {}", entry.tc.name, input_preview);
+                                    agent_emit!("  [{}] {}", entry.tc.name, input_preview);
                                 }
                             }
                         }
@@ -1008,7 +1059,7 @@ impl AgentLoop {
                                                 let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
                                                 if !coercion_result.warnings.is_empty() {
                                                     for w in &coercion_result.warnings {
-                                                        eprintln!("[coercion] {}", w);
+                                                        agent_emit!("[coercion] {}", w);
                                                     }
                                                 }
                                                 let result = t.execute(coerced);
@@ -1062,13 +1113,13 @@ impl AgentLoop {
                                             (output, result.is_error, elapsed)
                                         }
                                         Ok(Err(e)) => {
-                                            eprintln!("  [{}] panicked: {}", tc.name, e);
+                                            agent_emit!("  [{}] panicked: {}", tc.name, e);
                                             let output = format!("Error: tool execution panicked: {}", e);
                                             (output, true, elapsed)
                                         }
                                         Err(_) => {
                                             let output = format!("Error: {} timed out after {:?}", tc.name, tool_timeout);
-                                            eprintln!("  [{}] timed out after {:.1}s", tc.name, elapsed.as_secs_f64());
+                                            agent_emit!("  [{}] timed out after {:.1}s", tc.name, elapsed.as_secs_f64());
                                             (output, true, elapsed)
                                         }
                                     };
@@ -1107,17 +1158,17 @@ impl AgentLoop {
                             let elapsed_str = format!("{:.2}s", elapsed.as_secs_f64());
                             if *is_error {
                                 let preview = limit_str(output, 150);
-                                eprintln!("  [x] {} ({}): {}", tool_name, elapsed_str, preview);
+                                agent_emit!("  [x] {} ({}): {}", tool_name, elapsed_str, preview);
                             } else {
                                 // Print success result preview
                                 let preview = tool_result_preview(tool_name, output);
                                 if tool_name == "exec" {
                                     // For exec, show result with tool name prefix (matching Go)
-                                    eprintln!("  [+] {}: {}", tool_name, preview);
+                                    agent_emit!("  [+] {}: {}", tool_name, preview);
                                 } else if preview.is_empty() {
-                                    eprintln!("  [+] {}", tool_name);
+                                    agent_emit!("  [+] {}", tool_name);
                                 } else {
-                                    eprintln!("  [+] {}: {}", tool_name, preview);
+                                    agent_emit!("  [+] {}: {}", tool_name, preview);
                                 }
                             }
                         }
@@ -1189,21 +1240,21 @@ impl AgentLoop {
                         // Continue the loop to let the model produce more output.
                         consecutive_empty_responses += 1;
                         if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
-                            eprintln!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
+                            agent_emit!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
                             return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
                         }
                         // When budget is exhausted but text is empty, grant a grace call
                         // so the model gets one more chance to produce a final answer
                         if !budget.consume() {
                             if budget.grace_call() {
-                                eprintln!("\n[!] Budget exhausted, granting grace call for final answer...");
+                                agent_emit!("\n[!] Budget exhausted, granting grace call for final answer...");
                             } else {
-                                eprintln!("[!] No text/tool_use in response (attempt {}/{}), giving up...",
+                                agent_emit!("[!] No text/tool_use in response (attempt {}/{}), giving up...",
                                     consecutive_empty_responses, MAX_EMPTY_RESPONSES);
                                 return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
                             }
                         }
-                        eprintln!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
+                        agent_emit!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
                             consecutive_empty_responses, MAX_EMPTY_RESPONSES);
                         // Inject hint to encourage actual output
                         let mut ctx = self.context.write().await;
@@ -1223,7 +1274,7 @@ impl AgentLoop {
                         continue_reason = ContinueReason::MaxOutputTokens;
 
                         if max_output_tokens_retries <= MAX_OUTPUT_TOKENS_RETRIES {
-                            eprintln!(
+                            agent_emit!(
                                 "[!] Output token limit hit (retry {}/{}), resuming directly...",
                                 max_output_tokens_retries, MAX_OUTPUT_TOKENS_RETRIES
                             );
@@ -1234,14 +1285,14 @@ impl AgentLoop {
                             );
                             continue;
                         } else {
-                            eprintln!("[!] Max output tokens recovery exhausted, falling back to truncation");
+                            agent_emit!("[!] Max output tokens recovery exhausted, falling back to truncation");
                             // Fall through to context recovery
                         }
                     }
 
                     // Model confusion - inject corrective message and retry
                     if err_str.contains("model confused") {
-                        eprintln!("[!] Model confused, injecting corrective message...");
+                        agent_emit!("[!] Model confused, injecting corrective message...");
                         continue_reason = ContinueReason::ModelConfused;
                         let mut ctx = self.context.write().await;
                         ctx.add_user_message(
@@ -1254,7 +1305,7 @@ impl AgentLoop {
 
                     // 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
                     if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
-                        eprintln!("[!] Tool pairing error (2013), repairing context...");
+                        agent_emit!("[!] Tool pairing error (2013), repairing context...");
                         let mut ctx = self.context.write().await;
                         ctx.validate_tool_pairing();
                         ctx.fix_role_alternation();
@@ -1263,7 +1314,7 @@ impl AgentLoop {
 
                     // Truncated tool arguments - model was cut off mid-tool-call
                     if err_str.contains("truncated") || err_str.contains("incomplete JSON") {
-                        eprintln!("[!] Tool arguments were truncated, injecting corrective hint...");
+                        agent_emit!("[!] Tool arguments were truncated, injecting corrective hint...");
                         continue_reason = ContinueReason::MaxOutputTokens;
                         let mut ctx = self.context.write().await;
                         ctx.add_user_message(
@@ -1274,7 +1325,7 @@ impl AgentLoop {
                         continue;
                     }
 
-                    eprintln!("[!] Turn failed: {}", e);
+                    agent_emit!("[!] Turn failed: {}", e);
 
                     // Detect context length error
                     if err_str.contains("context_length") || err_str.contains("prompt is too long") ||
@@ -1283,14 +1334,14 @@ impl AgentLoop {
                         continue_reason = ContinueReason::PromptTooLong;
 
                         if context_errors > MAX_CONTEXT_RECOVERY {
-                            eprintln!("[!] Context recovery exhausted after {} attempts, giving up", MAX_CONTEXT_RECOVERY);
+                            agent_emit!("[!] Context recovery exhausted after {} attempts, giving up", MAX_CONTEXT_RECOVERY);
                             return Ok("Error: Context overflow - unable to recover".to_string());
                         }
 
                         // Progressive recovery: try LLM compact first, then truncation
                         if context_errors == 1 && self.config.auto_compact_enabled {
                             // First attempt: try LLM-driven compaction
-                            eprintln!("[!] Context overflow, attempting LLM compaction...");
+                            agent_emit!("[!] Context overflow, attempting LLM compaction...");
                             let mut ctx = self.context.write().await;
                             let mut compactor = self.compactor.write().await;
                             let _ = compactor.compact(
@@ -1301,11 +1352,11 @@ impl AgentLoop {
                                 &self.base_url,
                             ).await;
                         } else if context_errors <= 2 {
-                            eprintln!("[!] Context overflow, truncating history (phase 1/2)...");
+                            agent_emit!("[!] Context overflow, truncating history (phase 1/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.truncate_history();
                         } else {
-                            eprintln!("[!] Context still full, aggressive truncation (phase 2/2)...");
+                            agent_emit!("[!] Context still full, aggressive truncation (phase 2/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.aggressive_truncate_history();
                         }
@@ -1317,7 +1368,7 @@ impl AgentLoop {
                     if consecutive_stalls >= 3 {
                         // If budget exhausted, try for final summary
                         if budget.remaining() == 0 {
-                            eprintln!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
+                            agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
                             return self.request_final_summary(system_prompt, tools).await;
                         }
                         return Err(anyhow!("Too many consecutive failures"));
@@ -1327,7 +1378,7 @@ impl AgentLoop {
         }
 
         // Max turns reached - try to get a final summary
-        eprintln!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
+        agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
         self.request_final_summary(system_prompt, tools).await
     }
 
@@ -1363,7 +1414,7 @@ impl AgentLoop {
                 }
             }
             Err(e) => {
-                eprintln!("[!] Final summary call failed: {}", e);
+                agent_emit!("[!] Final summary call failed: {}", e);
             }
         }
 
@@ -1411,7 +1462,7 @@ impl AgentLoop {
 
                     // 2013 error: tool pairing broken -- repair and rebuild messages before retry
                     if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
-                        eprintln!("[!] Tool pairing error (2013) during stream, repairing context and rebuilding messages...");
+                        agent_emit!("[!] Tool pairing error (2013) during stream, repairing context and rebuilding messages...");
                         {
                             let mut ctx = self.context.write().await;
                             ctx.validate_tool_pairing();
@@ -1423,7 +1474,7 @@ impl AgentLoop {
                         match self.try_stream_once(system_prompt, &rebuilt, tools).await {
                             Ok(result) => return Ok(result),
                             Err(e2) => {
-                                eprintln!("[!] Stream still failed after 2013 repair: {}", e2);
+                                agent_emit!("[!] Stream still failed after 2013 repair: {}", e2);
                                 // Fall through to non-streaming with rebuilt messages
                                 return self.call_with_non_streaming_fallback(system_prompt, &rebuilt, tools).await;
                             }
@@ -1433,20 +1484,20 @@ impl AgentLoop {
                     // Check if it's a transient error using rich classification
                     let classification = classify_error(&err_str, 0, 0);
                     if !classification.retryable {
-                        eprintln!("[!] Non-transient streaming error ({}): {}", classification.error.category(), e);
+                        agent_emit!("[!] Non-transient streaming error ({}): {}", classification.error.category(), e);
                         break;
                     }
 
                     // Use recovery hints for logging
                     if classification.hints.compress {
-                        eprintln!("[!] Hint: compress context before retry");
+                        agent_emit!("[!] Hint: compress context before retry");
                     }
                     if classification.hints.fallback {
-                        eprintln!("[!] Hint: consider model/provider fallback");
+                        agent_emit!("[!] Hint: consider model/provider fallback");
                     }
 
                     if attempt < MAX_RETRIES - 1 {
-                        eprintln!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
+                        agent_emit!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
                             attempt + 1, backoff_ms, e);
                         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
@@ -1454,7 +1505,7 @@ impl AgentLoop {
                 }
             }
         }
-        eprintln!("[!] Streaming failed after {} attempts, falling back to non-streaming", MAX_RETRIES);
+        agent_emit!("[!] Streaming failed after {} attempts, falling back to non-streaming", MAX_RETRIES);
 
         // Fall back to non-streaming with retries
         self.call_with_non_streaming_fallback(system_prompt, messages, tools).await
@@ -1509,10 +1560,10 @@ impl AgentLoop {
             // When text was already streamed to the terminal before the failure,
             // return the text as-is (it was already shown) to avoid duplication.
             if stream_result.text_already_streamed {
-                eprintln!("[!] Stream failed after text was already delivered; returning partial text");
+                agent_emit!("[!] Stream failed after text was already delivered; returning partial text");
                 return Ok((tool_calls, text));
             }
-            eprintln!("[!] Stream returned partial results, retrying with fresh connection");
+            agent_emit!("[!] Stream returned partial results, retrying with fresh connection");
             return Err(anyhow!("stream returned partial result (partial delivery)"));
         }
 
@@ -1525,13 +1576,13 @@ impl AgentLoop {
         // Return error so the agent loop can retry with corrective hint.
         if collect.has_truncated_tool_args() {
             let names: Vec<_> = tool_calls.iter().map(|t| t.name.clone()).collect();
-            eprintln!("[!] Tool arguments truncated: {:?}, injecting corrective hint", names);
+            agent_emit!("[!] Tool arguments truncated: {:?}, injecting corrective hint", names);
             return Err(anyhow!("tool arguments were truncated (incomplete JSON)"));
         }
 
         // Log finish_reason for debugging
         if let Some(reason) = stream_result.finish_reason {
-            eprintln!("[DEBUG] Stream finish_reason={}", reason);
+            agent_emit!("[DEBUG] Stream finish_reason={}", reason);
         }
 
         // Mark that this call actually used streaming, so the caller (main.rs)
@@ -1574,7 +1625,7 @@ impl AgentLoop {
 
                     // 2013 error: tool pairing broken -- repair and rebuild messages before retry
                     if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
-                        eprintln!("[!] Tool pairing error (2013) in non-streaming, repairing context...");
+                        agent_emit!("[!] Tool pairing error (2013) in non-streaming, repairing context...");
                         {
                             let mut ctx = self.context.write().await;
                             ctx.validate_tool_pairing();
@@ -1591,7 +1642,7 @@ impl AgentLoop {
                     }
 
                     if attempt < MAX_RETRIES - 1 {
-                        eprintln!("[!] Non-streaming attempt {} failed (transient), retrying in {}ms: {}",
+                        agent_emit!("[!] Non-streaming attempt {} failed (transient), retrying in {}ms: {}",
                             attempt + 1, backoff_ms, e);
                         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
@@ -1694,7 +1745,7 @@ impl AgentLoop {
 
         if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
             if content.is_empty() {
-                eprintln!("[DEBUG] Response has empty content array. stop_reason={:?}, body={}",
+                agent_emit!("[DEBUG] Response has empty content array. stop_reason={:?}, body={}",
                     body.get("stop_reason"),
                     serde_json::to_string(&body).unwrap_or_else(|_| "<failed to serialize>".to_string())
                 );
@@ -1716,9 +1767,9 @@ impl AgentLoop {
 
                                 let summary = tool_arg_summary(&name, &args);
                                 if !summary.is_empty() {
-                                    eprintln!("  [{}]: {}", name, summary);
+                                    agent_emit!("  [{}]: {}", name, summary);
                                 } else {
-                                    eprintln!("  [{}]", name);
+                                    agent_emit!("  [{}]", name);
                                 }
 
                                 tool_calls.push(ToolCallInfo {
@@ -1735,7 +1786,7 @@ impl AgentLoop {
                         }
                         _ => {
                             // Log unknown block types for debugging
-                            eprintln!("[DEBUG] Unknown content block type: {}", block_type);
+                            agent_emit!("[DEBUG] Unknown content block type: {}", block_type);
                         }
                     }
                 }
@@ -1744,7 +1795,7 @@ impl AgentLoop {
             // No "content" field at all
             let body_preview = serde_json::to_string(&body)
                 .unwrap_or_else(|_| "<failed to serialize>".to_string());
-            eprintln!("[DEBUG] Missing 'content' field in response. stop_reason={:?}, body={}",
+            agent_emit!("[DEBUG] Missing 'content' field in response. stop_reason={:?}, body={}",
                 body.get("stop_reason"),
                 body_preview
             );
@@ -1753,7 +1804,7 @@ impl AgentLoop {
         // Display thinking if present (only in streaming mode)
         if !thinking.is_empty() && self.use_stream {
             let preview = truncate_at(thinking.lines().next().unwrap_or(""), 120);
-            eprintln!("\n[THINK] {}", preview);
+            agent_emit!("\n[THINK] {}", preview);
         }
 
         // Debug: log when parsed result has no actionable content
@@ -1764,7 +1815,7 @@ impl AgentLoop {
                     .filter_map(|b| b.get("type").and_then(|t| t.as_str()).map(|s| s.to_string()))
                     .collect())
                 .unwrap_or_default();
-            eprintln!("[DEBUG] Parsed response has no text/tool_use. content_types={}, stop_reason={:?}, thinking_len={}",
+            agent_emit!("[DEBUG] Parsed response has no text/tool_use. content_types={}, stop_reason={:?}, thinking_len={}",
                 content_types.join(","),
                 body.get("stop_reason"),
                 thinking.len()
@@ -1828,7 +1879,7 @@ impl AgentLoop {
         let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
         if !coercion_result.warnings.is_empty() {
             for w in &coercion_result.warnings {
-                eprintln!("[coercion] {}", w);
+                agent_emit!("[coercion] {}", w);
             }
         }
 
@@ -1848,15 +1899,15 @@ impl AgentLoop {
 
         match result {
             Ok(Ok(tool_result)) => {
-                eprintln!("[Tool: {}] completed in {:.2}s", tool_name, elapsed.as_secs_f64());
+                agent_emit!("[Tool: {}] completed in {:.2}s", tool_name, elapsed.as_secs_f64());
                 Ok(tool_result)
             }
             Ok(Err(e)) => {
-                eprintln!("[Tool: {}] join error after {:.2}s: {}", tool_name, elapsed.as_secs_f64(), e);
+                agent_emit!("[Tool: {}] join error after {:.2}s: {}", tool_name, elapsed.as_secs_f64(), e);
                 Err(anyhow!("Tool execution panicked: {}", e))
             }
             Err(_) => {
-                eprintln!("[Tool: {}] timed out after {:?}", tool_name, timeout);
+                agent_emit!("[Tool: {}] timed out after {:?}", tool_name, timeout);
                 Ok(ToolResult {
                     output: format!("Error: {} timed out after {:?}", tool_name, timeout),
                     is_error: true,
@@ -1884,7 +1935,7 @@ impl AgentLoop {
             ctx.truncate_history();
         }
 
-        eprintln!("[!] Context truncated from {} to {} entries", len, ctx.len());
+        agent_emit!("[!] Context truncated from {} to {} entries", len, ctx.len());
         true
     }
 
@@ -1988,7 +2039,7 @@ impl AgentLoop {
         }
 
         if files_recovered > 0 {
-            eprintln!(
+            agent_emit!(
                 "[post-compact] Recovered {} files ({} chars)",
                 files_recovered, total_chars
             );
@@ -2048,7 +2099,7 @@ impl AgentLoop {
             }
 
             if skills_recovered > 0 {
-                eprintln!(
+                agent_emit!(
                     "[post-compact] Recovered {} skills ({} chars)",
                     skills_recovered, total_skill_chars
                 );
@@ -2104,6 +2155,18 @@ impl AgentLoop {
     /// Get a clone of the interrupted flag for use in Ctrl+C handler
     pub fn interrupted_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.interrupted.clone()
+    }
+
+    /// Emit a log/diagnostic message. When an output_callback is set (background agent),
+    /// the message goes to the callback buffer instead of stderr. Otherwise, it goes to
+    /// stderr like normal. This is the primary way for background agents to produce output
+    /// without polluting the terminal.
+    pub fn emit(&self, msg: &str) {
+        if let Some(ref cb) = self.output_callback {
+            cb(msg);
+        } else {
+            agent_emit!("{}", msg);
+        }
     }
 
     /// Force compact the conversation context (for /compact command).
@@ -2188,7 +2251,7 @@ impl AgentLoop {
         // Default pivot: midpoint of messages
         let pivot = pivot_index.unwrap_or(total / 2);
 
-        eprintln!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
+        agent_emit!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
 
         crate::compact::partial_compact(&mut context, dir, pivot)
     }
@@ -2312,6 +2375,7 @@ impl AgentLoop {
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
             custom_system_prompt: Some(system_prompt.to_string()),
             tools_used: std::sync::atomic::AtomicUsize::new(0),
+            output_callback: None,
         })
     }
 }

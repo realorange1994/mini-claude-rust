@@ -169,6 +169,10 @@ fn main() -> Result<()> {
     let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
     let _notification_rx = tools::register_bash_task_tools(&registry, task_store.clone());
 
+    // Initialize AgentTaskStore for background sub-agent management
+    let agent_task_store = miniclaudecode_rust::tools::agent_store::AgentTaskStore::new_shared();
+    tools::register_agent_management_tools(&registry, &agent_task_store);
+
     // Parent context slot for agent tool's fork mode — set after agent loop is created
     let parent_context_slot: std::sync::Arc<
         tokio::sync::RwLock<
@@ -182,6 +186,7 @@ fn main() -> Result<()> {
         let registry_arc_for_spawn = std::sync::Arc::new(tokio::sync::RwLock::new(registry.clone_for_spawn()));
         let context_slot_for_closure = parent_context_slot.clone();
         let use_stream_for_spawn = use_stream;
+        let store_for_closure = agent_task_store.clone();
         let spawn_func: tools::agent_tool::AgentSpawnFunc = std::sync::Arc::new(move |
             prompt: &str,
             subagent_type: &str,
@@ -207,6 +212,7 @@ fn main() -> Result<()> {
                 inherit_context,
                 parent_ctx,
                 use_stream_for_spawn,
+                Some(&store_for_closure),
             )
         });
         tools::register_agent_tool(&registry, spawn_func);
@@ -265,11 +271,11 @@ fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_interactive(agent, work_task_store);
+    run_interactive(agent, work_task_store, agent_task_store);
     Ok(())
 }
 
-fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore) {
+fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore, agent_task_store: miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore) {
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
 
@@ -358,7 +364,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
         let is_known_cmd = if user_input.starts_with('/') {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
             let cmd = parts.first().unwrap_or(&"").to_lowercase();
-            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/partialcompact" | "/clear")
+            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/partialcompact" | "/clear" | "/agents")
         } else {
             false
         };
@@ -446,6 +452,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                     println!("  /mode    -- Switch permission mode (ask|auto|plan)");
                     println!("  /resume  -- Resume a previous session");
                     println!("  /tools   -- List available tools");
+                    println!("  /agents  -- Manage background agents (/agents help for details)");
                     println!("  /quit    -- Exit");
                     continue;
                 }
@@ -508,6 +515,90 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         println!("\nUsage: /resume <number> or /resume <filename>");
                     }
                     continue;
+                }
+                "/agents" => {
+                    // /agents [list|show|stop] [args]
+                    let sub_cmd = parts.get(1).map(|s| *s).unwrap_or("list");
+                    match sub_cmd {
+                        "list" => {
+                            let tasks = agent_task_store.list();
+                            if tasks.is_empty() {
+                                println!("No agents.");
+                                continue;
+                            }
+                            println!("{:<10} {:<12} {:<30} {:<15}", "ID", "Status", "Description", "Started");
+                            println!("{}", "-".repeat(70));
+                            for task in &tasks {
+                                let elapsed = task.start_time.elapsed();
+                                let started = if elapsed.as_secs() < 60 {
+                                    format!("{}s ago", elapsed.as_secs())
+                                } else if elapsed.as_secs() < 3600 {
+                                    format!("{}m ago", elapsed.as_secs() / 60)
+                                } else {
+                                    format!("{}h ago", elapsed.as_secs() / 3600)
+                                };
+                                let desc = if task.description.len() > 28 {
+                                    format!("{}...", &task.description[..25])
+                                } else {
+                                    task.description.clone()
+                                };
+                                println!("{:<10} {:<12} {:<30} {:<15}",
+                                    task.id, task.status(), desc, started);
+                            }
+                            continue;
+                        }
+                        "show" => {
+                            if let Some(id) = parts.get(2) {
+                                if let Some(task) = agent_task_store.get(id) {
+                                    let elapsed = task.start_time.elapsed();
+                                    let duration_str = if elapsed.as_secs() < 60 {
+                                        format!("{}s", elapsed.as_secs())
+                                    } else {
+                                        format!("{:.1}m", elapsed.as_secs() as f64 / 60.0)
+                                    };
+                                    println!("Agent ID:       {}", task.id);
+                                    println!("Status:        {}", task.status());
+                                    println!("Description:   {}", task.description);
+                                    println!("Type:          {}", task.subagent_type);
+                                    println!("Model:         {}", if task.model.is_empty() { "-" } else { &task.model });
+                                    println!("Duration:      {}", duration_str);
+                                    println!("Tools used:    {}", task.tools_used());
+                                    let output = task.get_output();
+                                    if !output.is_empty() {
+                                        println!("\n--- Output ({} chars) ---", output.len());
+                                        println!("{}", output);
+                                    }
+                                } else {
+                                    println!("Agent '{}' not found.", id);
+                                }
+                            } else {
+                                println!("Usage: /agents show <id>");
+                            }
+                            continue;
+                        }
+                        "stop" => {
+                            if let Some(id) = parts.get(2) {
+                                let killed = agent_task_store.kill(id);
+                                if killed {
+                                    println!("Agent '{}' killed.", id);
+                                } else {
+                                    println!("Agent '{}' not found or already stopped.", id);
+                                }
+                            } else {
+                                println!("Usage: /agents stop <id>");
+                            }
+                            continue;
+                        }
+                        "help" | _ => {
+                            println!("Usage: /agents <command>");
+                            println!("Commands:");
+                            println!("  /agents list          -- List all agents");
+                            println!("  /agents show <id>     -- Show details of an agent");
+                            println!("  /agents stop <id>     -- Kill a running agent");
+                            println!("  /agents help          -- Show this help");
+                            continue;
+                        }
+                    }
                 }
                 _ => {
                     println!("Unknown command: {}", cmd);

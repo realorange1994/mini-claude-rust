@@ -27,6 +27,8 @@ pub mod task_tool;
 pub mod agent_tool;
 mod brief_tool;
 pub mod tool_search_tool;
+pub mod agent_store;
+pub mod agent_tools;
 // bash_task_tools merged into exec_tool
 
 // Re-export tool structs for integration tests
@@ -445,6 +447,11 @@ pub fn register_task_tools(registry: &Registry, store: &crate::work_task::Shared
 /// Register agent tool with spawn callback
 pub fn register_agent_tool(registry: &Registry, spawn_func: agent_tool::AgentSpawnFunc) {
     registry.register(agent_tool::AgentTool::with_spawn_func_arc(spawn_func));
+}
+
+/// Register agent management tools (agent_list, agent_get, agent_kill)
+pub fn register_agent_management_tools(registry: &Registry, store: &agent_store::SharedAgentTaskStore) {
+    agent_tools::register_agent_tools(registry, store);
 }
 
 /// Register bash background task tools (task_stop, task_output) and the exec tool
