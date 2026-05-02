@@ -77,11 +77,11 @@ impl Tool for AgentTool {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Brief 3-5 word description of what the agent will do"
+                    "description": "A short (3-5 word) description of the task"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The complete task for the agent to perform. Be specific and include all necessary context."
+                    "description": "The task for the agent to perform"
                 },
                 "subagent_type": {
                     "type": "string",
