@@ -54,6 +54,7 @@ pub fn is_git_repo(dir: &str) -> bool {
 }
 
 /// Run `git status --porcelain -u` and return a map of file -> status.
+/// Includes untracked files (useful for displaying status to the user).
 pub fn get_git_status(dir: &str) -> Result<StdHashMap<String, String>, String> {
     let mut cmd = Command::new("git");
     cmd.args(["status", "--porcelain", "-u"]);
@@ -75,9 +76,32 @@ pub fn get_git_status(dir: &str) -> Result<StdHashMap<String, String>, String> {
     Ok(result)
 }
 
-/// Check if there are any uncommitted changes in the repo.
+/// Check if there are any uncommitted changes to tracked files in the repo.
+/// Uses `git diff --quiet` (unstaged) and `git diff --cached --quiet` (staged).
+/// Untracked files are intentionally excluded — this matches how git checkout/switch
+/// work, since they don't fail due to untracked files.
 pub fn has_uncommitted_changes(dir: &str) -> bool {
-    get_git_status(dir).map(|s| !s.is_empty()).unwrap_or(false)
+    // Check unstaged changes to tracked files
+    let mut cmd = Command::new("git");
+    cmd.args(["diff", "--quiet"]);
+    cmd.current_dir(dir);
+    if let Ok(output) = cmd.output() {
+        if !output.status.success() {
+            return true;
+        }
+    }
+
+    // Check staged changes to tracked files
+    let mut cmd2 = Command::new("git");
+    cmd2.args(["diff", "--cached", "--quiet"]);
+    cmd2.current_dir(dir);
+    if let Ok(output) = cmd2.output() {
+        if !output.status.success() {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Try to get the default branch via origin/HEAD, falling back to "main".
@@ -110,17 +134,11 @@ pub fn get_current_commit_hash(dir: &str) -> Result<String, String> {
     }
 }
 
-/// Check if the repo is dirty: has uncommitted changes or unstaged diff.
+/// Check if the repo is dirty: has uncommitted changes to tracked files
+/// (unstaged or staged). Untracked files are NOT considered dirty — this
+/// matches how git checkout/switch actually work.
 pub fn is_dirty(dir: &str) -> bool {
-    if has_uncommitted_changes(dir) {
-        return true;
-    }
-    let mut cmd = Command::new("git");
-    cmd.args(["diff", "--quiet"]);
-    cmd.current_dir(dir);
-    cmd.output()
-        .map(|o| !o.status.success())
-        .unwrap_or(false)
+    has_uncommitted_changes(dir)
 }
 
 /// Return a formatted git context string for system prompt injection.
@@ -543,10 +561,9 @@ impl Tool for GitTool {
         let work_dir = if operation == "clone" {
             params.get("directory").and_then(|v| v.as_str()).map(PathBuf::from)
         } else if operation == "blame" {
-            // For blame: directory is the working directory. If not set, fall back to path.
+            // For blame: only use explicit directory param. The 'path' param is the file to blame.
             params.get("directory")
                 .and_then(|v| v.as_str())
-                .or_else(|| params.get("path").and_then(|v| v.as_str()))
                 .map(PathBuf::from)
         } else {
             params.get("directory")
@@ -831,7 +848,18 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         "branch" => {
             args.push("branch".to_string());
             if let Some(branch) = params.get("branch").and_then(|v| v.as_str()) {
-                args.push(branch.to_string());
+                if !branch.is_empty() {
+                    // Creating/deleting/renaming branch
+                    args.push(branch.to_string());
+                } else {
+                    // Empty branch param: list all branches
+                    args.push("--all".to_string());
+                    args.push("--no-color".to_string());
+                }
+            } else {
+                // No branch param: list all branches (local + remote)
+                args.push("--all".to_string());
+                args.push("--no-color".to_string());
             }
         }
         "checkout" => {
@@ -1172,11 +1200,15 @@ fn build_git_args(params: &HashMap<String, Value>, operation: &str) -> Result<Ve
         _ => return Err(format!("unknown operation: {}", operation)),
     }
 
-    // Add extra flags
+    // Add extra flags, deduplicating against flags already in args to avoid
+    // duplicates like "git rev-list -20 --count --count"
     if let Some(flags) = params.get("flags").and_then(|v| v.as_array()) {
+        let existing: std::collections::HashSet<String> = args.iter().cloned().collect();
         for f in flags {
             if let Some(s) = f.as_str() {
-                args.push(s.to_string());
+                if !existing.contains(s) {
+                    args.push(s.to_string());
+                }
             }
         }
     }
@@ -1789,6 +1821,21 @@ mod tests {
         let result = tool.execute(params);
         assert!(!result.is_error, "rev-list failed: {}", result.output);
         // With --count flag, output is just the number
+        assert!(result.output.trim().chars().all(|c| c.is_ascii_digit()), "rev-list should return a count: {}", result.output);
+    }
+
+    #[test]
+    fn test_git_rev_list_dedup_count() {
+        // When --count is provided in flags, it should not be duplicated
+        // since --count is already hardcoded in the rev-list handler.
+        let (_temp, base) = setup_test_repo();
+        let tool = GitTool::new();
+        let mut params = HashMap::new();
+        params.insert("operation".to_string(), Value::String("rev-list".to_string()));
+        params.insert("directory".to_string(), Value::String(base.clone()));
+        params.insert("flags".to_string(), Value::Array(vec![Value::String("--count".to_string())]));
+        let result = tool.execute(params);
+        assert!(!result.is_error, "rev-list with duplicate --count failed: {}", result.output);
         assert!(result.output.trim().chars().all(|c| c.is_ascii_digit()), "rev-list should return a count: {}", result.output);
     }
 
