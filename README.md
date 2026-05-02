@@ -177,22 +177,54 @@ In AUTO mode, an LLM-based security classifier evaluates non-whitelisted tool ca
 - Read-only tools: `read_file`, `glob`, `grep`, `list_dir`, `tool_search`, `brief`, `runtime_info`
 - Memory tools: `memory_add`, `memory_search`
 - Task management: `task_create`, `task_list`, `task_get`, `task_update`
-- MCP introspection: `list_mcp_tools`, `list_skills`, `search_skills`, `read_skill`, `mcp_server_status`
+- MCP/skill introspection: `list_mcp_tools`, `list_skills`, `search_skills`, `read_skill`, `mcp_server_status`
 
 **Git operations** -- operation-level granularity:
 - Read-only (auto-allowed): `info`, `status`, `log`, `diff`, `show`, `reflog`, `blame`, `describe`, `shortlog`, `ls-tree`, `rev-parse`, `rev-list`
 - Write operations (`push`, `commit`, `merge`, `rebase`, etc.) go through the classifier
 
-**Exec commands** -- command-level granularity with prefix matching:
+**Exec commands** -- command-level granularity:
 - Safe prefixes (auto-allowed): `ls`, `cat`, `head`, `tail`, `wc`, `find`, `grep`, `rg`, `tree`, `stat`, `diff`, `go version`, `go env`, `go build`, `go test`, `go vet`, `go run`, `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo run`, `npm test`, `npm run`, `make`, `cmake`, `ping`, `traceroute`, `ps`, `top`, `env`, `whoami`, `hostname`, `uname`, `date`, and more
-- Dangerous patterns (always blocked): `rm`, `sudo`, `chmod`, `chown`, `mkfs`, `dd if=`, `curl ... | bash`, `wget ... | sh`, redirects to system directories
+- Dangerous patterns (not auto-allowlisted): `rm`, `sudo`, `chmod`, `chown`, `mkfs`, `dd if=`, `curl|bash`, `wget|sh`, redirects to system directories, command substitution (`$()`)
+- Combined commands (`&&`, `||`, `;`) are split and each segment is checked independently — `safe_cmd && evil_cmd` correctly blocks
 - Unknown commands go through the LLM classifier
 
 **Process operations** -- operation-level granularity:
 - Read-only (auto-allowed): `list`, `pgrep`, `top`, `pstree`, `ps`
 - Destructive operations (`kill`, `pkill`) go through the classifier
 
-**Classifier behavior**:
+**Fileops** -- operation-level granularity:
+- Read-only (auto-allowed): `read`, `stat`, `checksum`, `exists`, `ls`
+- Write/destructive operations (`rmrf`, `rm`, `mv`, `cp`, `chmod`, etc.) go through the classifier — no unconditional hard blocks, matching Claude Code's upstream design
+
+#### Two-Stage Classifier
+
+The classifier uses a two-stage approach modeled after Claude Code's upstream `yoloClassifier.ts`:
+
+- **Stage 1 (fast)**: 2112 max_tokens — quick allow/block decision. Most safe commands are decided here.
+- **Stage 2 (thinking)**: 6144 max_tokens with 2048-token thinking padding — full chain-of-thought reasoning with a richer prompt. Triggered when Stage 1 blocks, for deeper security analysis.
+
+#### Dangerous Removal Path Validation
+
+`rm`/`rmdir` commands are checked against system-critical paths before classification. The following paths are hard-blocked (cannot be auto-allowlisted):
+- `/` (root directory)
+- `~` and `*` / `/*` (wildcards)
+- Direct children of `/` (`/usr`, `/tmp`, `/etc`, `/bin`, `/var`, etc.)
+- Windows drive roots (`C:\`, `D:\`) and protected directories (`C:\Windows`, `C:\Users`, `C:\Program Files`)
+
+Project-scoped paths (`./build`, `./node_modules`, `/home/user/project/dist`) pass the path check and are evaluated by the classifier.
+
+#### Classifier Decision Categories
+
+The classifier uses BLOCK ALWAYS semantic categories (modeled after upstream):
+1. External Code Execution: `curl|bash`, `wget|sh`, piping to shell
+2. Irreversible Local Destruction: `rm -rf`, recursive deletion, file truncation, database drops
+3. Unauthorized Persistence: cron jobs, systemd services, shell profile modifications
+4. Security Weakening: disabling firewalls, security policies, `chmod 777`
+5. Privilege Escalation: `sudo`, `su`, `runas`
+6. Unauthorized Network Services: starting servers, listeners, port bindings
+
+#### Classifier behavior:
 - Uses structured output via Anthropic's tool_use feature for reliable JSON responses
 - Results are cached with a 5-minute TTL to avoid redundant LLM calls
 - After consecutive denials exceeding the limit (default: 3), falls back to interactive manual approval
@@ -528,7 +560,7 @@ miniClaudeCode-rust/
     compact.rs               # Multi-layered compaction (micro, SM, LLM, partial, reactive)
     config.rs                # Configuration loading, CachedSystemPrompt, build_system_prompt
     permissions.rs           # PermissionMode (Ask/Auto/Plan), PermissionGate, denied patterns
-    auto_classifier.rs       # LLM-based security classifier with operation-level allowlist
+    auto_classifier.rs       # Two-stage LLM classifier, dangerous path validation, combined command splitting, operation-level allowlist
     error_types.rs           # 15-category error taxonomy with retry strategies
     session_memory.rs        # Persistent session memory with disk persistence
     filehistory.rs           # File version history and snapshots
