@@ -72,6 +72,7 @@ struct AgentTaskInner {
     tools_used: u32,
     duration_ms: u64,
     output: String,
+    pending_messages: Vec<String>, // queued by send_message, drained at turn boundaries
 }
 
 /// Tracks a single background sub-agent task.
@@ -211,6 +212,19 @@ impl AgentTask {
         let mut inner = self.inner.lock().unwrap();
         inner.transcript_path = path.to_string();
     }
+
+    /// Add a pending message to the task's queue.
+    pub fn add_pending_message(&self, msg: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.pending_messages.push(msg.to_string());
+    }
+
+    /// Drain and return all pending messages, clearing the queue.
+    pub fn drain_pending_messages(&self) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let msgs: Vec<String> = inner.pending_messages.drain(..).collect();
+        msgs
+    }
 }
 
 // ─── AgentTaskStore ─────────────────────────────────────────────────────────
@@ -278,6 +292,7 @@ impl AgentTaskStore {
                 tools_used: 0,
                 duration_ms: 0,
                 output: String::new(),
+                pending_messages: Vec::new(),
             }),
         });
 
@@ -358,6 +373,30 @@ impl AgentTaskStore {
         let tasks = self.tasks.read().unwrap();
         if let Some(task) = tasks.get(id) {
             task.set_stats(tools_used, duration_ms);
+        }
+    }
+
+    /// Add a pending message to a running task.
+    /// Returns false if the task was not found or is not running.
+    pub fn add_pending_message(&self, id: &str, msg: &str) -> bool {
+        let tasks = self.tasks.read().unwrap();
+        if let Some(task) = tasks.get(id) {
+            if task.status() == AgentTaskStatus::Running {
+                task.add_pending_message(msg);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drain and return all pending messages for a task.
+    /// Returns None if the task was not found.
+    pub fn drain_pending_messages(&self, id: &str) -> Option<Vec<String>> {
+        let tasks = self.tasks.read().unwrap();
+        if let Some(task) = tasks.get(id) {
+            Some(task.drain_pending_messages())
+        } else {
+            None
         }
     }
 }
@@ -569,5 +608,58 @@ mod tests {
         store.complete(&task.id);
         let task = store.get(&task.id).unwrap();
         assert!(task.get_output().contains("Hello from agent"));
+    }
+
+    #[test]
+    fn test_pending_messages() {
+        let store = AgentTaskStore::new();
+        let task = store.create("task", "", "", "");
+        let cancel = CancellationToken::new();
+        store.start(&task.id, cancel);
+
+        // Add pending messages
+        task.add_pending_message("hello from parent");
+        task.add_pending_message("another message");
+
+        // Drain returns all messages and clears the queue
+        let msgs = task.drain_pending_messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0], "hello from parent");
+        assert_eq!(msgs[1], "another message");
+
+        // Second drain returns empty
+        let msgs2 = task.drain_pending_messages();
+        assert!(msgs2.is_empty());
+    }
+
+    #[test]
+    fn test_store_add_pending_message() {
+        let store = AgentTaskStore::new();
+        let task = store.create("task", "", "", "");
+        let cancel = CancellationToken::new();
+        store.start(&task.id, cancel);
+
+        // Add via store (checks running status)
+        assert!(store.add_pending_message(&task.id, "msg1"));
+        assert!(store.add_pending_message(&task.id, "msg2"));
+
+        // Drain via store
+        let msgs = store.drain_pending_messages(&task.id).unwrap();
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_store_add_pending_message_not_running() {
+        let store = AgentTaskStore::new();
+        let task = store.create("task", "", "", "");
+        // Task is still pending, not running
+        assert!(!store.add_pending_message(&task.id, "msg1"));
+    }
+
+    #[test]
+    fn test_store_add_pending_message_nonexistent() {
+        let store = AgentTaskStore::new();
+        assert!(!store.add_pending_message("bogus", "msg1"));
+        assert!(store.drain_pending_messages("bogus").is_none());
     }
 }

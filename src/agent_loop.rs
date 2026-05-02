@@ -205,6 +205,10 @@ pub struct AgentLoop {
     tools_used: std::sync::atomic::AtomicUsize,
     /// Optional output callback for background agents (suppresses eprintln when set)
     pub output_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Optional function to drain pending messages from the parent agent at turn boundaries.
+    /// When set on a background sub-agent, this enables the parent to send messages
+    /// via send_message that the child processes mid-turn (matching Claude Code's drainPendingMessages).
+    drain_pending_messages_func: Option<Arc<dyn Fn() -> Vec<String> + Send + Sync>>,
 }
 
 impl AgentLoop {
@@ -297,6 +301,7 @@ impl AgentLoop {
             custom_system_prompt: None,
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
+            drain_pending_messages_func: None,
         })
     }
 
@@ -426,6 +431,7 @@ impl AgentLoop {
             custom_system_prompt: None,
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
+            drain_pending_messages_func: None,
         })
     }
 
@@ -1228,6 +1234,23 @@ impl AgentLoop {
                         // Check for interruption after tool execution
                         if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
                             return Ok("[Interrupted by user]".to_string());
+                        }
+
+                        // Between-turn drain: inject pending messages from parent agent
+                        // (e.g., messages sent via send_message tool). These are drained
+                        // at tool-round boundaries so the sub-agent can process them
+                        // without interrupting in-flight tool calls.
+                        if let Some(ref drain_fn) = self.drain_pending_messages_func {
+                            let pending_msgs = drain_fn();
+                            if !pending_msgs.is_empty() {
+                                let mut ctx = self.context.write().await;
+                                let mut sb = String::from("[System: The parent agent sent the following messages while you were working]\n\n");
+                                for msg in pending_msgs {
+                                    sb.push_str(&msg);
+                                    sb.push_str("\n\n");
+                                }
+                                ctx.add_user_message(sb);
+                            }
                         }
 
                     } else if !text.is_empty() {
@@ -2376,7 +2399,15 @@ impl AgentLoop {
             custom_system_prompt: Some(system_prompt.to_string()),
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
+            drain_pending_messages_func: None,
         })
+    }
+
+    /// Set the function used to drain pending messages from the parent agent.
+    /// Called at tool-round boundaries so the sub-agent can process messages
+    /// sent via send_message without interrupting in-flight tool calls.
+    pub fn set_drain_pending_messages(&mut self, f: Arc<dyn Fn() -> Vec<String> + Send + Sync>) {
+        self.drain_pending_messages_func = Some(f);
     }
 }
 

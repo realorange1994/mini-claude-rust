@@ -390,7 +390,22 @@ pub fn spawn_sub_agent_sync(
             }
 
             let result = match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, false) {
-                Ok(child_loop) => {
+                Ok(mut child_loop) => {
+                    // Wire pending message drain: the child loop will drain pending
+                    // messages from its own AgentTask at each turn boundary, enabling
+                    // the parent to send messages via send_message tool that the
+                    // child processes mid-turn (matching Claude Code's drainPendingMessages).
+                    if let Some(ref tid) = task_id_for_spawn {
+                        if let Some(ref store) = task_store_for_spawn {
+                            if let Some(task) = store.get(tid) {
+                                let task_for_drain = Arc::clone(&task);
+                                child_loop.set_drain_pending_messages(Arc::new(move || {
+                                    task_for_drain.drain_pending_messages()
+                                }));
+                            }
+                        }
+                    }
+
                     // Apply fork mode: inject parent context entries into child
                     if !parent_entries.is_empty() {
                         // Find the last ToolUseBlocks entry index (the agent tool that spawned this child)
