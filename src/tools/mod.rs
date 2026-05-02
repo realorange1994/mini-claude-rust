@@ -492,7 +492,15 @@ pub fn expand_path(p: &str) -> std::path::PathBuf {
         p.to_string()
     };
 
-    let path = std::path::Path::new(&p);
+    // On Windows, bare drive letter like "E:" means current dir on that drive.
+    // Normalize to "E:\" to reference the drive root.
+    let normalized = if p.len() == 2 && p.chars().nth(1) == Some(':') {
+        format!("{}\\", p)
+    } else {
+        p
+    };
+
+    let path = std::path::Path::new(&normalized);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
