@@ -63,13 +63,17 @@ impl Tool for GrepTool {
                     "type": "string",
                     "description": "Language type filter. Common values: go, py, js, ts, rust, java, sh, yaml, json, md, html, css."
                 },
+                "-i": {
+                    "type": "boolean",
+                    "description": "Case insensitive search (rg -i). Default: false."
+                },
                 "ignore_case": {
                     "type": "boolean",
-                    "description": "Case insensitive search (default: false)."
+                    "description": "Alias for -i. Case insensitive search (default: false)."
                 },
                 "case_insensitive": {
                     "type": "boolean",
-                    "description": "Alias for ignore_case. Case insensitive search (default: false)."
+                    "description": "Alias for -i. Case insensitive search (default: false)."
                 },
                 "fixed_strings": {
                     "type": "boolean",
@@ -77,20 +81,40 @@ impl Tool for GrepTool {
                 },
                 "output_mode": {
                     "type": "string",
-                    "description": "Output mode: 'content' (default) shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
+                    "description": "Output mode (default: files_with_matches): 'content' shows matching lines, 'files_with_matches' shows file paths, 'count' shows per-file match counts.",
                     "enum": ["content", "files_with_matches", "count"]
+                },
+                "-B": {
+                    "type": "integer",
+                    "description": "Number of lines to show before each match (rg -B). Requires output_mode: content, ignored otherwise."
+                },
+                "-A": {
+                    "type": "integer",
+                    "description": "Number of lines to show after each match (rg -A). Requires output_mode: content, ignored otherwise."
+                },
+                "-C": {
+                    "type": "integer",
+                    "description": "Alias for context. Number of lines to show before and after each match."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Lines of context before and after each match (default: 0)."
+                    "description": "Number of lines to show before and after each match (rg -C). Requires output_mode: content, ignored otherwise."
                 },
                 "context_before": {
                     "type": "integer",
-                    "description": "Lines of context before each match (rg only, default: 0). Overrides context if set."
+                    "description": "Alias for -B. Lines of context before each match (default: 0)."
                 },
                 "context_after": {
                     "type": "integer",
-                    "description": "Lines of context after each match (rg only, default: 0). Overrides context if set."
+                    "description": "Alias for -A. Lines of context after each match (default: 0)."
+                },
+                "-n": {
+                    "type": "boolean",
+                    "description": "Show line numbers in output (rg -n). Requires output_mode: content, ignored otherwise. Defaults to true."
+                },
+                "multiline": {
+                    "type": "boolean",
+                    "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."
                 },
                 "max_depth": {
                     "type": "integer",
@@ -138,20 +162,22 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let case_insensitive = params
-            .get("case_insensitive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let fixed_strings = params
-            .get("fixed_strings")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        // Support -i, ignore_case, and case_insensitive
+        let mut case_insensitive = params.get("-i").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !case_insensitive {
+            case_insensitive = params.get("ignore_case").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+        if !case_insensitive {
+            case_insensitive = params.get("case_insensitive").and_then(|v| v.as_bool()).unwrap_or(false);
+        }
+        let fixed_strings = params.get("fixed_strings").and_then(|v| v.as_bool()).unwrap_or(false);
+        let multiline = params.get("multiline").and_then(|v| v.as_bool()).unwrap_or(false);
+        let show_line_numbers = params.get("-n").and_then(|v| v.as_bool()).unwrap_or(true);
 
         let output_mode = params
             .get("output_mode")
             .and_then(|v| v.as_str())
-            .unwrap_or("content");
+            .unwrap_or("files_with_matches");
 
         let count_matches = params
             .get("count_matches")
@@ -169,24 +195,24 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as usize;
 
-        let ctx_before = params
-            .get("context_before")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as usize;
-
-        let ctx_after = params
-            .get("context_after")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as usize;
-
-        let ctx_combined = params
-            .get("context")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as usize;
-
-        // If ctx_combined > 0 and before/after not set, apply to both
-        let ctx_before = if ctx_combined > 0 && ctx_before == 0 { ctx_combined } else { ctx_before };
-        let ctx_after = if ctx_combined > 0 && ctx_after == 0 { ctx_combined } else { ctx_after };
+        // Parse context params (official: -C/context takes precedence over -B/-A)
+        // Support both official names (-B, -A, -C) and legacy aliases (context_before, context_after)
+        let mut ctx_before = params.get("-B").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if ctx_before == 0 {
+            ctx_before = params.get("context_before").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        }
+        let mut ctx_after = params.get("-A").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if ctx_after == 0 {
+            ctx_after = params.get("context_after").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        }
+        let mut ctx_combined = params.get("-C").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if ctx_combined == 0 {
+            ctx_combined = params.get("context").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        }
+        if ctx_combined > 0 {
+            if ctx_before == 0 { ctx_before = ctx_combined; }
+            if ctx_after == 0 { ctx_after = ctx_combined; }
+        }
 
         let max_depth = params
             .get("max_depth")
@@ -208,6 +234,7 @@ impl Tool for GrepTool {
             return rg_search(
                 pattern, &search_path, include, &type_filter,
                 case_insensitive, fixed_strings, output_mode,
+                show_line_numbers, multiline,
                 ctx_before, ctx_after, head_limit, offset, max_depth, max_filesize,
             );
         }
@@ -215,7 +242,7 @@ impl Tool for GrepTool {
         go_search(
             pattern, &search_path, include, &type_filter,
             case_insensitive, fixed_strings, output_mode,
-            head_limit, offset, ctx_combined, count_matches, max_depth,
+            head_limit, offset, ctx_combined as usize, count_matches, max_depth,
         )
     }
 }
@@ -233,14 +260,27 @@ fn rg_search(
     case_insensitive: bool,
     fixed_strings: bool,
     output_mode: &str,
-    ctx_before: usize,
-    ctx_after: usize,
+    show_line_numbers: bool,
+    multiline: bool,
+    ctx_before: i32,
+    ctx_after: i32,
     head_limit: usize,
     offset: usize,
     max_depth: usize,
     max_filesize: &str,
 ) -> ToolResult {
-    let mut args = vec!["--no-heading".to_string(), "--line-number".to_string()];
+    let mut args = vec![
+        "--hidden".to_string(),
+        "--max-columns".to_string(),
+        "500".to_string(),
+    ];
+
+    // Exclude VCS directories (matching official Claude Code behavior)
+    let vcs_dirs = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+    for dir in &vcs_dirs {
+        args.push("--glob".to_string());
+        args.push(format!("!{}", dir));
+    }
 
     match output_mode {
         "files_with_matches" => args.push("--files-with-matches".to_string()),
@@ -249,18 +289,24 @@ fn rg_search(
     }
     if case_insensitive { args.push("-i".to_string()); }
     if fixed_strings { args.push("-F".to_string()); }
+    if multiline {
+        args.push("-U".to_string());
+        args.push("--multiline-dotall".to_string());
+    }
     if ctx_before > 0 { args.push("-B".to_string()); args.push(ctx_before.to_string()); }
     if ctx_after > 0 { args.push("-A".to_string()); args.push(ctx_after.to_string()); }
+
+    // Show line numbers only in content mode (matching official behavior)
+    if show_line_numbers && output_mode == "content" {
+        args.push("-n".to_string());
+    }
+
     if max_depth > 0 { args.push("--max-depth".to_string()); args.push(max_depth.to_string()); }
     if !max_filesize.is_empty() { args.push("--max-filesize".to_string()); args.push(max_filesize.to_string()); }
 
     args.push("-m".to_string());
     args.push(head_limit.to_string());
 
-    if !include.is_empty() {
-        args.push("--glob".to_string());
-        args.push(include.to_string());
-    }
     if !type_filter.is_empty() {
         let type_map = get_type_map();
         if let Some(exts) = type_map.get(&type_filter.to_lowercase()) {
@@ -273,8 +319,18 @@ fn rg_search(
             args.push("mytype".to_string());
         }
     }
+    if !include.is_empty() {
+        args.push("--glob".to_string());
+        args.push(include.to_string());
+    }
 
-    args.push(pattern.to_string());
+    // If pattern starts with dash, use -e flag to prevent rg from interpreting it as an option
+    if pattern.starts_with('-') {
+        args.push("-e".to_string());
+        args.push(pattern.to_string());
+    } else {
+        args.push(pattern.to_string());
+    }
     args.push(path.to_string_lossy().to_string());
 
     let output = match Command::new("rg").args(&args).output() {
@@ -296,13 +352,13 @@ fn rg_search(
         return ToolResult::ok("No matches found.".to_string());
     }
 
-    let mut lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
     if offset > 0 && offset < lines.len() {
         lines = lines[offset..].to_vec();
     }
     if lines.len() > head_limit {
         lines = lines[..head_limit].to_vec();
-        lines.push("(showing first N matches, truncated)");
+        lines.push(format!("(showing first {} matches, truncated)", head_limit));
     }
 
     ToolResult::ok(lines.join("\n"))

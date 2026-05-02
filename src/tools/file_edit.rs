@@ -38,9 +38,9 @@ impl Tool for FileEditTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
-                    "description": "Path to the file to edit."
+                    "description": "The absolute path to the file to edit."
                 },
                 "old_string": {
                     "type": "string",
@@ -55,7 +55,7 @@ impl Tool for FileEditTool {
                     "description": "Replace all occurrences (default: false)."
                 }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["file_path", "old_string", "new_string"]
         }).as_object().unwrap().clone()
     }
 
@@ -64,7 +64,10 @@ impl Tool for FileEditTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
+        let path = params.get("file_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("path").and_then(|v| v.as_str()));
+        let path = match path {
             Some(p) => expand_path(p),
             None => return ToolResult::error("Error: path is required"),
         };

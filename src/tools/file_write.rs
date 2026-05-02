@@ -33,23 +33,23 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists. You must read the file first with read_file before writing to an existing file."
+        "Write content to a file. Creates parent directories if they don't exist. Overwrites if the file already exists. For modifying existing files, prefer edit_file instead."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
-                    "description": "Absolute or relative path to the file."
+                    "description": "The absolute path to the file to write."
                 },
                 "content": {
                     "type": "string",
                     "description": "The content to write."
                 }
             },
-            "required": ["path", "content"]
+            "required": ["file_path", "content"]
         }).as_object().unwrap().clone()
     }
 
@@ -58,7 +58,10 @@ impl Tool for FileWriteTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
+        let path = params.get("file_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("path").and_then(|v| v.as_str()));
+        let path = match path {
             Some(p) => expand_path(p),
             None => return ToolResult::error("Error: path is required"),
         };

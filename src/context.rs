@@ -175,6 +175,158 @@ impl Message {
 // Backwards compatibility alias
 pub type ConversationEntry = Message;
 
+/// Records what the agent has done across turns.
+/// Injected into the system prompt before each API call so the agent
+/// Tracks what the agent has done across turns. Injected into the system prompt
+/// before each API call so the agent knows what it has already read/searched.
+///
+/// Compaction is the primary source of "short-term memory loss":
+/// when context is compacted, tool results (file content, grep output) are removed
+/// from the conversation history. We solve this with an epoch counter: every
+/// compaction increments the epoch. Items recorded with epoch == current_epoch
+/// are "fresh" (content still in context); items with lower epoch are "stale"
+/// (compaction cleared them, re-read is OK).
+#[derive(Debug)]
+pub struct ToolStateTracker {
+    compaction_epoch: usize,
+    read_files: HashMap<String, usize>, // path -> epoch when read
+    search_queries: HashMap<String, usize>, // pattern -> epoch when searched
+    conclusions: Vec<String>,
+}
+
+impl ToolStateTracker {
+    pub fn new() -> Self {
+        Self {
+            compaction_epoch: 0,
+            read_files: HashMap::new(),
+            search_queries: HashMap::new(),
+            conclusions: Vec::new(),
+        }
+    }
+
+    /// Mark a file as read at the current epoch.
+    pub fn record_file_read(&mut self, path: &str) {
+        let abs = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+        self.read_files.insert(abs.display().to_string(), self.compaction_epoch);
+    }
+
+    /// Record a successful grep/glob search pattern at the current epoch.
+    pub fn record_search(&mut self, pattern: &str, had_results: bool) {
+        if had_results {
+            self.search_queries.insert(pattern.to_string(), self.compaction_epoch);
+        }
+    }
+
+    /// Append a key finding claimed by the agent.
+    pub fn record_conclusion(&mut self, conclusion: &str) {
+        if conclusion.is_empty() {
+            return;
+        }
+        self.conclusions.push(conclusion.to_string());
+    }
+
+    /// Called after context compaction runs. Advances the epoch, marking all
+    /// previously tracked items as stale (their tool results are gone from context).
+    pub fn on_compaction(&mut self) {
+        self.compaction_epoch += 1;
+    }
+
+    /// Mark a file as fresh — its content is back in context (e.g., after
+    /// post-compact recovery re-injects it). Updates the file's epoch to current.
+    pub fn mark_file_fresh(&mut self, path: &str) {
+        let abs = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
+        self.read_files.insert(abs.display().to_string(), self.compaction_epoch);
+    }
+
+    /// Return the text to inject into the system prompt.
+    pub fn build_session_state_note(&self) -> String {
+        let mut sb = String::new();
+        sb.push_str("## Session State\n");
+
+        let mut fresh_files: Vec<&String> = Vec::new();
+        let mut stale_files: Vec<&String> = Vec::new();
+        for (f, e) in &self.read_files {
+            if *e == self.compaction_epoch {
+                fresh_files.push(f);
+            } else {
+                stale_files.push(f);
+            }
+        }
+        fresh_files.sort();
+        stale_files.sort();
+
+        if !fresh_files.is_empty() {
+            sb.push_str("Files already read — content is in context (do NOT re-read):\n");
+            for f in &fresh_files {
+                sb.push_str("  - ");
+                sb.push_str(f);
+                sb.push('\n');
+            }
+        }
+        if !stale_files.is_empty() {
+            sb.push_str("Files read before compaction — content was cleared from context:\n");
+            for f in &stale_files {
+                sb.push_str("  - ");
+                sb.push_str(f);
+                sb.push_str(" (RE-READ if needed)\n");
+            }
+        }
+
+        let mut fresh_queries: Vec<&String> = Vec::new();
+        let mut stale_queries: Vec<&String> = Vec::new();
+        for (q, e) in &self.search_queries {
+            if *e == self.compaction_epoch {
+                fresh_queries.push(q);
+            } else {
+                stale_queries.push(q);
+            }
+        }
+        fresh_queries.sort();
+        stale_queries.sort();
+
+        if !fresh_queries.is_empty() {
+            sb.push_str("Search patterns already run — results in context (do NOT repeat):\n");
+            for q in &fresh_queries {
+                sb.push_str("  - ");
+                sb.push_str(q);
+                sb.push('\n');
+            }
+        }
+        if !stale_queries.is_empty() {
+            sb.push_str("Search patterns from before compaction — results were cleared:\n");
+            for q in &stale_queries {
+                sb.push_str("  - ");
+                sb.push_str(q);
+                sb.push_str(" (RE-RUN if needed)\n");
+            }
+        }
+
+        if !self.conclusions.is_empty() {
+            sb.push_str("Key findings from this session:\n");
+            for c in &self.conclusions {
+                sb.push_str("  - ");
+                sb.push_str(c);
+                sb.push('\n');
+            }
+        }
+
+        if fresh_files.is_empty() && stale_files.is_empty()
+            && fresh_queries.is_empty() && stale_queries.is_empty()
+            && self.conclusions.is_empty()
+        {
+            sb.push_str("(no prior state)\n");
+        }
+
+        sb
+    }
+}
+
+impl Default for ToolStateTracker {
+    fn default() -> Self { Self::new() }
+}
+
 /// Manages conversation message history and system prompt
 #[derive(Debug)]
 pub struct ConversationContext {

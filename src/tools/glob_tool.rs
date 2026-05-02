@@ -50,7 +50,7 @@ impl Tool for GlobTool {
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 500)."
+                    "description": "Maximum number of results to return (default: 100)."
                 },
                 "excludes": {
                     "type": "array",
@@ -82,7 +82,7 @@ impl Tool for GlobTool {
         let head_limit = params
             .get("head_limit")
             .and_then(|v| v.as_i64())
-            .unwrap_or(500)
+            .unwrap_or(100)
             .max(1) as usize;
 
         let excludes: Vec<String> = params

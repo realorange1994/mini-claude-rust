@@ -35,6 +35,25 @@ impl std::fmt::Display for CoercionWarning {
     }
 }
 
+/// Remap official Claude Code parameter names to internal names.
+/// LLMs see the official schema (file_path, directory) but internal tool code
+/// reads params["path"] and params["dir"]. This function copies the values over.
+pub fn remap_file_path(args: &mut HashMap<String, Value>) {
+    if let Some(fp) = args.get("file_path").and_then(|v| v.as_str()) {
+        if !fp.is_empty() {
+            args.insert("path".to_string(), Value::String(fp.to_string()));
+        }
+    }
+}
+
+pub fn remap_dir_param(args: &mut HashMap<String, Value>) {
+    if let Some(dir) = args.get("directory").and_then(|v| v.as_str()) {
+        if !dir.is_empty() {
+            args.insert("dir".to_string(), Value::String(dir.to_string()));
+        }
+    }
+}
+
 /// Coerce argument types to match the tool's input schema.
 /// Returns a CoercionResult with the coerced args and any warnings.
 pub fn coerce_arguments(

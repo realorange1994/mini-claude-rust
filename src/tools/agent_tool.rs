@@ -89,6 +89,7 @@ impl Tool for AgentTool {
                 },
                 "model": {
                     "type": "string",
+                    "enum": ["sonnet", "opus", "haiku"],
                     "description": "Model override for the agent (optional). Defaults to parent's model."
                 },
                 "run_in_background": {

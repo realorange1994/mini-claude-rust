@@ -212,6 +212,10 @@ pub struct AgentLoop {
     /// Effective max_tokens for API calls; escalates when the model hits the ceiling.
     /// Initialized from config.max_output_tokens (16384 for main agent, 8000 for sub-agents).
     current_max_tokens: std::sync::atomic::AtomicI64,
+    /// CancellationToken for sub-agent kill (set by parent via Kill API).
+    cancel_ctx: Option<CancellationToken>,
+    /// Tracks tool state for injection into system prompt (prevents redundant reads/searches).
+    tool_state_tracker: std::cell::RefCell<crate::context::ToolStateTracker>,
 }
 
 impl AgentLoop {
@@ -306,6 +310,8 @@ impl AgentLoop {
             output_callback: None,
             drain_pending_messages_func: None,
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
+            cancel_ctx: None,
+            tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
         })
     }
 
@@ -437,6 +443,8 @@ impl AgentLoop {
             output_callback: None,
             drain_pending_messages_func: None,
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
+            cancel_ctx: None,
+            tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
         })
     }
 
@@ -612,6 +620,14 @@ impl AgentLoop {
             prompt
         };
 
+        // Inject tool state tracker session state into system prompt.
+        // This gives the agent visibility into what it has already done,
+        // preventing redundant reads and searches.
+        let system_prompt = {
+            let session_state = self.tool_state_tracker.borrow().build_session_state_note();
+            format!("{}\n\n{}", system_prompt, session_state)
+        };
+
         // Get messages and tools for API call
         let messages = self.entries_to_messages();
         let tools = self.get_tools_schema();
@@ -726,6 +742,13 @@ impl AgentLoop {
                 return Ok("[Interrupted by user]".to_string());
             }
 
+            // Check for cancellation via cancel_ctx (for sub-agent Kill from parent)
+            if let Some(ref cancel) = self.cancel_ctx {
+                if cancel.is_cancelled() {
+                    return Ok("[Cancelled by parent]".to_string());
+                }
+            }
+
             // Reset streaming state for this turn; will be set to true by
             // try_stream_once if streaming actually succeeds.
             self.last_call_was_streaming.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -745,6 +768,8 @@ impl AgentLoop {
                 let cleared = ctx.micro_compact_entries(keep_recent, &placeholder);
                 if cleared > 0 {
                     agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
+                    // Micro-compaction clears tool results — mark tracked items stale.
+                    self.tool_state_tracker.borrow_mut().on_compaction();
                 }
             }
 
@@ -781,13 +806,21 @@ impl AgentLoop {
                             format!("reactive-{:?}", stats.phase),
                             stats.estimated_tokens_saved,
                         );
+                        // Advance epoch — all tracked items are now stale.
+                        self.tool_state_tracker.borrow_mut().on_compaction();
                         let recovered_paths = self.post_compact_recovery().await;
+                        // Mark recovered files as fresh (content re-injected).
+                        for path in &recovered_paths {
+                            self.tool_state_tracker.borrow_mut().mark_file_fresh(path);
+                        }
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
                 } else {
                     // Regular auto-compaction (token threshold based)
-                    {
+                    // Check if compaction will run first (inside compactor lock),
+                    // then drop the lock before calling post_compact_recovery (async).
+                    let will_compact = {
                         let mut ctx = self.context.write().await;
                         let mut compactor = self.compactor.write().await;
                         let stats = compactor.compact(
@@ -800,19 +833,28 @@ impl AgentLoop {
                         if stats.phase != crate::compact::CompactPhase::None {
                             agent_emit!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
                                 stats.phase, stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);
-                            // Log compaction event to transcript
                             let _ = self.transcript.add_compact(
                                 format!("{:?}", stats.phase),
                                 stats.estimated_tokens_saved,
                             );
-
-                            // Phase 2: Post-compact recovery — re-inject critical context
-                            let recovered_paths = self.post_compact_recovery().await;
-
-                            // Phase 3: History snip — preserve recent messages verbatim
-                            let snip_count = self.config.post_compact_history_snip_count;
-                            ctx.add_history_snip(snip_count, &recovered_paths);
+                            // Advance epoch — all tracked items are now stale.
+                            self.tool_state_tracker.borrow_mut().on_compaction();
+                            true
+                        } else {
+                            false
                         }
+                    };
+                    if will_compact {
+                        // Phase 2: Post-compact recovery — re-inject critical context
+                        let recovered_paths = self.post_compact_recovery().await;
+                        // Mark recovered files as fresh (content re-injected).
+                        for path in &recovered_paths {
+                            self.tool_state_tracker.borrow_mut().mark_file_fresh(path);
+                        }
+                        // Phase 3: History snip — preserve recent messages verbatim
+                        let mut ctx = self.context.write().await;
+                        let snip_count = self.config.post_compact_history_snip_count;
+                        ctx.add_history_snip(snip_count, &recovered_paths);
                     }
 
                     // Log summary to transcript if one was added
@@ -856,6 +898,11 @@ impl AgentLoop {
                     if !tool_calls.is_empty() {
                         // Execute tools
                         last_transition = Transition::ToolsToText;
+
+                        // Extract conclusions from intermediate text before tool calls
+                        if !text.is_empty() {
+                            self.extract_conclusions(&text);
+                        }
 
                         // Pre-check permissions sequentially (avoid concurrent stdin reads in ask mode)
                         struct ToolCallEntry {
@@ -1048,14 +1095,17 @@ impl AgentLoop {
             }
         }
 
-        // Read-before-edit enforcement: file must be read and unmodified
-                                        if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
-                                            if let Some(path) = &snapshot_path {
-                                                if let Err(msg) = registry.check_file_stale(&path.to_string_lossy()) {
-                                                    return ToolResult::error(msg);
-                                                }
-                                            }
-                                        }
+        // Read-before-write/edit enforcement (matches Claude Code official behavior):
+        // All write operations (write_file, edit_file, multi_edit) require the file to have
+        // been read first IF the file already exists. New file creation is always allowed.
+        // If the file was read but externally modified since, the write is blocked.
+        if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
+            if let Some(path) = &snapshot_path {
+                if let Err(msg) = registry.check_file_stale(&path.to_string_lossy()) {
+                    return ToolResult::error(msg);
+                }
+            }
+        }
 
                                         let tool = registry.get(&tool_name);
                                         match tool {
@@ -1068,6 +1118,9 @@ impl AgentLoop {
                                                 let schema = t.input_schema();
                                                 let mut coerced = params;
                                                 let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
+                                                // Remap official parameter names to internal names
+                                                crate::tools::coercion::remap_file_path(&mut coerced);
+                                                crate::tools::coercion::remap_dir_param(&mut coerced);
                                                 if !coercion_result.warnings.is_empty() {
                                                     for w in &coercion_result.warnings {
                                                         agent_emit!("[coercion] {}", w);
@@ -1209,6 +1262,30 @@ impl AgentLoop {
                             }
                         }
 
+                        // Update tool state tracker after tool execution
+                        for tc in &tool_calls {
+                            let params: HashMap<String, serde_json::Value> =
+                                serde_json::from_str(&tc.arguments).unwrap_or_default();
+                            match tc.name.as_str() {
+                                "read_file" => {
+                                    if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                                        self.tool_state_tracker.borrow_mut().record_file_read(path);
+                                    }
+                                }
+                                "grep" => {
+                                    if let Some(pattern) = params.get("pattern").and_then(|v| v.as_str()) {
+                                        self.tool_state_tracker.borrow_mut().record_search(pattern, true);
+                                    }
+                                }
+                                "glob" => {
+                                    if let Some(pattern) = params.get("pattern").and_then(|v| v.as_str()) {
+                                        self.tool_state_tracker.borrow_mut().record_search(pattern, true);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
                         // 2. Store tool_result blocks
                         let tool_result_blocks: Vec<crate::context::ToolResultBlock> = tool_calls.iter().enumerate().map(|(i, tc)| {
                             // Find the result for this tool call
@@ -1261,6 +1338,8 @@ impl AgentLoop {
                     } else if !text.is_empty() {
                         // Final response -- text-only (no tool calls), refund the budget
                         budget.refund();
+                        // Extract key findings from final answer for next-turn reference
+                        self.extract_conclusions(&text);
                         return Ok(text);
                     } else {
                         // No text and no tool calls -- could be a thinking-only response
@@ -1383,10 +1462,13 @@ impl AgentLoop {
                             agent_emit!("[!] Context overflow, truncating history (phase 1/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.truncate_history();
+                            // Mark tracked items stale after truncation.
+                            self.tool_state_tracker.borrow_mut().on_compaction();
                         } else {
                             agent_emit!("[!] Context still full, aggressive truncation (phase 2/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.aggressive_truncate_history();
+                            self.tool_state_tracker.borrow_mut().on_compaction();
                         }
                         continue;
                     }
@@ -2184,19 +2266,59 @@ impl AgentLoop {
         self.interrupted.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Create a CancellationToken that gets cancelled when the interrupted flag is set.
+    /// Extract key findings from assistant text and record them in the tool state tracker.
+    /// This helps the agent remember conclusions across turns without relying on
+    /// unreliable extraction from the conversation history.
+    fn extract_conclusions(&self, text: &str) {
+        use regex::Regex;
+        let patterns = [
+            r"(?i)(?:defined in|defined at)\s+(\S+)",
+            r"(?i)(?:returns?|yields?)\s+(\S+)",
+            r"(?i)(?:uses?|calls?)\s+(\S+)\s+for\s+",
+            r"(?i)(?:is defined as|is an?)\s+(\S+)",
+        ];
+        for pat in &patterns {
+            if let Ok(re) = Regex::new(pat) {
+                for cap in re.captures_iter(text) {
+                    if let Some(m) = cap.get(1) {
+                        let s = m.as_str();
+                        if s.len() > 3 {
+                            self.tool_state_tracker.borrow_mut().record_conclusion(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Create a CancellationToken that gets cancelled when the interrupted flag is set
+    /// or when the cancel_ctx (sub-agent kill) is triggered.
     /// Polls every 100ms. Drop the join handle to stop polling.
     fn interrupt_cancel_token(&self) -> (CancellationToken, tokio::task::JoinHandle<()>) {
         let token = CancellationToken::new();
         let cloned = token.clone();
         let interrupted = self.interrupted.clone();
+        let cancel_ctx = self.cancel_ctx.clone();
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
-                interval.tick().await;
-                if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
-                    cloned.cancel();
-                    return;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                            cloned.cancel();
+                            return;
+                        }
+                    }
+                    _ = async {
+                        if let Some(ref ct) = cancel_ctx {
+                            ct.cancelled().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        cloned.cancel();
+                        return;
+                    }
                 }
             }
         });
@@ -2270,6 +2392,8 @@ impl AgentLoop {
         // Add compact boundary marker
         context.add_compact_boundary(crate::context::CompactTrigger::Manual, tokens_before);
         context.replace_messages(kept);
+        // Mark all tracked items as stale (context has been compacted).
+        self.tool_state_tracker.borrow_mut().on_compaction();
 
         let entries_after = context.len();
 
@@ -2304,7 +2428,12 @@ impl AgentLoop {
 
         agent_emit!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
 
-        crate::compact::partial_compact(&mut context, dir, pivot)
+        let result = crate::compact::partial_compact(&mut context, dir, pivot);
+
+        // Mark all tracked items as stale (partial compact removes tool results).
+        self.tool_state_tracker.borrow_mut().on_compaction();
+
+        result
     }
 
     /// Clear all conversation messages (for /clear command).
@@ -2313,6 +2442,8 @@ impl AgentLoop {
         let mut context = self.context.blocking_write();
         let count = context.len();
         context.clear();
+        // Mark all tracked items as stale (everything is gone).
+        self.tool_state_tracker.borrow_mut().on_compaction();
         count
     }
 
@@ -2429,6 +2560,8 @@ impl AgentLoop {
             output_callback: None,
             drain_pending_messages_func: None,
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
+            cancel_ctx: None,
+            tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
         })
     }
 
@@ -2437,6 +2570,13 @@ impl AgentLoop {
     /// sent via send_message without interrupting in-flight tool calls.
     pub fn set_drain_pending_messages(&mut self, f: Arc<dyn Fn() -> Vec<String> + Send + Sync>) {
         self.drain_pending_messages_func = Some(f);
+    }
+
+    /// Set the CancellationToken for sub-agent kill support.
+    /// When the parent calls Kill on this sub-agent's task, the token is cancelled,
+    /// and the agent loop checks it at each turn boundary and during HTTP requests.
+    pub fn set_cancel_ctx(&mut self, token: CancellationToken) {
+        self.cancel_ctx = Some(token);
     }
 }
 

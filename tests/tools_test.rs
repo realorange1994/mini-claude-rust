@@ -423,7 +423,7 @@ fn file_write_tool_name_and_schema() {
     assert_eq!(tool.name(), "write_file");
     let schema = tool.input_schema();
     let required = schema.get("required").unwrap().as_array().unwrap();
-    assert!(required.contains(&serde_json::json!("path")));
+    assert!(required.contains(&serde_json::json!("file_path")));
     assert!(required.contains(&serde_json::json!("content")));
 }
 

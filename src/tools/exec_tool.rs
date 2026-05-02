@@ -608,6 +608,10 @@ impl Tool for ExecTool {
                     "type": "string",
                     "description": "The shell command to execute."
                 },
+                "description": {
+                    "type": "string",
+                    "description": "A short description of what this command does."
+                },
                 "working_dir": {
                     "type": "string",
                     "description": "Working directory for the command (default: current directory)."

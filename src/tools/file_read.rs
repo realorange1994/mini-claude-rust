@@ -5,9 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 
-const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024; // 2 MB
-const READ_FILE_DEFAULT_LIMIT: usize = 2000;
-const READ_FILE_MAX_CHARS: usize = 15000;
+const MAX_FILE_SIZE: u64 = 256 * 1024; // 256 KB, matching Claude Code official
 
 pub struct FileReadTool;
 
@@ -42,9 +40,9 @@ impl Tool for FileReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
-                    "description": "Absolute or relative path to the file."
+                    "description": "The absolute path to the file to read."
                 },
                 "offset": {
                     "type": "integer",
@@ -55,7 +53,7 @@ impl Tool for FileReadTool {
                     "description": "Number of lines to read (optional)."
                 }
             },
-            "required": ["path"]
+            "required": ["file_path"]
         }).as_object().unwrap().clone()
     }
 
@@ -64,7 +62,10 @@ impl Tool for FileReadTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
+        let path = params.get("file_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("path").and_then(|v| v.as_str()));
+        let path = match path {
             Some(p) => expand_path(p),
             None => return ToolResult::error("Error: path is required"),
         };
@@ -82,7 +83,7 @@ impl Tool for FileReadTool {
         }
 
         if metadata.len() > MAX_FILE_SIZE {
-            return ToolResult::error(format!("Error: file too large (>{} bytes)", MAX_FILE_SIZE));
+            return ToolResult::error("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions.".to_string());
         }
 
         let content = match fs::read_to_string(&path) {
@@ -110,7 +111,7 @@ impl Tool for FileReadTool {
             .get("limit")
             .and_then(|v| v.as_i64())
             .map(|v| v.max(1) as usize)
-            .unwrap_or(READ_FILE_DEFAULT_LIMIT);
+            .unwrap_or(total); // default: read entire file (matching Claude Code official)
 
         if offset > total {
             return ToolResult::error(format!(
@@ -126,12 +127,6 @@ impl Tool for FileReadTool {
         let mut result = String::new();
         for (i, line) in selected.iter().enumerate() {
             result.push_str(&format!("{}| {}\n", offset + i, line));
-        }
-
-        // Truncate if too many chars
-        if result.len() > READ_FILE_MAX_CHARS {
-            result.truncate(READ_FILE_MAX_CHARS);
-            result.push_str("\n\n[OUTPUT TRUNCATED]");
         }
 
         // Add pagination hint

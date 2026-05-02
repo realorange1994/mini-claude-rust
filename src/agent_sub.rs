@@ -208,8 +208,27 @@ pub fn build_sub_agent_system_prompt(
 
     // Operational notes
     sb.push_str("## Operational Notes\n");
-    sb.push_str("- Agent threads always have their cwd reset between bash calls -- only use absolute file paths.\n");
-    sb.push_str("- Be thorough but efficient -- avoid redundant reads or searches.\n\n");
+    sb.push_str("- Agent threads always have their cwd reset between bash calls -- only use absolute file paths.\n\n");
+
+    // Efficiency rules (shared across all agent types)
+    sb.push_str("## Efficiency Rules\n\n");
+    sb.push_str("1. **Hypothesis-Driven Investigation** -- Before reading a file, state what you expect to find and why. Form a hypothesis first, then verify it. If confirmed, act immediately. If disproven, form a new hypothesis. Never read files \"just to see what's there.\"\n\n");
+    sb.push_str("2. **No Redundant Reads** -- Never re-read a file you have already read. The content does not change. If you forgot a detail, re-read ONLY the specific section (with offset), not the entire file.\n\n");
+    sb.push_str("3. **No Redundant Searches** -- Never repeat a grep/glob query you have already run. If it returned results, those are still valid. If it returned nothing, try a meaningfully different pattern.\n\n");
+    sb.push_str("4. **Stop When You Understand** -- If you can point to specific code lines and explain the mechanism, you understand the issue. Stop investigating and report. Saying \"Now I understand\" without citing concrete evidence means you do not actually understand.\n\n");
+    sb.push_str("5. **Build Mental Models Incrementally** -- After each file read or search, update your understanding. Note key function signatures, data flow, type definitions. This prevents re-reading.\n\n");
+    sb.push_str("6. **Use Compilation Errors As Compass** -- When debugging, run the build first. Compilation errors tell you exactly which files and lines have problems.\n\n");
+    sb.push_str("7. **Parallelize Independent Searches** -- When checking multiple unrelated things, make all searches in a single tool call.\n\n");
+    sb.push_str("8. **Report Early, Report Often** -- When you have a finding, report it immediately. Do not wait until you have investigated everything.\n\n");
+    sb.push_str("9. **See ALL Errors Before Diagnosing** -- When running a build or test, ALWAYS read the full output. Never use head/tail to truncate error output. Truncating errors hides the true scope and causes misdiagnosis.\n\n");
+    sb.push_str("10. **Classify Errors, Then Identify Root Cause** -- When facing multiple errors, do not fix them one by one in discovery order. Categorize them first (duplicate definitions, undefined types, type mismatches). Find the single root cause that explains the most errors. Fix the root cause first — it often resolves dozens of downstream errors at once.\n\n");
+    sb.push_str("11. **Map Producer/Consumer Relationships Before Editing** -- Before modifying any file, understand the full data flow: what types does the file-producer create? What types does the consumer expect? Are they consistent? Drawing this dependency map prevents fixes that solve one error while breaking three more.\n\n");
+    sb.push_str("12. **No Patching -- Plan Before You Edit** -- Do not make piecemeal fixes. After understanding the full error landscape, formulate a complete fix plan that addresses all issues. Then execute. If you find yourself \"trying something\" without a complete mental model, stop and think first.\n\n");
+    sb.push_str("13. **Fix Grep Patterns, Do Not Abandon Them** -- When a grep returns no results, do not immediately switch to brute-force read_file. Check: is the pattern correct? Try variations. Only fall back to read_file when you have a specific file in mind and a specific section to check.\n\n");
+    sb.push_str("14. **No Irrelevant EXEC Commands** -- Only use exec for operations that directly advance the investigation: running builds/tests, reading diagnostic output. Do not use wc, find, stat, or similar commands just to \"get a sense of\" the codebase.\n\n");
+    sb.push_str("15. **Cite Specific Evidence for Every Claim** -- When you state that something is true (\"X is defined in Y\", \"Z calls function F\"), you MUST cite the specific file and line number: e.g., \"defined in src/parser.go:42\". Do NOT claim things without citing evidence. If you cannot cite a specific file:line, you do not yet know the answer.\n\n");
+    sb.push_str("16. **Vague Claims Are Wrong Claims** -- Phrases like \"I understand\", \"I see the pattern\", \"the mechanism is clear\", \"I know what's happening\" are forbidden unless immediately followed by a specific file:line citation. Every conclusion must be grounded in concrete code.\n\n");
+    sb.push_str("17. **Use Session State to Track Progress** -- At the end of each turn, summarize your key finding in one sentence (e.g., \"compiler.go uses *Lit type defined in object.go:45\"). The Session State section in the system prompt tracks these. Check it before reading or searching -- if a file is listed as already read, do NOT read it again; if a search is listed as already run, do NOT repeat it.\n\n");
 
     // Security section
     sb.push_str("## Security\n");
@@ -427,6 +446,12 @@ pub fn spawn_sub_agent_sync(
                             child_loop.set_drain_pending_messages(Arc::new(move || {
                                 task_for_drain.drain_pending_messages()
                             }));
+                            // Wire cancel_ctx: when the parent calls Kill, the task's
+                            // CancellationToken is cancelled, and the child loop will
+                            // detect it at each turn boundary and during HTTP requests.
+                            if let Some(cancel) = task.cancel_handle() {
+                                child_loop.set_cancel_ctx(cancel);
+                            }
                         }
                     }
                 }
@@ -552,20 +577,15 @@ Your strengths:
 - Searching code and text with powerful regex patterns
 - Reading and analyzing file contents
 
-Guidelines:
-- Use glob for broad file pattern matching (e.g., "src/**/*.rs", "**/*.json")
-- Use grep for searching file contents with regex
-- Use read_file when you know the specific file path you need to read
-- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)
-- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
-- Adapt your search approach based on the thoroughness level specified by the caller
-- Make efficient use of tools: be smart about how you search - spawn multiple parallel tool calls where possible
-- Communicate your final report directly as a regular message - do NOT attempt to create files
+## Investigation Method
 
-Be thorough but efficient. In order to achieve speed:
-- Make parallel tool calls wherever possible
-- Start with broad searches (glob) to narrow down, then read specific files
-- Avoid redundant reads or searches
+**Hypothesis first**: Before reading any file, form a hypothesis about what you will find and why. State it explicitly in your thinking. Only read files that test a hypothesis. Never read files "to see what's there."
+
+**Build a mental model**: Track what you learn incrementally. After each file read, note the key facts (file path, line number, key detail) so you do not forget.
+
+**Stop when verified**: If you can point to a specific line and explain the mechanism, you understand it. Stop investigating.
+
+**Parallelize**: When investigating independent questions, use parallel tool calls.
 
 When you are done, provide your final answer concisely. Do NOT ask the user questions - complete the task autonomously. If you cannot complete the task, explain what you found and what is missing."#;
 

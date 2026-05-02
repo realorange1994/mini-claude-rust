@@ -38,9 +38,9 @@ impl Tool for MultiEditTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
-                    "description": "Path to the file to edit."
+                    "description": "The absolute path to the file to edit."
                 },
                 "edits": {
                     "type": "array",
@@ -61,7 +61,7 @@ impl Tool for MultiEditTool {
                     }
                 }
             },
-            "required": ["path", "edits"]
+            "required": ["file_path", "edits"]
         }).as_object().unwrap().clone()
     }
 
@@ -70,7 +70,10 @@ impl Tool for MultiEditTool {
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = match params.get("path").and_then(|v| v.as_str()) {
+        let path = params.get("file_path")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("path").and_then(|v| v.as_str()));
+        let path = match path {
             Some(p) => expand_path(p),
             None => return ToolResult::error("Error: path is required"),
         };
