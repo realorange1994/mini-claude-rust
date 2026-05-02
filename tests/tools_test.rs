@@ -557,8 +557,12 @@ fn file_edit_replace_all() {
 #[test]
 fn file_edit_missing_old_string() {
     let tool = FileEditTool;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("existing.txt");
+    fs::write(&file, "existing content").unwrap();
     let mut params = HashMap::new();
-    params.insert("path".into(), serde_json::json!("/tmp/test.txt"));
+    params.insert("file_path".into(), serde_json::json!(file.to_str().unwrap()));
+    params.insert("old_string".into(), serde_json::json!("nonexistent text"));
     params.insert("new_string".into(), serde_json::json!("replacement"));
     let result = tool.execute(params);
     assert!(result.is_error);

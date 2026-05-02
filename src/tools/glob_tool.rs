@@ -44,7 +44,7 @@ impl Tool for GlobTool {
                     "type": "string",
                     "description": "Glob pattern (e.g. '**/*.py'). Patterns without '**/' are auto-prefixed."
                 },
-                "directory": {
+                "path": {
                     "type": "string",
                     "description": "Directory to search in (default: current directory)."
                 },
@@ -74,8 +74,10 @@ impl Tool for GlobTool {
             None => return ToolResult::error("Error: pattern is required"),
         };
 
+        // Support path (official) and directory (legacy alias)
         let dir = params
-            .get("directory")
+            .get("path")
+            .or_else(|| params.get("directory"))
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
@@ -144,7 +146,7 @@ impl Tool for GlobTool {
             return ToolResult::ok("No files matched.".to_string());
         }
 
-        // Sort by modification time (newest first)
+        // Sort by modification time (oldest first, matching official Claude Code rg --sort=modified)
         matches.sort_by(|a, b| {
             let time_a = a.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
@@ -152,7 +154,7 @@ impl Tool for GlobTool {
             let time_b = b.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
                 .unwrap_or(0);
-            time_b.cmp(&time_a)
+            time_a.cmp(&time_b)
         });
 
         let total = matches.len();

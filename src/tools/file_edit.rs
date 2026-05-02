@@ -44,11 +44,11 @@ impl Tool for FileEditTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "Exact text to find (must be unique in the file)."
+                    "description": "Exact text to find. Use empty string to create a new file."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "Text to replace it with."
+                    "description": "The text to replace it with (must be different from old_string)."
                 },
                 "replace_all": {
                     "type": "boolean",
@@ -72,10 +72,10 @@ impl Tool for FileEditTool {
             None => return ToolResult::error("Error: path is required"),
         };
 
-        let old_str = match params.get("old_string").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return ToolResult::error("Error: old_string must not be empty"),
-        };
+        let old_str = params
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let new_str = params
             .get("new_string")
@@ -86,6 +86,29 @@ impl Tool for FileEditTool {
             .get("replace_all")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+
+        // Check for identical old/new strings (matching official behavior)
+        if old_str == new_str && !old_str.is_empty() {
+            return ToolResult::error("Error: old_string and new_string must be different".to_string());
+        }
+
+        if old_str.is_empty() {
+            // Official: allows creating a new file when old_string is empty
+            if path.exists() {
+                return ToolResult::error(
+                    "Error: cannot create new file - file already exists with content".to_string(),
+                );
+            }
+            if let Some(parent) = path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return ToolResult::error(format!("Error: {}", e));
+                }
+            }
+            if let Err(e) = fs::write(&path, &new_str) {
+                return ToolResult::error(format!("Error writing file: {}", e));
+            }
+            return ToolResult::ok(format!("Successfully created {}", path.display()));
+        }
 
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,

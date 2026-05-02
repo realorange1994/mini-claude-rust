@@ -42,11 +42,11 @@ impl Tool for FileWriteTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to write."
+                    "description": "The absolute path to the file to write (must be absolute, not relative)."
                 },
                 "content": {
                     "type": "string",
-                    "description": "The content to write."
+                    "description": "The content to write to the file"
                 }
             },
             "required": ["file_path", "content"]

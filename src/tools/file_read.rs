@@ -46,11 +46,11 @@ impl Tool for FileReadTool {
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "1-based start line (optional)."
+                    "description": "The line number to start reading from. Only provide if the file is too large to read at once."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Number of lines to read (optional)."
+                    "description": "The number of lines to read. Only provide if the file is too large to read at once."
                 }
             },
             "required": ["file_path"]
@@ -91,6 +91,8 @@ impl Tool for FileReadTool {
             Err(e) => return ToolResult::error(format!("Error reading file: {}", e)),
         };
 
+        // Strip UTF-8 BOM (matching official Claude Code behavior)
+        let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
         let content = content.replace("\r\n", "\n");
         let mut lines: Vec<&str> = content.lines().collect();
         
@@ -103,14 +105,15 @@ impl Tool for FileReadTool {
 
         let offset = params
             .get("offset")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(1) as usize)
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+            .map(|v| if v < 1 { 1 } else { v as usize })
             .unwrap_or(1);
 
+        // Official: limit=0 or missing means read entire file
         let limit = params
             .get("limit")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(1) as usize)
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+            .map(|v| if v <= 0 { total } else { v as usize })
             .unwrap_or(total); // default: read entire file (matching Claude Code official)
 
         if offset > total {
