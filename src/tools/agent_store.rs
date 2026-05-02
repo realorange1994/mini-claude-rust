@@ -72,6 +72,7 @@ struct AgentTaskInner {
     tools_used: u32,
     duration_ms: u64,
     output: String,
+    output_file: String,
     pending_messages: Vec<String>, // queued by send_message, drained at turn boundaries
 }
 
@@ -93,8 +94,22 @@ pub struct AgentTask {
 impl AgentTask {
     /// Append text to the output buffer with a 50 KB cap.
     /// When the cap is exceeded, a truncation marker is inserted.
+    /// Also writes to the live output file if one is set.
     pub fn write_output(&self, s: &str) {
         let mut inner = self.inner.lock().unwrap();
+
+        // Write to live output file if set
+        if !inner.output_file.is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&inner.output_file)
+            {
+                let _ = f.write_all(s.as_bytes());
+                let _ = f.write_all(b"\n");
+            }
+        }
 
         // Fast path: no truncation needed
         if inner.output.len() + s.len() <= MAX_OUTPUT_SIZE {
@@ -123,6 +138,22 @@ impl AgentTask {
         }
 
         inner.output = new_content;
+    }
+
+    pub fn output_file(&self) -> String {
+        self.inner.lock().unwrap().output_file.clone()
+    }
+
+    /// Set the live output file path and create the file.
+    pub fn set_output_file(&self, path: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        // Ensure the directory exists
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Create the file (truncate if exists)
+        let _ = std::fs::write(path, "");
+        inner.output_file = path.to_string();
     }
 
     /// Return a copy of the output buffer.
@@ -292,6 +323,7 @@ impl AgentTaskStore {
                 tools_used: 0,
                 duration_ms: 0,
                 output: String::new(),
+                output_file: String::new(),
                 pending_messages: Vec::new(),
             }),
         });

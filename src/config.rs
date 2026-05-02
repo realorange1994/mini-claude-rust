@@ -54,6 +54,12 @@ pub struct Config {
     pub auto_classifier_model: String,    // model for classifier (default: same as main model)
     pub auto_classifier_max_tokens: usize, // max tokens for classifier response (default 128)
     pub auto_denial_limit: usize,         // consecutive denials before fallback (default 3)
+    // Sub-agent permission avoidance
+    pub should_avoid_permission_prompts: bool,  // when true, dangerous tools auto-denied instead of blocking on user prompts
+    // Max output tokens for API calls (default 16384 for main agent, 8000 for sub-agents)
+    pub max_output_tokens: i64,
+    // Escalated max_tokens when the default cap is hit (default 64000, matching Claude's ESCALATED_MAX_TOKENS)
+    pub escalated_max_output_tokens: i64,
 }
 
 impl Default for Config {
@@ -124,6 +130,9 @@ impl Default for Config {
             auto_classifier_model: String::new(),
             auto_classifier_max_tokens: 128,
             auto_denial_limit: 3,
+            should_avoid_permission_prompts: false,
+            max_output_tokens: 16384,
+            escalated_max_output_tokens: 64000,
         }
     }
 }

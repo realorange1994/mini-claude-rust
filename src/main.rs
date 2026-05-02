@@ -196,7 +196,7 @@ fn main() -> Result<()> {
             disallowed_tools: &[String],
             inherit_context: bool,
             _parent_context: Option<std::sync::Arc<tokio::sync::RwLock<miniclaudecode_rust::context::ConversationContext>>>,
-        | -> (String, String, String, usize, u64) {
+        | -> (String, String, String, String, usize, u64) {
             // Read parent context from the slot
             let parent_ctx = context_slot_for_closure.blocking_read().clone();
             let parent_registry = registry_arc_for_spawn.blocking_read();

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Callback signature for spawning a child agent loop.
-/// Returns (agent_id, result_text, error_text, tools_used, duration_ms).
+/// Returns (agent_id, result_text, error_text, output_file, tools_used, duration_ms).
 ///
 /// The `parent_context` parameter provides access to the parent agent's conversation
 /// context for fork mode (inherit_context=true). It is None when the tool is called
@@ -21,7 +21,7 @@ pub type AgentSpawnFunc = Arc<dyn Fn(
     &[String],    // disallowed_tools
     bool,  // inherit_context
     Option<Arc<tokio::sync::RwLock<ConversationContext>>>,  // parent_context
-) -> (String, String, String, usize, u64) + Send + Sync>;
+) -> (String, String, String, String, usize, u64) + Send + Sync>;
 
 /// AgentTool spawns a child agent to execute a specialized task.
 pub struct AgentTool {
@@ -35,7 +35,7 @@ impl AgentTool {
 
     pub fn with_spawn_func<F>(f: F) -> Self
     where
-        F: Fn(&str, &str, &str, bool, &[String], &[String], bool, Option<Arc<tokio::sync::RwLock<ConversationContext>>>) -> (String, String, String, usize, u64)
+        F: Fn(&str, &str, &str, bool, &[String], &[String], bool, Option<Arc<tokio::sync::RwLock<ConversationContext>>>) -> (String, String, String, String, usize, u64)
             + Send + Sync + 'static,
     {
         Self {
@@ -66,7 +66,8 @@ impl Tool for AgentTool {
         "Launch a sub-agent to handle a complex, multi-step task autonomously. \
          Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, \
          or assign a task to a sub-agent. Sub-agents have their own isolated conversation context and tool access. \
-         Supports both synchronous (default) and asynchronous (run_in_background=true) execution."
+         Sub-agents ALWAYS run in the background — you will receive an agentId immediately and do NOT need to wait for completion. \
+         Do NOT call task_output to wait for the agent; continue working on other tasks in parallel."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -92,7 +93,7 @@ impl Tool for AgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Run the agent in the background and return immediately (optional, default false)."
+                    "description": "DEPRECATED — sub-agents always run in background. This parameter is ignored."
                 },
                 "allowed_tools": {
                     "type": "array",
@@ -140,9 +141,6 @@ impl Tool for AgentTool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let run_in_background = params.get("run_in_background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let inherit_context = params.get("inherit_context")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -153,36 +151,23 @@ impl Tool for AgentTool {
         // Always disallow recursive agent spawning
         disallowed_tools.push("agent".to_string());
 
-        if run_in_background {
-            // Async path: SpawnFunc launches the task internally and returns the agent_id
-            let (agent_id, _, _, _, _) = spawn_func(
-                &prompt, &subagent_type, &model, true,
-                &allowed_tools, &disallowed_tools, inherit_context,
-                None, // parent_context set by the spawn_func closure
-            );
-            return ToolResult::ok(format!(
-                "Agent launched in background.\n\n\
-                 agentId: {agent_id}\n\
-                 Status: async_launched\n\
-                 Description: {description}",
-            ));
-        }
-
-        // Sync path: block until complete
-        let (agent_id, result, err_text, tools_used, duration_ms) = spawn_func(
-            &prompt, &subagent_type, &model, false,
+        // Sub-agents always run in background — sync path has been removed.
+        let (agent_id, _, _, output_file, _, _) = spawn_func(
+            &prompt, &subagent_type, &model, true,
             &allowed_tools, &disallowed_tools, inherit_context,
             None, // parent_context set by the spawn_func closure
         );
-
-        if !err_text.is_empty() {
-            return ToolResult::error(err_text);
-        }
-
-        // Explore and plan agents return raw results without usage trailer
-        let skip_usage = subagent_type == "explore" || subagent_type == "plan";
-        let formatted = format_agent_result(&result, &agent_id, &subagent_type, tools_used, duration_ms, skip_usage);
-        ToolResult::ok(formatted)
+        return ToolResult::ok(format!(
+            "Agent launched in background.\n\n\
+             agentId: {agent_id}\n\
+             Status: async_launched\n\
+             output_file: {output_file}\n\
+             Description: {description}\n\n\
+             The agent is working in the background. You will be notified automatically when it completes.\n\
+             Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n\
+             Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n\
+             Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
+        ));
     }
 }
 
@@ -194,30 +179,4 @@ fn extract_string_list(value: Option<&Value>) -> Vec<String> {
     arr.iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect()
-}
-
-/// Formats a sub-agent's output with usage metadata.
-/// When skip_usage is true, only the result text is returned (used for explore/plan agents).
-fn format_agent_result(
-    result: &str,
-    agent_id: &str,
-    agent_type: &str,
-    tools_used: usize,
-    duration_ms: u64,
-    skip_usage: bool,
-) -> String {
-    if skip_usage {
-        return result.to_string();
-    }
-    let mut output = String::with_capacity(result.len() + 200);
-    output.push_str(result);
-    output.push_str("\n\n---\n");
-    if !agent_id.is_empty() {
-        output.push_str(&format!("agentId: {agent_id}\n"));
-    }
-    if !agent_type.is_empty() {
-        output.push_str(&format!("agentType: {agent_type}\n"));
-    }
-    output.push_str(&format!("<usage>tool_uses: {tools_used}\nduration_ms: {duration_ms}</usage>"));
-    output
 }

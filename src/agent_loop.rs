@@ -209,6 +209,9 @@ pub struct AgentLoop {
     /// When set on a background sub-agent, this enables the parent to send messages
     /// via send_message that the child processes mid-turn (matching Claude Code's drainPendingMessages).
     drain_pending_messages_func: Option<Arc<dyn Fn() -> Vec<String> + Send + Sync>>,
+    /// Effective max_tokens for API calls; escalates when the model hits the ceiling.
+    /// Initialized from config.max_output_tokens (16384 for main agent, 8000 for sub-agents).
+    current_max_tokens: std::sync::atomic::AtomicI64,
 }
 
 impl AgentLoop {
@@ -302,6 +305,7 @@ impl AgentLoop {
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
             drain_pending_messages_func: None,
+            current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
         })
     }
 
@@ -432,6 +436,7 @@ impl AgentLoop {
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
             drain_pending_messages_func: None,
+            current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
         })
     }
 
@@ -1554,7 +1559,7 @@ impl AgentLoop {
             &self.base_url,
             &self.api_key,
             &self.config.model,
-            16384,
+            self.current_max_tokens.load(std::sync::atomic::Ordering::SeqCst),
             system_prompt,
             &cached_messages,
             tools,
@@ -1606,6 +1611,16 @@ impl AgentLoop {
         // Log finish_reason for debugging
         if let Some(reason) = stream_result.finish_reason {
             agent_emit!("[DEBUG] Stream finish_reason={}", reason);
+            // If the model hit the max_tokens ceiling, escalate for the next request.
+            // This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
+            if reason == "max_tokens" {
+                let current = self.current_max_tokens.load(std::sync::atomic::Ordering::SeqCst);
+                let escalated = self.config.escalated_max_output_tokens;
+                if current < escalated {
+                    self.current_max_tokens.store(escalated, std::sync::atomic::Ordering::SeqCst);
+                    agent_emit!("\n[auto] max_tokens hit ({}), escalating to {} for next request", current, escalated);
+                }
+            }
         }
 
         // Mark that this call actually used streaming, so the caller (main.rs)
@@ -1695,7 +1710,7 @@ impl AgentLoop {
 
         let mut payload = serde_json::Map::new();
         payload.insert("model".to_string(), serde_json::json!(self.config.model));
-        payload.insert("max_tokens".to_string(), serde_json::json!(16384));
+        payload.insert("max_tokens".to_string(), serde_json::json!(self.current_max_tokens.load(std::sync::atomic::Ordering::SeqCst)));
         payload.insert("system".to_string(), sys_arr);
         payload.insert("messages".to_string(), serde_json::json!(cached_messages));
         if !tools.is_empty() {
@@ -1843,6 +1858,19 @@ impl AgentLoop {
                 body.get("stop_reason"),
                 thinking.len()
             );
+        }
+
+        // Check if model hit the max_tokens ceiling — escalate for next request.
+        // This matches Claude Code's ESCALATED_MAX_TOKENS = 64,000 behavior.
+        if let Some(stop_reason) = body.get("stop_reason").and_then(|v| v.as_str()) {
+            if stop_reason == "max_tokens" {
+                let current = self.current_max_tokens.load(std::sync::atomic::Ordering::SeqCst);
+                let escalated = self.config.escalated_max_output_tokens;
+                if current < escalated {
+                    self.current_max_tokens.store(escalated, std::sync::atomic::Ordering::SeqCst);
+                    agent_emit!("\n[auto] max_tokens hit ({}), escalating to {} for next request", current, escalated);
+                }
+            }
         }
 
         Ok((tool_calls, text))
@@ -2400,6 +2428,7 @@ impl AgentLoop {
             tools_used: std::sync::atomic::AtomicUsize::new(0),
             output_callback: None,
             drain_pending_messages_func: None,
+            current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
         })
     }
 

@@ -215,6 +215,13 @@ impl PermissionGate {
         None
     }
 
+    /// Should interactive permission prompts be avoided?
+    /// When true (e.g., for sub-agents with no terminal user), dangerous tools
+    /// are auto-denied instead of blocking on user prompts.
+    fn should_avoid_prompts(&self) -> bool {
+        self.config.should_avoid_permission_prompts
+    }
+
     /// Ask user for approval via direct console input
     fn ask_user(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>, warning: Option<&str>) -> bool {
         // Format the tool call for display
@@ -256,6 +263,30 @@ impl PermissionGate {
         // This must not be bypassed by any permission mode.
         if let Some(denial) = tool.check_permissions(&params) {
             return Some(denial);
+        }
+
+        // When should_avoid_prompts is true (sub-agents), dangerous tools are
+        // auto-denied and non-dangerous tools are auto-allowed. This prevents
+        // sub-agents from ever blocking on an interactive user prompt.
+        if self.should_avoid_prompts() {
+            let dangerous_tools = ["exec", "write_file", "edit_file", "multi_edit", "fileops"];
+            let tool_name = tool.name();
+            if dangerous_tools.contains(&tool_name) {
+                // For exec, still allow safe commands
+                if tool_name == "exec" {
+                    if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                        if self.is_safe_command(cmd) {
+                            return None; // Safe command, allow
+                        }
+                    }
+                }
+                return Some(ToolResult::error(format!(
+                    "Permission denied: {} is a dangerous tool and sub-agents cannot prompt for approval.",
+                    tool_name
+                )));
+            }
+            // Non-dangerous tool: auto-allow
+            return None;
         }
 
         match self.config.permission_mode {

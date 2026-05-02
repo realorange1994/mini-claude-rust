@@ -88,6 +88,9 @@ fn config_custom_values() {
         auto_classifier_model: String::new(),
         auto_classifier_max_tokens: 128,
         auto_denial_limit: 3,
+        should_avoid_permission_prompts: false,
+        max_output_tokens: 16384,
+        escalated_max_output_tokens: 64000,
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));

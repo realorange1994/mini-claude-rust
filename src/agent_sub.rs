@@ -4,7 +4,7 @@ use crate::agent_loop::AgentLoop;
 use crate::config::Config;
 use crate::context::{ConversationContext, Message, MessageContent};
 use crate::tools::Registry;
-use crate::tools::agent_store::{SharedAgentTaskStore, AgentTaskStatus};
+use crate::tools::agent_store::SharedAgentTaskStore;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -23,7 +23,17 @@ fn generate_short_id() -> String {
 /// Tools always denied for all sub-agents.
 fn global_disallowed_tools() -> HashSet<&'static str> {
     let mut set = HashSet::new();
-    set.insert("agent"); // no recursive agent spawning
+    // No recursive agent spawning
+    set.insert("agent");
+    // Task delegation / control tools — sub-agents must execute directly
+    set.insert("task_create");
+    set.insert("task_update");
+    set.insert("task_list");
+    set.insert("task_get");
+    set.insert("task_stop");
+    set.insert("task_output");
+    set.insert("send_message");
+    set.insert("plan_approval");
     set
 }
 
@@ -176,8 +186,8 @@ pub fn build_sub_agent_system_prompt(
     sb.push_str(&format!("- OS: {os} / {rust_version} / {arch}\n"));
     sb.push_str(&format!("- Model: {model}\n\n"));
 
-    // Permission mode (sub-agents use ASK mode by default)
-    sb.push_str("## Permission Mode: ASK\n\n");
+    // Permission mode (sub-agents always use AUTO mode)
+    sb.push_str("## Permission Mode: AUTO\n\n");
 
     // Available tools section
     sb.push_str("## Available Tools\n\n");
@@ -217,13 +227,24 @@ pub fn build_child_config(parent_config: &Config, model_override: &str) -> Confi
     if !model_override.is_empty() {
         child_config.model = model_override.to_string();
     }
-    // Limit child agent turns
-    let max_turns = if child_config.max_turns > 0 {
-        child_config.max_turns.min(child_config.sub_agent_max_turns as usize)
-    } else {
-        child_config.sub_agent_max_turns as usize // default for sub-agents
-    };
-    child_config.max_turns = max_turns;
+    // Sub-agents always run with no max turns limit — use a very high number
+    // so they run until they naturally stop rather than hitting an artificial cap.
+    child_config.max_turns = u32::MAX as usize;
+
+    // Sub-agents always use AUTO permission mode regardless of parent's mode.
+    // This prevents sub-agents from blocking on user prompts.
+    child_config.permission_mode = crate::permissions::PermissionMode::Auto;
+
+    // Sub-agents should avoid permission prompts: when this flag is true,
+    // dangerous tools are auto-denied instead of blocking on user prompts,
+    // and non-dangerous tools are always allowed.
+    child_config.should_avoid_permission_prompts = true;
+
+    // Sub-agents use a lower max_tokens cap (8000), matching Claude Code's
+    // CAPPED_DEFAULT_MAX_TOKENS. If the output hits this ceiling, the agent
+    // automatically escalates to escalated_max_output_tokens (64000).
+    child_config.max_output_tokens = 8000;
+
     // Sub-agents don't need session memory
     child_config.session_memory = None;
 
@@ -286,27 +307,28 @@ pub fn clone_context_for_fork(
     }
 }
 
-/// Spawn a sub-agent and return its result.
+/// Spawn a sub-agent and return immediately.
 ///
-/// This is the synchronous path — it blocks until the child agent completes.
-/// Designed to be called from within a tool's execute() method.
+/// This function ALWAYS runs sub-agents in background mode. The agent tool should
+/// call this directly without any sync path — the caller receives the agent ID
+/// immediately and the agent runs on a separate thread.
 ///
-/// When `run_in_background` is true and `agent_task_store` is provided, the agent
-/// is tracked in the store with output isolation (no terminal pollution).
+/// When `agent_task_store` is provided, the agent is tracked in the store
+/// with output isolation (no terminal pollution).
 pub fn spawn_sub_agent_sync(
     parent_config: &Config,
     parent_registry: &Registry,
     prompt: &str,
     subagent_type: &str,
     model: &str,
-    run_in_background: bool,
+    _run_in_background: bool, // DEPRECATED — always runs in background
     allowed_tools: &[String],
     disallowed_tools: &[String],
     inherit_context: bool,
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
-    parent_use_stream: bool,
+    _parent_use_stream: bool, // not used for background agents
     agent_task_store: Option<&SharedAgentTaskStore>,
-) -> (String, String, String, usize, u64) {
+) -> (String, String, String, String, usize, u64) {
     let start = std::time::Instant::now();
 
     // Check if sub-agents are enabled in config
@@ -316,6 +338,7 @@ pub fn spawn_sub_agent_sync(
             String::new(),
             String::new(),
             "Sub-agents are disabled by configuration (sub_agent_enabled=false)".to_string(),
+            String::new(),
             0,
             duration_ms,
         );
@@ -330,7 +353,7 @@ pub fn spawn_sub_agent_sync(
         subagent_type,
         allowed_tools,
         disallowed_tools,
-        run_in_background,
+        true, // always run in background
     );
 
     let child_sys_prompt = build_sub_agent_system_prompt(
@@ -339,195 +362,173 @@ pub fn spawn_sub_agent_sync(
         subagent_type,
     );
 
-    // Async path: spawn on a separate thread and return immediately
-    if run_in_background {
-        let config = child_config.clone();
-        let registry = child_registry.clone_for_spawn();
-        let prompt_owned = prompt.to_string();
-        let description = prompt.chars().take(60).collect::<String>();
-        let sys_prompt_owned = child_sys_prompt;
+    // Always spawn in background — no sync path
+    let config = child_config.clone();
+    let registry = child_registry.clone_for_spawn();
+    let prompt_owned = prompt.to_string();
+    let description = prompt.chars().take(60).collect::<String>();
+    let sys_prompt_owned = child_sys_prompt;
 
-        // Create task in store if available
-        let task_id = if let Some(store) = agent_task_store {
-            let task = store.create(&description, subagent_type, prompt, model);
-            let id = task.id.clone();
-            let cancel = CancellationToken::new();
-            store.start(&id, cancel);
-            Some(id)
-        } else {
-            None
-        };
-        let task_store_clone = agent_task_store.map(|s| Arc::clone(s));
+    // Create task in store if available
+    let task_id = if let Some(store) = agent_task_store {
+        let task = store.create(&description, subagent_type, prompt, model);
+        let id = task.id.clone();
+        // Create live output file for this background agent
+        let output_file = format!(".claude/sub-agents/{}_output.txt", id);
+        task.set_output_file(&output_file);
+        let cancel = CancellationToken::new();
+        store.start(&id, cancel);
+        Some(id)
+    } else {
+        None
+    };
+    let task_store_clone = agent_task_store.map(|s| Arc::clone(s));
 
-        // Clones to move into the thread (so we can still use task_id/task_store_clone after spawn)
-        let task_id_for_spawn = task_id.clone();
-        let task_store_for_spawn = task_store_clone.clone();
+    // Clones to move into the thread (so we can still use task_id/task_store_clone after spawn)
+    let task_id_for_spawn = task_id.clone();
+    let task_store_for_spawn = task_store_clone.clone();
 
-        // Capture parent entries for fork mode before spawning the thread
-        let parent_entries: Vec<Message> = if inherit_context {
-            if let Some(ref parent_ctx) = parent_context {
-                let ctx = parent_ctx.blocking_read();
-                ctx.entries().to_vec()
-            } else {
-                Vec::new()
-            }
+    // Capture parent entries for fork mode before spawning the thread
+    let parent_entries: Vec<Message> = if inherit_context {
+        if let Some(ref parent_ctx) = parent_context {
+            let ctx = parent_ctx.blocking_read();
+            ctx.entries().to_vec()
         } else {
             Vec::new()
-        };
+        }
+    } else {
+        Vec::new()
+    };
 
-        std::thread::spawn(move || {
-            // Set up output capture: redirect all agent_emit! calls to the task's buffer
-            if let Some(ref tid) = task_id_for_spawn {
-                if let Some(ref store) = task_store_for_spawn {
-                    if let Some(task) = store.get(tid) {
-                        let task_for_cb = Arc::clone(&task);
-                        crate::agent_loop::set_output_capture(Arc::new(move |msg: &str| {
-                            task_for_cb.write_output(msg);
-                            task_for_cb.write_output("\n");
-                        }));
-                    }
+    std::thread::spawn(move || {
+        // Set up output capture: redirect all agent_emit! calls to the task's buffer
+        if let Some(ref tid) = task_id_for_spawn {
+            if let Some(ref store) = task_store_for_spawn {
+                if let Some(task) = store.get(tid) {
+                    let task_for_cb = Arc::clone(&task);
+                    crate::agent_loop::set_output_capture(Arc::new(move |msg: &str| {
+                        task_for_cb.write_output(msg);
+                        task_for_cb.write_output("\n");
+                    }));
                 }
             }
+        }
 
-            let result = match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, false) {
-                Ok(mut child_loop) => {
-                    // Wire pending message drain: the child loop will drain pending
-                    // messages from its own AgentTask at each turn boundary, enabling
-                    // the parent to send messages via send_message tool that the
-                    // child processes mid-turn (matching Claude Code's drainPendingMessages).
-                    if let Some(ref tid) = task_id_for_spawn {
-                        if let Some(ref store) = task_store_for_spawn {
-                            if let Some(task) = store.get(tid) {
-                                let task_for_drain = Arc::clone(&task);
-                                child_loop.set_drain_pending_messages(Arc::new(move || {
-                                    task_for_drain.drain_pending_messages()
-                                }));
-                            }
+        let result = match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, false) {
+            Ok(mut child_loop) => {
+                // Wire pending message drain: the child loop will drain pending
+                // messages from its own AgentTask at each turn boundary, enabling
+                // the parent to send messages via send_message tool that the
+                // child processes mid-turn (matching Claude Code's drainPendingMessages).
+                if let Some(ref tid) = task_id_for_spawn {
+                    if let Some(ref store) = task_store_for_spawn {
+                        if let Some(task) = store.get(tid) {
+                            let task_for_drain = Arc::clone(&task);
+                            child_loop.set_drain_pending_messages(Arc::new(move || {
+                                task_for_drain.drain_pending_messages()
+                            }));
                         }
                     }
+                }
 
-                    // Apply fork mode: inject parent context entries into child
-                    if !parent_entries.is_empty() {
-                        // Find the last ToolUseBlocks entry index (the agent tool that spawned this child)
-                        let last_tool_use_idx = parent_entries
-                            .iter()
-                            .rposition(|msg| matches!(msg.content, MessageContent::ToolUseBlocks(_)))
-                            .map(|i| i as isize)
-                            .unwrap_or(-1);
+                // Apply fork mode: inject parent context entries into child
+                if !parent_entries.is_empty() {
+                    // Find the last ToolUseBlocks entry index (the agent tool that spawned this child)
+                    let last_tool_use_idx = parent_entries
+                        .iter()
+                        .rposition(|msg| matches!(msg.content, MessageContent::ToolUseBlocks(_)))
+                        .map(|i| i as isize)
+                        .unwrap_or(-1);
 
-                        let mut cloned: Vec<Message> = Vec::new();
-                        for (i, entry) in parent_entries.iter().enumerate() {
-                            if i as isize == last_tool_use_idx {
+                    let mut cloned: Vec<Message> = Vec::new();
+                    for (i, entry) in parent_entries.iter().enumerate() {
+                        if i as isize == last_tool_use_idx {
+                            continue;
+                        }
+                        match &entry.content {
+                            MessageContent::Text(_)
+                            | MessageContent::ToolUseBlocks(_)
+                            | MessageContent::ToolResultBlocks(_)
+                            | MessageContent::Summary(_) => {
+                                cloned.push(entry.clone());
+                            }
+                            MessageContent::CompactBoundary { .. }
+                            | MessageContent::Attachment(_) => {
                                 continue;
                             }
-                            match &entry.content {
-                                MessageContent::Text(_)
-                                | MessageContent::ToolUseBlocks(_)
-                                | MessageContent::ToolResultBlocks(_)
-                                | MessageContent::Summary(_) => {
-                                    cloned.push(entry.clone());
-                                }
-                                MessageContent::CompactBoundary { .. }
-                                | MessageContent::Attachment(_) => {
-                                    continue;
-                                }
-                            }
-                        }
-
-                        // Apply cloned entries to child context
-                        let mut child_ctx = child_loop.context.blocking_write();
-                        for msg in cloned {
-                            child_ctx.add_message(msg);
-                        }
-                        drop(child_ctx); // release lock before run()
-                    }
-
-                    let result = child_loop.run(&prompt_owned);
-
-                    // Recover partial results if run returned empty
-                    let final_result = if result.is_empty() {
-                        child_loop.get_partial_result()
-                    } else {
-                        result
-                    };
-
-                    let tools_used = child_loop.tools_used_count();
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    Ok((final_result, tools_used, duration_ms))
-                }
-                Err(e) => {
-                    Err(format!("failed to create sub-agent: {e}"))
-                }
-            };
-
-            // Clear output capture before updating the task (so our task updates don't go to the buffer)
-            crate::agent_loop::clear_output_capture();
-
-            // Update task store with results
-            if let Some(ref tid) = task_id_for_spawn {
-                if let Some(ref store) = task_store_for_spawn {
-                    match &result {
-                        Ok((final_result, tools_used, duration_ms)) => {
-                            // Write the final result to the task's output buffer
-                            if let Some(task) = store.get(tid) {
-                                task.write_output(&format!("\n--- Agent Result ---\n{}\n", final_result));
-                            }
-                            store.update_stats(tid, *tools_used as u32, *duration_ms);
-                            store.complete(tid);
-                        }
-                        Err(e) => {
-                            store.fail(tid, e);
                         }
                     }
+
+                    // Apply cloned entries to child context
+                    let mut child_ctx = child_loop.context.blocking_write();
+                    for msg in cloned {
+                        child_ctx.add_message(msg);
+                    }
+                    drop(child_ctx); // release lock before run()
                 }
+
+                let result = child_loop.run(&prompt_owned);
+
+                // Recover partial results if run returned empty
+                let final_result = if result.is_empty() {
+                    child_loop.get_partial_result()
+                } else {
+                    result
+                };
+
+                let tools_used = child_loop.tools_used_count();
+                let duration_ms = start.elapsed().as_millis() as u64;
+                Ok((final_result, tools_used, duration_ms))
             }
-        });
-
-        // Return with the task_id if available, otherwise use the agent_id
-        // (must be computed before the spawn since task_id is moved into the closure)
-        let return_id = if let Some(ref tid) = task_id {
-            tid.clone()
-        } else {
-            agent_id.clone()
+            Err(e) => {
+                Err(format!("failed to create sub-agent: {e}"))
+            }
         };
 
-        return (
-            return_id.clone(),
-            format!("Agent launched in background.\n\nagentId: {}\nStatus: async_launched", return_id),
-            String::new(),
-            0,
-            start.elapsed().as_millis() as u64,
-        );
-    }
+        // Clear output capture before updating the task (so our task updates don't go to the buffer)
+        crate::agent_loop::clear_output_capture();
 
-    // Synchronous path: run the child agent loop
-    match AgentLoop::new_for_sub_agent(child_config, child_registry, &child_sys_prompt, parent_use_stream) {
-        Ok(child_loop) => {
-            // Apply fork mode: clone parent context entries into child
-            if inherit_context {
-                if let Some(ref parent_ctx) = parent_context {
-                    clone_context_for_fork(parent_ctx, &child_loop.context);
+        // Update task store with results
+        if let Some(ref tid) = task_id_for_spawn {
+            if let Some(ref store) = task_store_for_spawn {
+                match &result {
+                    Ok((final_result, tools_used, duration_ms)) => {
+                        // Write the final result to the task's output buffer
+                        if let Some(task) = store.get(tid) {
+                            task.write_output(&format!("\n--- Agent Result ---\n{}\n", final_result));
+                        }
+                        store.update_stats(tid, *tools_used as u32, *duration_ms);
+                        store.complete(tid);
+                    }
+                    Err(e) => {
+                        store.fail(tid, e);
+                    }
                 }
             }
-
-            let result = child_loop.run(prompt);
-
-            // Recover partial results if Run returned empty
-            let final_result = if result.is_empty() {
-                child_loop.get_partial_result()
-            } else {
-                result
-            };
-
-            let tools_used = child_loop.tools_used_count();
-            let duration_ms = start.elapsed().as_millis() as u64;
-            (agent_id, final_result, String::new(), tools_used, duration_ms)
         }
-        Err(e) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
-            (agent_id, String::new(), format!("failed to create sub-agent: {e}"), 0, duration_ms)
-        }
-    }
+    });
+
+    // Return immediately with the task_id and output file path
+    let return_id = if let Some(ref tid) = task_id {
+        tid.clone()
+    } else {
+        agent_id.clone()
+    };
+    // Compute output file path for the return value
+    let output_file = if let Some(ref tid) = task_id {
+        format!(".claude/sub-agents/{}_output.txt", tid)
+    } else {
+        String::new()
+    };
+
+    (
+        return_id.clone(),
+        String::new(), // result_text (empty for async)
+        String::new(), // error_text (empty for async)
+        output_file,
+        0, // tools_used (not known yet)
+        start.elapsed().as_millis() as u64,
+    )
 }
 
 // ─── Agent type prompt modifiers ──────────────────────────────────────────────
@@ -715,6 +716,39 @@ mod tests {
     fn test_global_disallowed_tools() {
         let disallowed = global_disallowed_tools();
         assert!(disallowed.contains("agent"));
+        // Task delegation tools are blocked for sub-agents
+        assert!(disallowed.contains("task_create"));
+        assert!(disallowed.contains("task_update"));
+        assert!(disallowed.contains("task_list"));
+        assert!(disallowed.contains("task_get"));
+        assert!(disallowed.contains("task_stop"));
+        assert!(disallowed.contains("task_output"));
+        assert!(disallowed.contains("send_message"));
+        assert!(disallowed.contains("plan_approval"));
+    }
+
+    #[test]
+    fn test_build_child_config_auto_permission_mode() {
+        let parent_config = Config::default();
+        let child_config = build_child_config(&parent_config, "");
+        // Sub-agents always use AUTO mode
+        assert_eq!(child_config.permission_mode, crate::permissions::PermissionMode::Auto);
+    }
+
+    #[test]
+    fn test_build_child_config_avoid_permission_prompts() {
+        let parent_config = Config::default();
+        let child_config = build_child_config(&parent_config, "");
+        // Sub-agents should avoid permission prompts
+        assert!(child_config.should_avoid_permission_prompts);
+    }
+
+    #[test]
+    fn test_build_child_config_no_max_turns_limit() {
+        let parent_config = Config::default();
+        let child_config = build_child_config(&parent_config, "");
+        // Sub-agents have no max turns limit
+        assert_eq!(child_config.max_turns, u32::MAX as usize);
     }
 
     #[test]
@@ -742,6 +776,11 @@ mod tests {
         // All non-agent tools should be present
         assert!(child.get("read_file").is_some());
         assert!(child.get("exec").is_some());
+        // Task delegation tools should also be absent (even though they aren't registered here)
+        assert!(child.get("task_create").is_none());
+        assert!(child.get("task_output").is_none());
+        assert!(child.get("send_message").is_none());
+        assert!(child.get("plan_approval").is_none());
     }
 
     #[test]
@@ -930,7 +969,7 @@ mod tests {
     fn test_agent_tool_missing_prompt() {
         use crate::tools::agent_tool::AgentTool;
         let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
-            ("agent-test".to_string(), "ok".to_string(), String::new(), 0, 0)
+            ("agent-test".to_string(), "ok".to_string(), String::new(), String::new(), 0, 0)
         });
         let params = HashMap::new(); // empty params - missing required "prompt"
         let result = tool.execute(params);
@@ -942,7 +981,7 @@ mod tests {
     fn test_agent_tool_empty_prompt() {
         use crate::tools::agent_tool::AgentTool;
         let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
-            ("agent-test".to_string(), "ok".to_string(), String::new(), 0, 0)
+            ("agent-test".to_string(), "ok".to_string(), String::new(), String::new(), 0, 0)
         });
         let mut params = HashMap::new();
         params.insert("prompt".to_string(), serde_json::json!(""));
