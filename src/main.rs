@@ -78,11 +78,17 @@ fn main() -> Result<()> {
     // Priority: flags > env > project .claude/settings.json > home ~/.claude/settings.json > defaults
     let mut cfg = Config::default();
 
-    // Load from .claude/settings.json and .mcp.json
-    if let Some(project_dir) = args.dir.clone().or_else(|| std::env::current_dir().ok()) {
-        if let Err(e) = std::env::set_current_dir(&project_dir) {
-            eprintln!("[!] Failed to change working directory to {}: {}", project_dir.display(), e);
+    // Normalize the --dir path: on Windows, forward slashes are converted to backslashes
+    // and the path is cleaned. This ensures --dir values like "E:/workspace/project"
+    // work on Windows, and guards against shell argument processing that may strip
+    // backslashes (e.g., "E:\workspace\project" becoming "E:workspaceproject").
+    if let Some(ref raw_dir) = args.dir {
+        let normalized_dir = normalize_path_separators(raw_dir);
+        if let Err(e) = std::env::set_current_dir(&normalized_dir) {
+            eprintln!("[!] Failed to change working directory to {} (original: {}): {}", normalized_dir.display(), raw_dir.display(), e);
         }
+    }
+    if let Some(project_dir) = args.dir.as_ref().map(normalize_path_separators).or_else(|| std::env::current_dir().ok()) {
         if let Some(file_cfg) = load_config_from_file(&project_dir) {
             if let Some(api_key) = file_cfg.api_key {
                 cfg.api_key = Some(api_key);
@@ -591,4 +597,22 @@ fn list_transcripts(dir: &PathBuf) -> Vec<String> {
     // Sort by modification time, most recent first
     transcripts.sort_by(|a, b| b.1.cmp(&a.1));
     transcripts.iter().map(|(name, _)| name.clone()).collect()
+}
+
+/// Normalize path separators for Windows: replace forward slashes with backslashes,
+/// then clean up . and .. elements. On non-Windows, just returns a clone.
+/// This ensures --dir values like "E:/workspace/project" work on Windows,
+/// and guards against shell argument processing that may strip backslashes.
+fn normalize_path_separators(p: &PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        // Convert forward slashes to backslashes
+        let with_backslash = p.to_string_lossy().replace('/', "\\");
+        // Clean up the path (handles . and .. but does NOT require the path to exist)
+        PathBuf::from(&with_backslash)
+    }
+    #[cfg(not(windows))]
+    {
+        p.clone()
+    }
 }

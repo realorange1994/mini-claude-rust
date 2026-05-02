@@ -1325,7 +1325,7 @@ fn git_tool_full_workflow() {
     // 10. Blame
     let mut p = HashMap::new();
     p.insert("operation".into(), serde_json::json!("blame"));
-    p.insert("path".into(), serde_json::json!(dir_str.clone()));
+    p.insert("directory".into(), serde_json::json!(dir_str.clone()));
     p.insert("files".into(), serde_json::json!(["main.txt"]));
     let blame_result = tool.execute(p);
     assert!(!blame_result.is_error, "blame failed: {}", blame_result.output);
