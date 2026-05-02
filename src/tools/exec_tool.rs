@@ -610,7 +610,7 @@ impl Tool for ExecTool {
                 },
                 "description": {
                     "type": "string",
-                    "description": "A short description of what this command does."
+                    "description": "A short description of what this command does. Useful for understanding intent when reviewing risky commands."
                 },
                 "working_dir": {
                     "type": "string",
@@ -618,7 +618,7 @@ impl Tool for ExecTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default 600, max 600)."
+                    "description": "Timeout in milliseconds (max 600000 / 10 minutes). Default: 120000 (2 minutes)."
                 },
                 "run_in_background": {
                     "type": "boolean",
@@ -797,11 +797,11 @@ impl ExecTool {
             return ToolResult::error("Error: empty command");
         }
 
-        let timeout_secs = params
+        let timeout_ms = params
             .get("timeout")
             .and_then(|v| v.as_i64())
-            .unwrap_or(600)
-            .clamp(1, 600) as u64;
+            .unwrap_or(120000)  // default: 2 minutes (matching official Claude Code)
+            .clamp(1, 600000) as u64;
 
         let working_dir = params
             .get("working_dir")
@@ -841,7 +841,7 @@ impl ExecTool {
         };
 
         // Apply timeout using wait_with_timeout pattern
-        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
         let start = std::time::Instant::now();
         let timed_out = loop {
             match child.try_wait() {
@@ -860,8 +860,8 @@ impl ExecTool {
 
         if timed_out {
             return ToolResult::error(format!(
-                "Error: command timed out after {}s: {}",
-                timeout_secs, command
+                "Error: command timed out after {}ms: {}",
+                timeout_ms, command
             ));
         }
 
