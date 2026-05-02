@@ -55,6 +55,10 @@ impl Tool for MultiEditTool {
                             "new_string": {
                                 "type": "string",
                                 "description": "Text to replace it with."
+                            },
+                            "replace_all": {
+                                "type": "boolean",
+                                "description": "Replace all occurrences of this old_string (default: false)."
                             }
                         },
                         "required": ["old_string", "new_string"]
@@ -92,6 +96,13 @@ impl Tool for MultiEditTool {
             return ToolResult::error("Error: edits must not be empty");
         }
 
+        #[derive(Clone)]
+        struct Edit {
+            old: String,
+            new: String,
+            replace_all: bool,
+        }
+
         let mut edits = Vec::new();
         for (i, e) in edits_array.iter().enumerate() {
             let m = match e.as_object() {
@@ -105,7 +116,12 @@ impl Tool for MultiEditTool {
             };
 
             let new_str = m.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-            edits.push((old_str.to_string(), new_str.to_string()));
+            let replace_all = m.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+            edits.push(Edit {
+                old: old_str.to_string(),
+                new: new_str.to_string(),
+                replace_all,
+            });
         }
 
         let content = match fs::read_to_string(&path) {
@@ -119,39 +135,74 @@ impl Tool for MultiEditTool {
         // Normalize CRLF
         let mut content = content.replace("\r\n", "\n");
         let has_crlf = content.contains('\r');
-        
-        for (old, new) in &mut edits {
-            *old = old.replace("\r\n", "\n");
-            *new = new.replace("\r\n", "\n");
+
+        for edit in &mut edits {
+            edit.old = edit.old.replace("\r\n", "\n");
+            edit.new = edit.new.replace("\r\n", "\n");
         }
 
-        // Dry run: validate all edits
+        // Normalize curly quotes (matching official)
+        for edit in &mut edits {
+            edit.old = normalize_quotes(&edit.old);
+            edit.new = normalize_quotes(&edit.new);
+        }
+
+        // Track applied new strings for overlapping edit detection
+        let mut applied_new_strings: Vec<String> = Vec::new();
+
+        // Dry run: validate all edits and detect overlapping
         let mut test_content = content.clone();
-        for (i, (old, _)) in edits.iter().enumerate() {
-            if !test_content.contains(old) {
+        for (i, edit) in edits.iter().enumerate() {
+            let old_trimmed = edit.old.trim_end_matches('\n');
+
+            // Overlapping edit detection: old_string must not be a substring of any previously applied new_string
+            for prev_new in &applied_new_strings {
+                if !old_trimmed.is_empty() && prev_new.contains(old_trimmed) {
+                    return ToolResult::error(format!(
+                        "Error: edit {} failed: old_string is a substring of a new_string from a previous edit",
+                        i + 1
+                    ));
+                }
+            }
+
+            // Find the edit location
+            let idx = find_edit_location(&test_content, &edit.old);
+            let mut final_old = edit.old.clone();
+            let mut final_new = edit.new.clone();
+
+            if idx < 0 {
+                // Try desanitized version
+                let desanitized_old = desanitize(&edit.old);
+                let desanitized_new = desanitize(&edit.new);
+                let desanitized_idx = find_edit_location(&test_content, &desanitized_old);
+                if desanitized_idx >= 0 {
+                    final_old = desanitized_old;
+                    final_new = desanitized_new;
+                }
+            }
+
+            if idx < 0 && find_edit_location(&test_content, &final_old) < 0 {
                 return ToolResult::error(format!(
                     "Error: edit {} failed: old_text not found: {:?}",
                     i + 1,
-                    truncate(old, 80)
+                    truncate(&edit.old, 80)
                 ));
             }
-            if let Some(pos) = test_content.find(old) {
-                test_content = format!(
-                    "{}{}{}",
-                    &test_content[..pos],
-                    &edits[i].1,
-                    &test_content[pos + old.len()..]
-                );
+
+            // Apply in test content
+            if edit.replace_all {
+                test_content = test_content.replace(&final_old, &final_new);
+            } else {
+                test_content = test_content.replacen(&final_old, &final_new, 1);
             }
+            applied_new_strings.push(edit.new.clone());
         }
 
         // Apply atomically
-        for (old, new) in &edits {
-            content = content.replacen(old, new, 1);
-        }
-
         if has_crlf {
-            content = restore_crlf(&content);
+            content = restore_crlf(&test_content);
+        } else {
+            content = test_content;
         }
 
         if let Err(e) = fs::write(&path, &content) {
@@ -162,13 +213,68 @@ impl Tool for MultiEditTool {
     }
 }
 
+/// Finds old_string in content, first trying exact match, then with trailing newlines stripped.
+fn find_edit_location(content: &str, old: &str) -> isize {
+    if let Some(idx) = content.find(old) {
+        return idx as isize;
+    }
+    // Try with trailing newlines stripped (matching official)
+    let trimmed = old.trim_end_matches('\n');
+    if trimmed != old {
+        if let Some(idx) = content.find(trimmed) {
+            return idx as isize;
+        }
+    }
+    -1
+}
+
+/// Desanitized token mappings: sanitized -> original API format.
+const DESANITIZATIONS: &[(&str, &str)] = &[
+    ("<fnr>", "<function_results>"),
+    ("<n>", "<name>"),
+    ("</n>", "</name>"),
+    ("<o>", "<output>"),
+    ("</o>", "</output>"),
+    ("<e>", "<error>"),
+    ("</e>", "</error>"),
+    ("<s>", "<system>"),
+    ("</s>", "</system>"),
+    ("<r>", "<result>"),
+    ("</r>", "</result>"),
+    ("< META_START >", "<META_START>"),
+    ("< META_END >", "<META_END>"),
+    ("< EOT >", "<EOT>"),
+    ("< META >", "<META>"),
+    ("< SOS >", "<SOS>"),
+    ("\n\nH:", "\n\nHuman:"),
+    ("\n\nA:", "\n\nAssistant:"),
+];
+
+/// Applies all known desanitization reversals to a string.
+fn desanitize(s: &str) -> String {
+    let mut result = s.to_string();
+    for (from, to) in DESANITIZATIONS {
+        result = result.replace(from, to);
+    }
+    result
+}
+
+/// Converts curly/smart quotes to straight ASCII quotes.
+fn normalize_quotes(s: &str) -> String {
+    s.replace('\u{201C}', "\"")
+        .replace('\u{201D}', "\"")
+        .replace('\u{2018}', "'")
+        .replace('\u{2019}', "'")
+}
 
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
         let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
         format!("{}...", &s[..end])
     }
 }
