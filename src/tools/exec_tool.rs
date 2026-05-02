@@ -1061,7 +1061,7 @@ impl Tool for TaskStopTool {
 // ─── TaskOutputTool ─────────────────────────────────────────────────────────
 
 /// Callback for reading background task output.
-/// (task_id, block, timeout_secs) -> (output, error_text)
+/// (task_id, block, timeout_ms) -> (output, error_text)
 type TaskOutputFunc =
     Arc<dyn Fn(String, bool, u64) -> (String, String) + Send + Sync>;
 
@@ -1108,7 +1108,7 @@ impl Tool for TaskOutputTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Maximum time to wait when block=true, in seconds (default: 60, max: 600)"
+                    "description": "Maximum time to wait when block=true, in milliseconds (default: 30000, max: 600000)"
                 }
             }
         })
@@ -1136,14 +1136,14 @@ impl Tool for TaskOutputTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let timeout_secs = params
+        let timeout_ms = params
             .get("timeout")
             .and_then(|v| v.as_i64())
-            .unwrap_or(60)
-            .clamp(1, 600) as u64;
+            .unwrap_or(30000)  // default: 30 seconds (matching official)
+            .clamp(1, 600000) as u64;
 
         let (output, err_text) =
-            (self.output_func)(task_id.to_string(), block, timeout_secs);
+            (self.output_func)(task_id.to_string(), block, timeout_ms);
 
         if !err_text.is_empty() {
             return ToolResult::error(err_text);
@@ -1163,7 +1163,7 @@ pub fn make_task_stop_func(task_store: crate::task_store::SharedTaskStore) -> Ta
 /// Build an output callback from a TaskStore.
 /// Returns (output, error_text).
 pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> TaskOutputFunc {
-    Arc::new(move |task_id: String, block: bool, timeout_secs: u64| {
+    Arc::new(move |task_id: String, block: bool, timeout_ms: u64| {
         let task_arc = task_store.get_task(&task_id);
 
         let task_arc = match task_arc {
@@ -1179,7 +1179,7 @@ pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> 
         // If block is true, wait for task to finish
         if block {
             let deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
             loop {
                 let is_terminal = {
                     let task = task_arc.lock().unwrap();
@@ -1192,10 +1192,10 @@ pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> 
                     let task = task_arc.lock().unwrap();
                     return (
                         format!(
-                            "Task {} ({}) -- timeout after {}s (still running, try increasing timeout or check task_output again later)",
+                            "Task {} ({}) -- timeout after {}ms (still running, try increasing timeout or check task_output again later)",
                             task_id,
                             task.status,
-                            timeout_secs
+                            timeout_ms
                         ),
                         String::new(),
                     );
