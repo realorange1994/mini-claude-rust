@@ -670,12 +670,22 @@ impl AgentLoop {
 
     /// Convert conversation entries to API message format (sync)
     fn entries_to_messages(&self) -> Vec<serde_json::Value> {
-        let ctx = self.context.blocking_read();
+        let mut ctx = self.context.blocking_write();
+        ctx.validate_tool_pairing();
+        ctx.fix_role_alternation();
         Self::entries_to_messages_from_ctx(ctx.entries())
     }
 
-    /// Async version for use inside async context
+    /// Async version for use inside async context.
+    /// Validates tool pairing and fixes role alternation before converting
+    /// (matching Go: callWithRetryAndFallback calls ValidateToolPairing + FixRoleAlternation
+    /// before BuildMessages).
     async fn entries_to_messages_async(&self) -> Vec<serde_json::Value> {
+        {
+            let mut ctx = self.context.write().await;
+            ctx.validate_tool_pairing();
+            ctx.fix_role_alternation();
+        }
         let ctx = self.context.read().await;
         Self::entries_to_messages_from_ctx(ctx.entries())
     }
@@ -804,7 +814,7 @@ impl AgentLoop {
                 let reactive_triggered = {
                     let ctx = self.context.read().await;
                     let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
-                    let mut compactor = self.compactor.write().await;
+                    let compactor = self.compactor.write().await;
                     compactor.should_reactive_compact(current_tokens)
                 };
 
@@ -832,6 +842,10 @@ impl AgentLoop {
                         );
                         // Advance epoch — all tracked items are now stale.
                         self.tool_state_tracker.borrow_mut().on_compaction();
+                        // Update prev_turn_tokens to reflect the post-compact context,
+                        // preventing re-triggering on the next turn (Go: agent_loop.go:850).
+                        let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
+                        compactor.update_prev_turn_tokens(current_tokens);
                         let recovered_paths = self.post_compact_recovery().await;
                         // Mark recovered files as fresh (content re-injected).
                         for path in &recovered_paths {
@@ -1472,8 +1486,9 @@ impl AgentLoop {
 
                     // Detect context length error -- suppress user-visible warnings
                     // until recovery is exhausted (error withholding)
-                    if err_str.contains("context_length") || err_str.contains("prompt is too long") ||
-                       err_str.contains("400") || err_str.contains("stream stalled") {
+                    // Use is_context_length_error() for precise pattern matching (Go: isContextLengthError),
+                    // not a broad "400" check that would trigger recovery on auth/format errors.
+                    if crate::error_types::is_context_length_error(&err_str) || err_str.contains("stream stalled") {
                         context_errors += 1;
                         continue_reason = ContinueReason::PromptTooLong;
 

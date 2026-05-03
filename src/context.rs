@@ -707,7 +707,11 @@ impl ConversationContext {
             }
         }
 
-        // Pass 2: Remove orphaned tool_results, collect surviving result IDs
+        // Pass 2: Remove orphaned tool_results (those without matching tool_use).
+        // This is the critical fix for 2013 error: "tool call result does not follow tool call".
+        // We ONLY remove orphaned tool_results. We do NOT remove tool_use blocks without
+        // results (removed per Go's agent_loop.go: "Pass 3 REMOVED") — removing tool_use
+        // blocks while leaving tool_results in the API's view causes a worse structural mismatch.
         let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for msg in &mut self.messages {
             if let MessageContent::ToolResultBlocks(blocks) = &mut msg.content {
@@ -731,32 +735,12 @@ impl ConversationContext {
             }
         });
 
-        // Pass 4: Remove orphaned tool_use blocks (call without matching result)
-        let mut i = 0;
-        while i < self.messages.len() {
-            let msg = &self.messages[i];
-            if msg.role == MessageRole::Assistant {
-                if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
-                    let kept: Vec<ToolUseBlock> = blocks
-                        .iter()
-                        .filter(|b| b.id.is_empty() || result_ids.contains(&b.id))
-                        .cloned()
-                        .collect();
-                    let removed = blocks.len() - kept.len();
-                    if removed > 0 {
-                        if kept.is_empty() {
-                            // Entire message was orphaned -- replace with placeholder
-                            self.messages[i].content = MessageContent::Text(
-                                "(tool call removed -- result was truncated)".to_string(),
-                            );
-                        } else {
-                            self.messages[i].content = MessageContent::ToolUseBlocks(kept);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
+        // Pass 4 (REMOVED): Previously removed tool_use blocks without matching results.
+        // Matching Go's agent_loop.go: this was counterproductive because when the API
+        // returns 2013, it's because a tool_result doesn't match a tool_use. Removing
+        // the tool_use block makes the orphaned tool_result even more orphaned, worsening
+        // the mismatch. Instead, we keep tool_use blocks intact and only remove orphaned
+        // results. The API handles tool_use without results gracefully.
     }
 
     /// Ensures strict user/assistant alternation by merging consecutive
