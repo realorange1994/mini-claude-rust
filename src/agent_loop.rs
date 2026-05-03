@@ -7,7 +7,7 @@ use crate::auto_classifier::AutoModeClassifier;
 use crate::skills::SkillTracker;
 use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
 use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
-use crate::error_types::classify_error;
+use crate::error_types::{classify_error, is_context_length_error};
 use crate::rate_limit::RateLimitState;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
@@ -1649,6 +1649,21 @@ impl AgentLoop {
                         }
                     }
 
+                    // Model confused -- special handling: let Run loop handle recovery
+                    if err_str.contains("model confused") {
+                        return Err(e);
+                    }
+
+                    // Stream stalled -- special handling: let Run loop handle truncation
+                    if err_str.contains("stream stalled") {
+                        return Err(e);
+                    }
+
+                    // Context length -- special handling: let Run loop handle truncation
+                    if is_context_length_error(&err_str) {
+                        return Err(e);
+                    }
+
                     // Check if it's a transient error using rich classification
                     let classification = classify_error(&err_str, 0, 0);
                     if !classification.retryable {
@@ -1812,6 +1827,14 @@ impl AgentLoop {
                         // Rebuild messages from repaired context and retry
                         current_messages = self.entries_to_messages_async().await;
                         continue;
+                    }
+
+                    // Special errors: pass through to Run loop for handling
+                    // (matches Go agent_loop.go lines 1647-1651)
+                    if err_str.contains("model confused") ||
+                        err_str.contains("stream stalled") ||
+                        is_context_length_error(&err_str) {
+                        return Err(e);
                     }
 
                     let classification = classify_error(&err_str, 0, 0);
