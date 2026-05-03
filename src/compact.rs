@@ -476,7 +476,7 @@ Then, write your summary inside <summary> tags with these REQUIRED fields:
 
 1. Primary Request and Intent: What the user asked for and their goals
 2. Key Technical Concepts: Important concepts, patterns, or technologies discussed
-3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names)
+3. Files and Code Sections: Files read/modified with key details (paths, line numbers, function names). Include full code snippets where applicable (function signatures, file edits, important logic). Use code blocks for snippets.
 4. Errors and Fixes: Any errors encountered and how they were resolved
 5. Problem Solving: What approaches were tried, what worked, what didn't
 6. All User Messages: List every user message (paraphrased if long)
@@ -503,6 +503,7 @@ Below is the previous summary followed by new conversation messages. Update the 
 - Adding new files, errors, or decisions that appeared in the new messages
 - Removing information that is no longer relevant
 - Preserving all user messages (add new ones, keep existing ones)
+- Preserving code snippets, function signatures, and file edits from the previous summary (do NOT summarize them away -- keep them verbatim)
 
 Previous Summary:
 {previous_summary}
