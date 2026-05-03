@@ -240,6 +240,13 @@ impl ToolStateTracker {
         self.read_files.insert(abs.display().to_string(), self.compaction_epoch);
     }
 
+    /// Clear all recorded conclusions. Called after compaction when no files were
+    /// recovered — the summary captures all pre-compact knowledge, so stale
+    /// conclusions should not be re-stated.
+    pub fn clear_conclusions(&mut self) {
+        self.conclusions.clear();
+    }
+
     /// Return the text to inject into the system prompt.
     pub fn build_session_state_note(&self) -> String {
         let mut sb = String::new();

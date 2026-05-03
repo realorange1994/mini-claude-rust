@@ -813,6 +813,11 @@ impl AgentLoop {
                         for path in &recovered_paths {
                             self.tool_state_tracker.borrow_mut().mark_file_fresh(path);
                         }
+                        // If no files were recovered, the summary captures all
+                        // pre-compact knowledge — clear stale conclusions.
+                        if recovered_paths.is_empty() {
+                            self.tool_state_tracker.borrow_mut().clear_conclusions();
+                        }
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
@@ -850,6 +855,11 @@ impl AgentLoop {
                         // Mark recovered files as fresh (content re-injected).
                         for path in &recovered_paths {
                             self.tool_state_tracker.borrow_mut().mark_file_fresh(path);
+                        }
+                        // If no files were recovered, the summary captures all
+                        // pre-compact knowledge — clear stale conclusions.
+                        if recovered_paths.is_empty() {
+                            self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
                         // Phase 3: History snip — preserve recent messages verbatim
                         let mut ctx = self.context.write().await;
