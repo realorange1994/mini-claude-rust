@@ -1,6 +1,6 @@
 //! GlobTool - Find files matching glob patterns
 
-use crate::tools::{Tool, ToolResult, expand_path, is_ignored_dir};
+use crate::tools::{Tool, ToolResult, expand_path, is_ignored_dir, is_unc_path};
 use glob::glob;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -102,6 +102,12 @@ impl Tool for GlobTool {
             .unwrap_or_default();
 
         let base_dir = expand_path(dir);
+
+        // SECURITY: Skip filesystem operations for UNC paths to prevent NTLM credential leaks.
+        if is_unc_path(&base_dir) {
+            return ToolResult::error(format!("Error: UNC path access deferred: {}", base_dir.display()));
+        }
+
         if !base_dir.is_dir() {
             return ToolResult::error(format!("Error: directory not found: {}", base_dir.display()));
         }
