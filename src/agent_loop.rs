@@ -768,8 +768,15 @@ impl AgentLoop {
                 let cleared = ctx.micro_compact_entries(keep_recent, &placeholder);
                 if cleared > 0 {
                     agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
-                    // Micro-compaction clears tool results — mark tracked items stale.
-                    self.tool_state_tracker.borrow_mut().on_compaction();
+                    // NOTE: do NOT call tool_state_tracker.on_compaction() here.
+                    // Micro-compact clears OLD tool results (beyond keepRecent threshold) by
+                    // replacing their text with placeholders. This is lightweight text replacement,
+                    // not a structural context compaction. The files and searches themselves
+                    // remain relevant — only the detailed output is trimmed. Incrementing the
+                    // epoch here would incorrectly mark all files and searches as stale, causing
+                    // the Session State note to say "RE-READ if needed" for files whose
+                    // content is still in context. The epoch advances only during real compaction
+                    // (where context is structurally reduced and the summary may miss details).
                 }
             }
 
