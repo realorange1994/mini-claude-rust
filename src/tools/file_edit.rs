@@ -1,4 +1,4 @@
-//! FileEditTool - Edit a file by replacing exact strings
+//! FileEditTool - Edit a file by replaced exact strings
 
 use crate::tools::{Tool, ToolResult, expand_path, restore_crlf};
 use serde_json::Value;
@@ -114,6 +114,18 @@ impl Tool for FileEditTool {
             return ToolResult::ok(format!("Successfully created {}", path.display()));
         }
 
+        // 1 GiB guard: prevent OOM from loading huge files into memory
+        const MAX_EDIT_SIZE: u64 = 1 << 30; // 1 GiB
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.len() > MAX_EDIT_SIZE {
+                return ToolResult::error(format!(
+                    "Error: file too large ({} bytes, max {} bytes). Use offset/limit to read portions.",
+                    meta.len(),
+                    MAX_EDIT_SIZE
+                ));
+            }
+        }
+
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -133,7 +145,7 @@ impl Tool for FileEditTool {
         };
 
         // Normalize curly quotes to straight quotes for matching (matching official Claude Code).
-        // LLMs often output curly quotes ("") but files use straight quotes ("").
+        // LLMs often output curly quotes but files use straight quotes.
         let content_norm = normalize_quotes(&content);
         let old_str_norm = normalize_quotes(&old_str);
         let new_str_norm = normalize_quotes(&new_str);
@@ -185,8 +197,9 @@ impl Tool for FileEditTool {
             content_norm.replacen(&old_str_norm, &new_str_norm, 1)
         };
 
-        // Preserve original quote style
-        let result = preserve_quote_style(&result, &normalize_quotes(&content), &old_str, &new_str);
+        // Preserve original quote style — pass ORIGINAL (pre-normalized) content
+        // so curly quotes can be detected in the actual file content
+        let result = preserve_quote_style(&result, &content, &old_str, &new_str);
 
         // Restore CRLF
         let result = if has_crlf {
@@ -212,13 +225,49 @@ fn normalize_quotes(s: &str) -> String {
 }
 
 /// Preserves original quote style in the result.
-fn preserve_quote_style(result: &str, _content_orig: &str, old_str: &str, _new_str: &str) -> String {
-    // If old_string used curly quotes, the replacement should too.
-    // For now, we keep the normalized (straight) quotes since the file
-    // content was also normalized. This matches the common case where
-    // LLMs output curly quotes but files use straight quotes.
-    let _ = (result, _content_orig, old_str, _new_str);
-    result.to_string()
+/// If the file actually contains curly quotes, the replacement also uses curly quotes.
+fn preserve_quote_style(result: &str, content_orig: &str, old_str: &str, new_str: &str) -> String {
+    // Check if the file actually contains curly quotes
+    let has_curly_double = content_orig.contains('\u{201C}') || content_orig.contains('\u{201D}');
+    let has_curly_single = content_orig.contains('\u{2018}') || content_orig.contains('\u{2019}');
+    if !has_curly_double && !has_curly_single {
+        return result.to_string();
+    }
+
+    // Detect quote style used in old_str (the matched text in the file)
+    let old_has_curly_double = old_str.contains('\u{201C}') || old_str.contains('\u{201D}');
+    let old_has_curly_single = old_str.contains('\u{2018}') || old_str.contains('\u{2019}');
+
+    let mut out = result.to_string();
+    if old_has_curly_double && has_curly_double {
+        out = curly_to_straight_double(&out);
+        out = straight_to_curly_double(&out);
+    }
+    if old_has_curly_single && has_curly_single {
+        out = curly_to_straight_single(&out);
+        out = straight_to_curly_single(&out);
+    }
+    out
+}
+
+/// Converts curly double quotes to straight double quotes.
+fn curly_to_straight_double(s: &str) -> String {
+    s.replace('\u{201C}', "\"").replace('\u{201D}', "\"")
+}
+
+/// Converts straight double quotes to curly double quotes.
+fn straight_to_curly_double(s: &str) -> String {
+    s.replace('"', "\u{201C}")
+}
+
+/// Converts curly single quotes to straight single quotes.
+fn curly_to_straight_single(s: &str) -> String {
+    s.replace('\u{2018}', "'").replace('\u{2019}', "'")
+}
+
+/// Converts straight single quotes to curly single quotes.
+fn straight_to_curly_single(s: &str) -> String {
+    s.replace('\'', "\u{2019}")
 }
 
 /// Strips trailing whitespace from each line.

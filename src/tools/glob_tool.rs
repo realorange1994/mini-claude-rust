@@ -150,7 +150,7 @@ impl Tool for GlobTool {
             return ToolResult::ok("No files matched.".to_string());
         }
 
-        // Sort by modification time (oldest first, matching official Claude Code rg --sort=modified)
+        // Sort by modification time (newest first)
         matches.sort_by(|a, b| {
             let time_a = a.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
@@ -158,7 +158,7 @@ impl Tool for GlobTool {
             let time_b = b.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
                 .unwrap_or(0);
-            time_a.cmp(&time_b)
+            time_b.cmp(&time_a)
         });
 
         let total = matches.len();
