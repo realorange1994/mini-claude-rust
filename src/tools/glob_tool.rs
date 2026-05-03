@@ -165,28 +165,8 @@ impl Tool for GlobTool {
         let matches: Vec<_> = matches.into_iter().take(head_limit).collect();
 
         let mut lines = Vec::new();
-        for (path, meta) in matches {
-            let size = meta.as_ref().ok().map(|m| m.len()).unwrap_or(0);
-            let modified = meta
-                .as_ref()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    chrono::DateTime::from_timestamp(
-                        t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0),
-                        0,
-                    )
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default()
-                })
-                .unwrap_or_default();
-
-            lines.push(format!(
-                "{} ({} bytes, modified {})",
-                path.display(),
-                size,
-                modified
-            ));
+        for (path, _meta) in matches {
+            lines.push(path.display().to_string());
         }
 
         if total > head_limit {
