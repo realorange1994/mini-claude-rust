@@ -722,60 +722,77 @@ impl AgentLoop {
         Self::entries_to_messages_from_ctx(ctx.entries())
     }
 
-    /// Shared logic: convert entries to API message format
+    /// Shared logic: convert entries to API message format.
+    /// When a CompactBoundary is encountered, all prior messages are discarded
+    /// (matching Go: BuildMessages resets messages[:0] on CompactBoundaryContent).
+    /// Only the summary + messages after the boundary are sent to the API.
     fn entries_to_messages_from_ctx(entries: &[ConversationEntry]) -> Vec<serde_json::Value> {
-        entries
-            .iter()
-            .filter_map(|entry| {
-                let (role, content): (String, Vec<serde_json::Value>) = match &entry.content {
-                    MessageContent::Text(text) => {
-                        (entry.role.as_str().to_string(),
-                        vec![serde_json::json!({"type": "text", "text": text})])
-                    }
-                    MessageContent::ToolUseBlocks(blocks) => {
-                        ("assistant".to_string(),
-                        blocks.iter().map(|b| {
-                            serde_json::json!({
-                                "type": "tool_use",
-                                "id": b.id,
-                                "name": b.name,
-                                "input": b.input
-                            })
-                        }).collect())
-                    }
-                    MessageContent::ToolResultBlocks(blocks) => {
-                        ("user".to_string(),
-                        blocks.iter().map(|b| {
-                            let content_values: Vec<serde_json::Value> = b.content.iter()
-                                .filter_map(|c| serde_json::to_value(c).ok())
-                                .collect();
-                            serde_json::json!({
-                                "type": "tool_result",
-                                "tool_use_id": b.tool_use_id,
-                                "is_error": b.is_error,
-                                "content": content_values
-                            })
-                        }).collect())
-                    }
-                    MessageContent::Summary(text) => {
-                        ("user".to_string(),
-                        vec![serde_json::json!({"type": "text", "text": text})])
-                    }
-                    MessageContent::Attachment(text) => {
-                        ("user".to_string(),
-                        vec![serde_json::json!({"type": "text", "text": text})])
-                    }
-                    MessageContent::CompactBoundary { .. } => {
-                        // Skip compact boundaries in API messages -- they're metadata only
-                        return None;
-                    }
-                };
-                Some(serde_json::json!({
-                    "role": role,
-                    "content": content
-                }))
-            })
-            .collect()
+        let mut messages: Vec<serde_json::Value> = Vec::with_capacity(entries.len());
+
+        for entry in entries {
+            match &entry.content {
+                MessageContent::CompactBoundary { .. } => {
+                    // Compact boundary: discard all messages before this point.
+                    // Only the summary + messages after the boundary are sent to the API.
+                    // This is the key mechanism that makes compaction actually reduce
+                    // token usage — without this reset, old messages would still be
+                    // included and compaction would be a no-op.
+                    messages.clear();
+                    continue;
+                }
+                MessageContent::Text(text) => {
+                    messages.push(serde_json::json!({
+                        "role": entry.role.as_str(),
+                        "content": [{"type": "text", "text": text}]
+                    }));
+                }
+                MessageContent::ToolUseBlocks(blocks) => {
+                    let content: Vec<serde_json::Value> = blocks.iter().map(|b| {
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": b.id,
+                            "name": b.name,
+                            "input": b.input
+                        })
+                    }).collect();
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": content
+                    }));
+                }
+                MessageContent::ToolResultBlocks(blocks) => {
+                    let content: Vec<serde_json::Value> = blocks.iter().map(|b| {
+                        let content_values: Vec<serde_json::Value> = b.content.iter()
+                            .filter_map(|c| serde_json::to_value(c).ok())
+                            .collect();
+                        serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": b.tool_use_id,
+                            "is_error": b.is_error,
+                            "content": content_values
+                        })
+                    }).collect();
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": content
+                    }));
+                }
+                MessageContent::Summary(text) => {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}]
+                    }));
+                }
+                MessageContent::Attachment(text) => {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}]
+                    }));
+                }
+            }
+        }
+
+        messages
     }
 
     /// Run the agent loop asynchronously
