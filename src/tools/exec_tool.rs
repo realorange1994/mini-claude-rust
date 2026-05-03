@@ -489,6 +489,134 @@ fn is_dangerous_deletion_path(path: &str) -> Option<String> {
     None
 }
 
+/// Validate output redirection targets (> file, >> file) against dangerous paths.
+/// Prevents writing to sensitive system files via redirection.
+fn validate_redirect_targets(cmd: &str) -> Option<String> {
+    let targets = extract_redirect_targets(cmd);
+    for target in &targets {
+        if let Some(reason) = validate_redirect_path(target) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Extract `>` and `>>` redirect targets from a command, respecting quoted strings.
+fn extract_redirect_targets(cmd: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped { escaped = false; i += 1; continue; }
+        if c == b'\\' && !in_single_quote { escaped = true; i += 1; continue; }
+        if c == b'\'' && !in_double_quote { in_single_quote = !in_single_quote; i += 1; continue; }
+        if c == b'"' && !in_single_quote { in_double_quote = !in_double_quote; i += 1; continue; }
+        if in_single_quote || in_double_quote { i += 1; continue; }
+        // Look for > outside quotes
+        if c == b'>' {
+            // Skip process substitution >(
+            if i + 1 < bytes.len() && bytes[i + 1] == b'(' { i += 1; continue; }
+            // Find start of target (skip optional second > and whitespace)
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == b'>' { j += 1; }
+            // Skip whitespace
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') { j += 1; }
+            // Extract target token (until whitespace or shell operator)
+            let start = j;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b' ' | b'\t' | b';' | b'&' | b'|' | b'>' | b'<' => break,
+                    _ => j += 1,
+                }
+            }
+            if j > start {
+                targets.push(cmd[start..j].to_string());
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+
+    targets
+}
+
+/// Check if a redirect target path is dangerous.
+fn validate_redirect_path(target: &str) -> Option<String> {
+    // Block shell expansion: $VAR, ${VAR}, %VAR%
+    if target.contains('$') || target.contains('%') {
+        return Some("Output redirection to shell-expanded paths is blocked".into());
+    }
+    // Block process substitution and backticks
+    if target.contains('(') || target.contains('`') {
+        return Some("Output redirection to process substitutions is blocked".into());
+    }
+    if target.starts_with('=') {
+        return Some("Output redirection to =cmd is blocked".into());
+    }
+
+    // Strip surrounding quotes
+    let trimmed = if (target.starts_with('\'') && target.ends_with('\''))
+        || (target.starts_with('"') && target.ends_with('"'))
+    {
+        &target[1..target.len() - 1]
+    } else {
+        target
+    };
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.replace('\\', "/");
+
+    // /dev/* allowed only for /dev/null
+    if normalized.starts_with("/dev/") && normalized != "/dev/null" {
+        return Some("Output redirection to /dev/* is blocked (except /dev/null)".into());
+    }
+
+    // Block system directories
+    if normalized.starts_with("/proc/") || normalized.starts_with("/sys/") {
+        return Some("Output redirection to /proc/ or /sys/ is blocked".into());
+    }
+    if normalized.starts_with("/etc/") || normalized == "/etc" {
+        return Some("Output redirection to /etc/ is blocked".into());
+    }
+    if normalized.starts_with("/usr/") || normalized == "/usr" {
+        return Some("Output redirection to /usr/ is blocked".into());
+    }
+    if normalized.starts_with("/bin/") || normalized == "/bin"
+        || normalized.starts_with("/sbin/") || normalized == "/sbin"
+    {
+        return Some("Output redirection to system bin directories is blocked".into());
+    }
+    if normalized.starts_with("/boot/") || normalized == "/boot" {
+        return Some("Output redirection to /boot/ is blocked".into());
+    }
+    if normalized.starts_with("/var/") || normalized == "/var" {
+        return Some("Output redirection to /var/ is blocked".into());
+    }
+
+    // Block ~/.ssh/*
+    if normalized.starts_with("~/.ssh") || normalized.starts_with("$HOME/.ssh") {
+        return Some("Output redirection to ~/.ssh/ is blocked".into());
+    }
+
+    // Block project config files
+    let patterns = [".claude/", ".env", ".env.local", "settings.json"];
+    for pattern in &patterns {
+        if normalized.starts_with(pattern) || normalized.ends_with(pattern) || normalized == *pattern {
+            return Some("Output redirection to project config files is blocked".into());
+        }
+    }
+
+    None
+}
+
 /// Validate that deletion paths in a command are safe.
 fn validate_deletion_paths(cmd: &str) -> Option<String> {
     let base = extract_base_command(cmd).to_lowercase();
@@ -741,6 +869,11 @@ impl Tool for ExecTool {
 
             // Validate deletion paths
             if let Some(reason) = validate_deletion_paths(&stripped) {
+                return Some(ToolResult::error(reason));
+            }
+
+            // Validate output redirection targets
+            if let Some(reason) = validate_redirect_targets(&stripped) {
                 return Some(ToolResult::error(reason));
             }
         }
