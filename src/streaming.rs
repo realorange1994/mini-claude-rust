@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use futures::StreamExt;
 
 use crate::agent_loop::tool_arg_summary;
+use crate::error_types::is_transient_error;
 use crate::prompt_caching::cache_system_prompt;
 use crate::rate_limit::{parse_rate_limit_headers, RateLimitState};
 use crate::tools::truncate_at;
@@ -83,17 +84,6 @@ pub struct StreamResult {
 }
 
 /// Detect transient errors that are safe to retry (matching hermes-agent patterns).
-fn is_transient_error(err: &str) -> bool {
-    let lower = err.to_lowercase();
-    let patterns = [
-        "connection lost", "connection reset", "connection error",
-        "peer closed", "broken pipe", "upstream connect error",
-        "timeout", "timed out", "pool timeout", "connect timeout",
-        "remote protocol error", "stream error",
-    ];
-    patterns.iter().any(|p| lower.contains(p))
-}
-
 /// Maximum stream retries before giving up (matching hermes-agent default of 2).
 const MAX_STREAM_RETRIES: usize = 2;
 

@@ -1685,9 +1685,20 @@ impl AgentLoop {
                     }
 
                     if attempt < MAX_RETRIES - 1 {
+                        // Prefer rate limit header delay over jittered backoff (matching Go)
+                        let delay_ms = if let Some(rlim_delay) = self.rate_limit_state.retry_delay() {
+                            let rlim_ms = rlim_delay.as_millis() as u64;
+                            if rlim_ms > 0 && rlim_ms < backoff_ms * 3 {
+                                rlim_ms
+                            } else {
+                                backoff_ms
+                            }
+                        } else {
+                            backoff_ms
+                        };
                         agent_emit!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
-                            attempt + 1, backoff_ms, e);
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            attempt + 1, delay_ms, e);
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }
