@@ -1898,6 +1898,10 @@ impl AgentLoop {
                 if current < escalated {
                     self.current_max_tokens.store(escalated, std::sync::atomic::Ordering::SeqCst);
                     agent_emit!("\n[auto] max_tokens hit ({}), escalating to {} for next request", current, escalated);
+                } else {
+                    // Already at escalated level -- inject recovery message for next turn.
+                    // Matches upstream's MAX_OUTPUT_TOKENS_RECOVERY path.
+                    self.context.write().await.add_user_message("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.".to_string());
                 }
             }
         }
@@ -2164,6 +2168,9 @@ impl AgentLoop {
                 if current < escalated {
                     self.current_max_tokens.store(escalated, std::sync::atomic::Ordering::SeqCst);
                     agent_emit!("\n[auto] max_tokens hit ({}), escalating to {} for next request", current, escalated);
+                } else {
+                    // Already at escalated level -- inject recovery message for next turn.
+                    self.context.write().await.add_user_message("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.".to_string());
                 }
             }
         }
