@@ -157,6 +157,17 @@ fn strip_safe_wrappers(cmd: &str) -> String {
                     else { result = parts.join(" "); }
                     changed = true; break;
                 }
+                // sudo/doas: strip all flags and the command name, exposing what comes after
+                if (*wrapper == "sudo" || *wrapper == "doas") && !rest.is_empty() {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    let mut start_idx = 0;
+                    for (idx, part) in parts.iter().enumerate() {
+                        if part.starts_with('-') { start_idx = idx + 1; } else { break; }
+                    }
+                    // Also skip the next positional arg (the command being wrapped)
+                    if start_idx < parts.len() { result = parts[start_idx + 1..].join(" "); }
+                    changed = true; break;
+                }
                 if !rest.is_empty() {
                     let parts: Vec<&str> = rest.split_whitespace().collect();
                     let mut start_idx = 0;
