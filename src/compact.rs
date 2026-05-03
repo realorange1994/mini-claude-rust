@@ -637,6 +637,78 @@ fn find_closing_quote(s: &str) -> Option<usize> {
 
 // --- LLM-driven compaction ---
 
+/// Finds a safe boundary in the flat messages list where dropping won't orphan
+/// tool_use/tool_result pairs. Walks forward to detect if any tool_result
+/// in the kept region references a tool_use that would be dropped, and walks
+/// backward to detect if any tool_use in the kept region has a tool_result
+/// in the drop region.
+///
+/// Returns the adjusted start index for the drop (all messages from this
+/// index onward are safe to drop without orphaning pairs).
+fn find_safe_drop_boundary(messages: &[Message], drop_start_idx: usize) -> usize {
+    if drop_start_idx == 0 || drop_start_idx >= messages.len() {
+        return drop_start_idx;
+    }
+
+    // Build a map of tool_use_id -> index for tool_use messages.
+    // This lets us quickly look up whether a tool_result's tool_use
+    // is in the kept or dropped region.
+    use std::collections::HashMap;
+    let mut tool_use_index: HashMap<String, usize> = HashMap::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+            for block in blocks {
+                tool_use_index.insert(block.id.clone(), i);
+            }
+        }
+    }
+
+    let mut cut_idx = drop_start_idx;
+
+    // Walk FORWARD from cut_idx: detect if any tool_result in the kept
+    // region (i >= cut_idx) references a tool_use that is being dropped
+    // (index < cut_idx). If so, move cut_idx backward to include that
+    // tool_use in the drop region.
+    for i in cut_idx..messages.len() {
+        if let MessageContent::ToolResultBlocks(blocks) = &messages[i].content {
+            for block in blocks {
+                if let Some(&tool_use_msg_idx) = tool_use_index.get(&block.tool_use_id) {
+                    if tool_use_msg_idx < cut_idx {
+                        // tool_result at i references tool_use at tool_use_msg_idx,
+                        // but tool_use_msg_idx < cut_idx (would be kept) while i >= cut_idx (would be dropped).
+                        // This orphans the tool_result. Move cut_idx backward to include the tool_use.
+                        cut_idx = tool_use_msg_idx;
+                    }
+                }
+            }
+        }
+    }
+
+    // Walk BACKWARD from cut_idx: detect if any tool_use in the kept
+    // region (i < cut_idx) has a tool_result in the drop region
+    // (j >= cut_idx). If so, move cut_idx forward to include that tool_result.
+    for i in (0..cut_idx).rev() {
+        if let MessageContent::ToolUseBlocks(blocks) = &messages[i].content {
+            for block in blocks {
+                // Check if this tool_use has a result in the drop region
+                for j in cut_idx..messages.len() {
+                    if let MessageContent::ToolResultBlocks(result_blocks) = &messages[j].content {
+                        for result_block in result_blocks {
+                            if result_block.tool_use_id == block.id {
+                                // tool_use at i has its result at j, and j >= cut_idx (would be dropped).
+                                // Move cut_idx forward to include the result.
+                                cut_idx = j + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    cut_idx
+}
+
 /// Compress messages using LLM summary generation.
 /// This is the primary compaction method -- replaces older truncation-based approaches.
 /// If `last_summary` is provided, uses iterative update prompt.
@@ -698,12 +770,16 @@ pub async fn compact_conversation(
                     break; // not enough messages left
                 }
 
-                // Drop the oldest messages (skip system message at index 0 if present)
-                let start = if current_messages.first().map(|m| m.role == MessageRole::System).unwrap_or(false) && current_messages.len() > 2 {
+                // Drop the oldest messages, but use find_safe_drop_boundary to
+                // avoid splitting tool_use/tool_result pairs.
+                // Skip system message at index 0 if present.
+                let has_system = current_messages.first().map(|m| m.role == MessageRole::System).unwrap_or(false);
+                let proposed_start = if has_system && current_messages.len() > 2 {
                     1 + drop_count.min(current_messages.len() - 2)
                 } else {
                     drop_count.min(current_messages.len() - 2)
                 };
+                let start = find_safe_drop_boundary(&current_messages, proposed_start);
 
                 current_messages = current_messages[start..].to_vec();
                 if current_messages.len() < 2 {
@@ -2341,5 +2417,190 @@ Some trailing text"#;
         let result3 = extract_summary_from_compact_output(summary_only);
         assert!(result3.contains("1. Primary Request: Foo"));
         assert!(!result3.contains("<summary>"));
+    }
+
+    // --- find_safe_drop_boundary tests ---
+
+    #[test]
+    fn test_find_safe_drop_boundary_no_tools() {
+        // No tool pairs — boundary should be unchanged
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("system".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("user1".to_string())),
+            Message::new(MessageRole::Assistant, MessageContent::Text("assistant1".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("user2".to_string())),
+        ];
+        assert_eq!(find_safe_drop_boundary(&msgs, 2), 2);
+        assert_eq!(find_safe_drop_boundary(&msgs, 1), 1);
+        assert_eq!(find_safe_drop_boundary(&msgs, 3), 3);
+    }
+
+    #[test]
+    fn test_find_safe_drop_boundary_orphan_tool_result() {
+        // Proposed drop at index 2 (tool_result_1) would orphan its tool_use at index 1.
+        // Boundary should shift backward to include the tool_use.
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("system".to_string())),
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t1".to_string(),
+                    name: "read_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t1".to_string(),
+                    content: vec![ToolResultContent::Text { text: "result".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+            Message::new(MessageRole::User, MessageContent::Text("user".to_string())),
+        ];
+        // drop_start_idx=2 would drop tool_result_1 but keep tool_use_1 — bad.
+        // Expected: boundary shifts to 1 (drop tool_use_1 instead, keeping tool_result_1).
+        assert_eq!(find_safe_drop_boundary(&msgs, 2), 1);
+    }
+
+    #[test]
+    fn test_find_safe_drop_boundary_orphan_tool_use() {
+        // Proposed drop at index 1 only drops the system message.
+        // The t1_use(1)/t1_result(2) pair is fully kept — no orphan.
+        // So the boundary stays at 1.
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("system".to_string())),
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t1".to_string(),
+                    name: "read_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t1".to_string(),
+                    content: vec![ToolResultContent::Text { text: "result".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t2".to_string(),
+                    name: "edit_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t2".to_string(),
+                    content: vec![ToolResultContent::Text { text: "done".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+        ];
+        // drop_start_idx=1 only drops system — t1 pair fully kept, no adjustment.
+        assert_eq!(find_safe_drop_boundary(&msgs, 1), 1);
+    }
+
+    #[test]
+    fn test_find_safe_drop_boundary_drops_tool_use_keeps_result() {
+        // Drop only t1_use (index 1) but keep t1_result (index 2) — orphan.
+        // Forward walk detects t1_result references t1_use at index 1.
+        // Since 1 >= 1 (tool_use in kept region) and tool_result in kept region,
+        // this is NOT an orphan by the forward check (both in same region).
+        // But the backward walk: t1_use at 1 < 1? No (1 < 1 is false).
+        // Wait, the cut_idx stays at 1. The backward walk checks i < 1, which is just i=0.
+        // t1_use is at index 1 which is >= 1, so it's not in the backward walk scope.
+        // Let me create a clearer scenario: no system msg, drop t1_use but keep t1_result.
+        let msgs = vec![
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t1".to_string(),
+                    name: "read_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t1".to_string(),
+                    content: vec![ToolResultContent::Text { text: "result".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+        ];
+        // drop_start_idx=1: drop t1_use, keep t1_result — orphan!
+        // Forward: i=1, t1_result, tool_use_idx=0. Is 0 < 1? YES. cut_idx=0.
+        assert_eq!(find_safe_drop_boundary(&msgs, 1), 0);
+    }
+
+    #[test]
+    fn test_find_safe_drop_boundary_safe_boundary() {
+        // Messages: [t1_use(0), t1_result(1), t2_use(2), t2_result(3)]
+        // Proposed drop at index 3 would drop t2_result but keep t2_use — orphan pair.
+        // Forward walk detects: t2_result at 3 references t2_use at 2 (2 < 3, kept),
+        // so orphan. Boundary shifts to 2 (drop both t2_use and t2_result).
+        let msgs = vec![
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t1".to_string(),
+                    name: "read_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t1".to_string(),
+                    content: vec![ToolResultContent::Text { text: "r1".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+            Message::new(
+                MessageRole::Assistant,
+                MessageContent::ToolUseBlocks(vec![ToolUseBlock {
+                    id: "t2".to_string(),
+                    name: "edit_file".to_string(),
+                    input: std::collections::HashMap::new(),
+                }]),
+            ),
+            Message::new(
+                MessageRole::User,
+                MessageContent::ToolResultBlocks(vec![ToolResultBlock {
+                    tool_use_id: "t2".to_string(),
+                    content: vec![ToolResultContent::Text { text: "r2".to_string() }],
+                    is_error: false,
+                }]),
+            ),
+        ];
+        // drop_start_idx=3 keeps t1 pair, would drop t2_result but keep t2_use — orphan.
+        // Boundary shifts to 2 to drop the full t2 pair together.
+        assert_eq!(find_safe_drop_boundary(&msgs, 3), 2);
+
+        // drop_start_idx=4 (drop nothing): safe, no adjustment.
+        assert_eq!(find_safe_drop_boundary(&msgs, 4), 4);
+
+        // drop_start_idx=2 (drop t2 pair): safe, no adjustment.
+        assert_eq!(find_safe_drop_boundary(&msgs, 2), 2);
+    }
+
+    #[test]
+    fn test_find_safe_drop_boundary_edge_cases() {
+        // Edge case: drop_start_idx at boundaries
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("system".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("user".to_string())),
+        ];
+        assert_eq!(find_safe_drop_boundary(&msgs, 0), 0); // start of list
+        assert_eq!(find_safe_drop_boundary(&msgs, 1), 1);
+        assert_eq!(find_safe_drop_boundary(&msgs, 2), 2); // end of list
     }
 }

@@ -1531,15 +1531,20 @@ impl AgentLoop {
                         continue;
                     }
 
-                    // Check for consecutive stalls
-                    consecutive_stalls += 1;
+                    // Check for consecutive stalls (only for actual stall errors)
+                    if err_str.contains("stream stalled") {
+                        consecutive_stalls += 1;
+                    } else {
+                        // Non-stall errors should not count toward stall limit
+                        consecutive_stalls = 0;
+                    }
                     if consecutive_stalls >= 3 {
                         // If budget exhausted, try for final summary
                         if budget.remaining() == 0 {
                             agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
                             return self.request_final_summary(system_prompt, tools).await;
                         }
-                        return Err(anyhow!("Too many consecutive failures"));
+                        return Err(anyhow!("Too many consecutive stalls"));
                     }
                 }
             }

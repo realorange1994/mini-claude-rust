@@ -215,7 +215,8 @@ const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
     "engine prompt length", "input is too long",
     "maximum model length", "context length exceeded",
     "truncating input", "slot context", "n_ctx_slot",
-    "max input token", "input token",
+    "超过最大长度", "上下文长度",
+    "max input token", "input token", "over maximum input token",
     "exceeds the maximum number of input tokens",
 ];
 

@@ -611,8 +611,8 @@ fn stall_detector_default() {
 fn stall_detector_timeout_returns_startup_initially() {
     let sd = StallDetector::new();
     let t = sd.timeout();
-    // Should be startup_timeout (360s) since no event received yet
-    assert_eq!(t, Duration::from_secs(360));
+    // Should be startup_timeout (600s) since no event received yet (matching Go defaults)
+    assert_eq!(t, Duration::from_secs(600));
 }
 
 // ============================================================
