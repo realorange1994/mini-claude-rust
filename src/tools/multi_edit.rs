@@ -111,8 +111,8 @@ impl Tool for MultiEditTool {
             };
 
             let old_str = match m.get("old_string").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => return ToolResult::error(format!("Error: edit {}: old_string must not be empty", i + 1)),
+                Some(s) if !s.is_empty() => s,
+                _ => return ToolResult::error(format!("Error: edit {}: old_string must not be empty", i + 1)),
             };
 
             let new_str = m.get("new_string").and_then(|v| v.as_str()).unwrap_or("");

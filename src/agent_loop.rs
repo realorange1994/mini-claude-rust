@@ -612,40 +612,8 @@ impl AgentLoop {
         // Note: skill_loader is behind &self, so we skip refresh_if_changed here
         // (it requires &mut self on Loader). Skills are refreshed at startup.
 
-        // Build system prompt — use custom one if set (sub-agents), otherwise build from registry
-        let system_prompt = if let Some(ref custom) = self.custom_system_prompt {
-            custom.clone()
-        } else {
-            let tracker = self.skill_tracker.blocking_read();
-            let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
-            let prompt = crate::config::build_system_prompt(
-                &*self.registry.blocking_read(),
-                &self.config.permission_mode,
-                &self.config.project_dir,
-                &self.config.model,
-                self.config.skill_loader.as_ref(),
-                Some(&tracker),
-                session_memory,
-            );
-            drop(tracker);
-            prompt
-        };
-
-        // Inject tool state tracker session state into system prompt.
-        // This gives the agent visibility into what it has already done,
-        // preventing redundant reads and searches.
-        let system_prompt = {
-            let session_state = self.tool_state_tracker.borrow().build_session_state_note();
-            format!("{}\n\n{}", system_prompt, session_state)
-        };
-
-        // Inject todo reminder into system prompt
-        let todo_reminder = self.todo_list.build_reminder();
-        let system_prompt = if todo_reminder.is_empty() {
-            system_prompt
-        } else {
-            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", system_prompt, todo_reminder)
-        };
+        // Build system prompt (dynamic state rebuilt each turn in run_agent_loop)
+        let system_prompt = self.build_system_prompt();
 
         // Get messages and tools for API call
         let messages = self.entries_to_messages();
@@ -675,6 +643,69 @@ impl AgentLoop {
         ctx.validate_tool_pairing();
         ctx.fix_role_alternation();
         Self::entries_to_messages_from_ctx(ctx.entries())
+    }
+
+    /// Build the system prompt, injecting dynamic state (skills, session state, todos).
+    /// Called each turn to reflect state changes (matching Go: agent_loop.go:858).
+    fn build_system_prompt(&self) -> String {
+        if let Some(ref custom) = self.custom_system_prompt {
+            return custom.clone();
+        }
+        let tracker = self.skill_tracker.blocking_read();
+        let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
+        let prompt = crate::config::build_system_prompt(
+            &*self.registry.blocking_read(),
+            &self.config.permission_mode,
+            &self.config.project_dir,
+            &self.config.model,
+            self.config.skill_loader.as_ref(),
+            Some(&tracker),
+            session_memory,
+        );
+        drop(tracker);
+
+        // Inject tool state tracker session state
+        let session_state = self.tool_state_tracker.borrow().build_session_state_note();
+        let prompt = format!("{}\n\n{}", prompt, session_state);
+
+        // Inject todo reminder
+        let todo_reminder = self.todo_list.build_reminder();
+        if todo_reminder.is_empty() {
+            prompt
+        } else {
+            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, todo_reminder)
+        }
+    }
+
+    /// Async version for use inside run_agent_loop.
+    async fn build_system_prompt_async(&self) -> String {
+        if let Some(ref custom) = self.custom_system_prompt {
+            return custom.clone();
+        }
+        let tracker = self.skill_tracker.read().await;
+        let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
+        let prompt = crate::config::build_system_prompt(
+            &*self.registry.read().await,
+            &self.config.permission_mode,
+            &self.config.project_dir,
+            &self.config.model,
+            self.config.skill_loader.as_ref(),
+            Some(&tracker),
+            session_memory,
+        );
+        drop(tracker);
+
+        // Inject tool state tracker session state
+        let session_state = self.tool_state_tracker.borrow().build_session_state_note();
+        let prompt = format!("{}\n\n{}", prompt, session_state);
+
+        // Inject todo reminder
+        let todo_reminder = self.todo_list.build_reminder();
+        if todo_reminder.is_empty() {
+            prompt
+        } else {
+            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, todo_reminder)
+        }
     }
 
     /// Async version for use inside async context.
@@ -754,16 +785,20 @@ impl AgentLoop {
         _messages: &[serde_json::Value],
         tools: &[serde_json::Value],
     ) -> Result<String> {
+        let mut system_prompt = system_prompt.to_string();
         let mut budget = IterationBudget::new(self.max_turns);
         let mut last_transition = Transition::None;
         let mut consecutive_stalls = 0;
+        let mut accumulated_text = String::new(); // Tracks last text for interrupt return (matching Go's finalText)
         let mut context_errors = 0;
         let mut continue_reason = ContinueReason::None;
         let mut max_output_tokens_retries = 0;
         let mut consecutive_empty_responses = 0;
+        let mut consecutive_unrecognized_errors = 0;
         const MAX_CONTEXT_RECOVERY: usize = 3;
         const MAX_OUTPUT_TOKENS_RETRIES: usize = 3;
         const MAX_EMPTY_RESPONSES: usize = 3;
+        const MAX_UNRECOGNIZED_ERRORS: usize = 3;
 
         loop {
             // Check for interruption (Ctrl+C)
@@ -926,12 +961,16 @@ impl AgentLoop {
                 }
             }
 
+            // Rebuild system prompt each turn (matching Go: agent_loop.go:858)
+            // This ensures dynamic state changes (skills, session state, todos) are reflected.
+            system_prompt = self.build_system_prompt_async().await;
+
             // Rebuild messages from current context state (includes tool results)
             let messages = self.entries_to_messages_async().await;
 
             // Call with retry and fallback
             let result = self.call_with_retry_and_fallback(
-                system_prompt,
+                &system_prompt,
                 &messages,
                 tools,
                 &last_transition,
@@ -944,6 +983,7 @@ impl AgentLoop {
                     context_errors = 0;
                     max_output_tokens_retries = 0;
                     consecutive_empty_responses = 0;
+                    consecutive_unrecognized_errors = 0;
                     continue_reason = ContinueReason::NextTurn;
 
                     if !tool_calls.is_empty() {
@@ -1391,6 +1431,7 @@ impl AgentLoop {
                         budget.refund();
                         // Extract key findings from final answer for next-turn reference
                         self.extract_conclusions(&text);
+                        accumulated_text = text.clone();
                         return Ok(text);
                     } else {
                         // No text and no tool calls -- could be a thinking-only response
@@ -1423,6 +1464,15 @@ impl AgentLoop {
                 }
                 Err(e) => {
                     let err_str = e.to_string();
+
+                    // User interrupt -- return accumulated text (matching Go's Run: returns finalText on interrupt)
+                    if err_str.contains("interrupted by user") {
+                        self.interrupted.store(false, std::sync::atomic::Ordering::SeqCst);
+                        if !accumulated_text.is_empty() {
+                            return Ok(accumulated_text);
+                        }
+                        return Ok("[Interrupted by user]".to_string());
+                    }
 
                     // Max output tokens hit -- resume directly without truncation
                     if err_str.contains("maximum output length")
@@ -1543,9 +1593,20 @@ impl AgentLoop {
                         // If budget exhausted, try for final summary
                         if budget.remaining() == 0 {
                             agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
-                            return self.request_final_summary(system_prompt, tools).await;
+                            return self.request_final_summary(&system_prompt, tools).await;
                         }
                         return Err(anyhow!("Too many consecutive stalls"));
+                    }
+
+                    // Unrecognized errors that don't match any handler above.
+                    // Track consecutive occurrences and give up after a threshold
+                    // to prevent infinite loops.
+                    if !err_str.contains("stream stalled")
+                        && !crate::error_types::is_context_length_error(&err_str) {
+                        consecutive_unrecognized_errors += 1;
+                        if consecutive_unrecognized_errors >= MAX_UNRECOGNIZED_ERRORS {
+                            return Err(anyhow!("API error after {} retries: {}", MAX_UNRECOGNIZED_ERRORS, e));
+                        }
                     }
                 }
             }
@@ -1553,7 +1614,7 @@ impl AgentLoop {
 
         // Max turns reached - try to get a final summary
         agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
-        self.request_final_summary(system_prompt, tools).await
+        self.request_final_summary(&system_prompt, tools).await
     }
 
     /// Request a final summary when max turns is reached
@@ -1590,8 +1651,7 @@ impl AgentLoop {
             match self.call_api_non_streaming(system_prompt, &messages, &empty_tools).await {
                 Ok((_, text)) => {
                     if !text.is_empty() {
-                        let mut ctx = self.context.write().await;
-                        ctx.add_assistant_text(text.clone());
+                        // Note: do NOT add_assistant_text here -- run() handles that
                         return Ok(text);
                     }
                 }
@@ -1965,6 +2025,11 @@ impl AgentLoop {
 
         cancel_handle.abort();
 
+        // Capture rate limit headers from response (before body is consumed)
+        if let Some(rl) = crate::rate_limit::parse_rate_limit_headers(response.headers(), "") {
+            self.rate_limit_state.update(&rl);
+        }
+
         if self.is_interrupted() {
             return Err(anyhow!("Request cancelled by user"));
         }
@@ -2051,8 +2116,8 @@ impl AgentLoop {
             );
         }
 
-        // Display thinking if present (only in streaming mode)
-        if !thinking.is_empty() && self.use_stream {
+        // Display thinking if present (only when streaming didn't already show it)
+        if !thinking.is_empty() && !self.use_stream {
             let preview = truncate_at(thinking.lines().next().unwrap_or(""), 120);
             agent_emit!("\n[THINK] {}", preview);
         }
