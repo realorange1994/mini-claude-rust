@@ -466,11 +466,10 @@ fn strip_image_content(messages: &mut Vec<Message>) {
             MessageContent::ToolResultBlocks(blocks) => {
                 for block in blocks {
                     for content in &mut block.content {
-                        if let ToolResultContent::Text { text } = content {
-                            let stripped = image_re.replace_all(text, PLACEHOLDER);
-                            let stripped = url_re.replace_all(&stripped, PLACEHOLDER);
-                            *text = stripped.to_string();
-                        }
+                        let ToolResultContent::Text { text } = content;
+                        let stripped = image_re.replace_all(text, PLACEHOLDER);
+                        let stripped = url_re.replace_all(&stripped, PLACEHOLDER);
+                        *text = stripped.to_string();
                     }
                 }
             }
@@ -665,7 +664,7 @@ pub async fn compact_conversation(
     let mut current_messages = messages.to_vec();
     let mut last_err: Option<anyhow::Error> = None;
 
-    for attempt in 0..=MAX_PTL_RETRIES {
+    for _attempt in 0..=MAX_PTL_RETRIES {
         let result = do_compact_llm_call(&current_messages, client, model, api_key, base_url, trigger, is_auto, last_summary).await;
         match result {
             Ok(r) => return Ok(r),

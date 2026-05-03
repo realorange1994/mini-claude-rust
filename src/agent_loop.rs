@@ -813,7 +813,6 @@ impl AgentLoop {
                 if reactive_triggered {
                     let mut ctx = self.context.write().await;
                     let mut compactor = self.compactor.write().await;
-                    // Save original threshold, force compaction, then restore
                     let saved_threshold = compactor.get_compact_threshold();
                     compactor.set_compact_threshold(0.0); // Force should_compact to return true
                     let stats = compactor.compact(
@@ -823,7 +822,7 @@ impl AgentLoop {
                         &self.api_key,
                         &self.base_url,
                     ).await;
-                    compactor.set_compact_threshold(saved_threshold);
+                    compactor.set_compact_threshold(saved_threshold); // restore threshold
                     if stats.phase != crate::compact::CompactPhase::None {
                         agent_emit!("[reactive-compact] Triggered: {} -> {} entries, ~{} tokens saved",
                             stats.entries_before, stats.entries_after, stats.estimated_tokens_saved);

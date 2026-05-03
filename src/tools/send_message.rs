@@ -3,7 +3,7 @@
 //! Mirrors Go's SendMessageTool. The parent agent uses this to continue
 //! work on a background agent, ask for progress, or retrieve results.
 
-use crate::tools::agent_store::{AgentTaskStore, SharedAgentTaskStore};
+use crate::tools::agent_store::SharedAgentTaskStore;
 use crate::tools::{Tool, ToolResult};
 use serde_json::{Map, Value};
 use std::collections::HashMap;

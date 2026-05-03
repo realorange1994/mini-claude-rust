@@ -974,11 +974,8 @@ impl ConversationContext {
                     if !skip_paths.is_empty() {
                         let skip = blocks.iter().any(|b| {
                             b.content.iter().any(|c| {
-                                if let ToolResultContent::Text { text } = c {
-                                    skip_paths.iter().any(|p| text.contains(p))
-                                } else {
-                                    false
-                                }
+                                let ToolResultContent::Text { text } = c;
+                                skip_paths.iter().any(|p| text.contains(p))
                             })
                         });
                         if skip {

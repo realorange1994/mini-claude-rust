@@ -1019,7 +1019,7 @@ pub async fn process_sse_events(
                                 // Nothing sent yet -- clean retry
                                 eprintln!("[!] Stream error (attempt {}/{}), reconnecting...", retry, MAX_STREAM_RETRIES);
                             }
-                            DeltasState::ToolInFlight(_) => {
+                            DeltasState::ToolInFlight => {
                                 eprintln!("\n  [!] Connection dropped mid-tool-call; reconnecting (attempt {}/{})...", retry, MAX_STREAM_RETRIES);
                             }
                             DeltasState::TextOnly => {
@@ -1100,7 +1100,7 @@ pub async fn process_sse_events(
                                 match &chunk.chunk_type {
                                     ChunkType::ToolCall => {
                                         // A tool call started -- track it as in-flight
-                                        deltas_state = DeltasState::ToolInFlight(chunk.id.clone());
+                                        deltas_state = DeltasState::ToolInFlight;
                                     }
                                     ChunkType::Text if matches!(deltas_state, DeltasState::None) => {
                                         // First text delta, no tool call yet
@@ -1146,8 +1146,8 @@ enum DeltasState {
     None,
     /// Text was already streamed -- retry would duplicate text
     TextOnly,
-    /// A tool call started with this ID but may be incomplete
-    ToolInFlight(Option<String>),
+    /// A tool call started but may be incomplete (ID not yet used for recovery)
+    ToolInFlight,
 }
 
 /// Estimate total message tokens (rough: ~4 chars per token).
