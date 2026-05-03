@@ -543,41 +543,65 @@ impl ConversationContext {
 
     /// TruncateHistory drops older messages to recover from context overflow.
     /// Keeps the first entry (initial user message) and the last 10 entries.
+    /// Compact-boundary-aware: if compaction has occurred, preserves from the
+    /// boundary through recent entries instead of discarding the summary.
     pub fn truncate_history(&mut self) {
         if self.messages.len() <= 12 {
             return;
         }
         let keep = 10;
-        let first = self.messages[0..1].to_vec();
-        let recent = self.messages[self.messages.len() - keep..].to_vec();
-        self.messages = [first, recent].concat();
+        self.messages = self.truncate_with_boundary(1, keep);
         self.validate_tool_pairing();
         self.fix_role_alternation();
     }
 
     /// AggressiveTruncateHistory drops more aggressively - keeps only first and last 5.
+    /// Compact-boundary-aware.
     pub fn aggressive_truncate_history(&mut self) {
         if self.messages.len() <= 6 {
             return;
         }
         let keep = 5;
-        let first = self.messages[0..1].to_vec();
-        let recent = self.messages[self.messages.len() - keep..].to_vec();
-        self.messages = [first, recent].concat();
+        self.messages = self.truncate_with_boundary(1, keep);
         self.validate_tool_pairing();
         self.fix_role_alternation();
     }
 
     /// MinimumHistory drops to bare minimum - only first user message and last 2 entries.
+    /// Compact-boundary-aware.
     pub fn minimum_history(&mut self) {
         if self.messages.len() <= 3 {
             return;
         }
-        let first = self.messages[0..1].to_vec();
-        let recent = self.messages[self.messages.len() - 2..].to_vec();
-        self.messages = [first, recent].concat();
+        self.messages = self.truncate_with_boundary(1, 2);
         self.validate_tool_pairing();
         self.fix_role_alternation();
+    }
+
+    /// Performs a naive truncation but preserves the compaction boundary marker
+    /// and summary if one exists. After compaction, entries look like:
+    ///   [0] initial-user, [1] CompactBoundary, [2] Summary, [3..n] attachments+recent
+    /// Naive truncation (entries[:1] + recent) would discard entries[1] and [2],
+    /// causing the agent to lose all compressed memory. This function finds the
+    /// boundary and preserves everything from the boundary onwards.
+    fn truncate_with_boundary(&self, head_keep: usize, tail_keep: usize) -> Vec<Message> {
+        // Find the most recent CompactBoundary
+        let boundary_idx = self.messages.iter().rposition(|msg| {
+            matches!(msg.content, MessageContent::CompactBoundary { .. })
+        });
+
+        if let Some(idx) = boundary_idx {
+            // After compaction: keep from the boundary through recent entries.
+            // This preserves the boundary marker, summary, attachments, and
+            // recent messages. Don't discard the summary — it's the only memory
+            // of what happened before.
+            self.messages[idx..].to_vec()
+        } else {
+            // No boundary — use naive truncation
+            let first = self.messages[0..head_keep].to_vec();
+            let recent = self.messages[self.messages.len() - tail_keep..].to_vec();
+            [first, recent].concat()
+        }
     }
 
     /// Validates bidirectional tool_use/tool_result pairing.
