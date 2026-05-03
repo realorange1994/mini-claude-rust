@@ -20,6 +20,7 @@ pub type AgentSpawnFunc = Arc<dyn Fn(
     &[String],    // allowed_tools
     &[String],    // disallowed_tools
     bool,  // inherit_context
+    usize, // max_turns
     Option<Arc<tokio::sync::RwLock<ConversationContext>>>,  // parent_context
 ) -> (String, String, String, String, usize, u64) + Send + Sync>;
 
@@ -35,7 +36,7 @@ impl AgentTool {
 
     pub fn with_spawn_func<F>(f: F) -> Self
     where
-        F: Fn(&str, &str, &str, bool, &[String], &[String], bool, Option<Arc<tokio::sync::RwLock<ConversationContext>>>) -> (String, String, String, String, usize, u64)
+        F: Fn(&str, &str, &str, bool, &[String], &[String], bool, usize, Option<Arc<tokio::sync::RwLock<ConversationContext>>>) -> (String, String, String, String, usize, u64)
             + Send + Sync + 'static,
     {
         Self {
@@ -109,6 +110,10 @@ impl Tool for AgentTool {
                 "inherit_context": {
                     "type": "boolean",
                     "description": "Fork mode: inherit the parent's conversation history (optional, default false). When true, the sub-agent sees the parent's full conversation context."
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Maximum number of turns the sub-agent can execute before being forcibly stopped (optional, default 200). A turn is one user/assistant exchange. Set a reasonable limit to prevent runaway agents."
                 }
             }
         }).as_object().unwrap().clone()
@@ -146,6 +151,12 @@ impl Tool for AgentTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Extract max_turns — default to 200 for safety ceiling.
+        let max_turns = params.get("max_turns")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(200);
+
         let allowed_tools = extract_string_list(params.get("allowed_tools"));
         let mut disallowed_tools = extract_string_list(params.get("disallowed_tools"));
 
@@ -156,6 +167,7 @@ impl Tool for AgentTool {
         let (agent_id, _, _, output_file, _, _) = spawn_func(
             &prompt, &subagent_type, &model, true,
             &allowed_tools, &disallowed_tools, inherit_context,
+            max_turns,
             None, // parent_context set by the spawn_func closure
         );
         return ToolResult::ok(format!(

@@ -195,6 +195,7 @@ fn main() -> Result<()> {
             allowed_tools: &[String],
             disallowed_tools: &[String],
             inherit_context: bool,
+            max_turns: usize,
             _parent_context: Option<std::sync::Arc<tokio::sync::RwLock<miniclaudecode_rust::context::ConversationContext>>>,
         | -> (String, String, String, String, usize, u64) {
             // Read parent context from the slot
@@ -210,6 +211,7 @@ fn main() -> Result<()> {
                 allowed_tools,
                 disallowed_tools,
                 inherit_context,
+                max_turns,
                 parent_ctx,
                 use_stream_for_spawn,
                 Some(&store_for_closure),

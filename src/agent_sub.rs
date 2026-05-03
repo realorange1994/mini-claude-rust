@@ -241,14 +241,20 @@ pub fn build_sub_agent_system_prompt(
 }
 
 /// Build a child Config from the parent config with sub-agent overrides.
-pub fn build_child_config(parent_config: &Config, model_override: &str) -> Config {
+pub fn build_child_config(parent_config: &Config, model_override: &str, max_turns: usize) -> Config {
     let mut child_config = parent_config.clone();
     if !model_override.is_empty() {
         child_config.model = model_override.to_string();
     }
-    // Sub-agents always run with no max turns limit — use a very high number
-    // so they run until they naturally stop rather than hitting an artificial cap.
-    child_config.max_turns = u32::MAX as usize;
+    // Set max turns for the child agent.
+    // Priority: explicit max_turns from tool call > sub_agent_max_turns config > default ceiling.
+    if max_turns > 0 {
+        child_config.max_turns = max_turns;
+    } else if parent_config.sub_agent_max_turns > 0 {
+        child_config.max_turns = parent_config.sub_agent_max_turns as usize;
+    } else {
+        child_config.max_turns = 200; // safety ceiling: prevents runaway agents
+    }
 
     // Sub-agents always use AUTO permission mode regardless of parent's mode.
     // This prevents sub-agents from blocking on user prompts.
@@ -344,6 +350,7 @@ pub fn spawn_sub_agent_sync(
     allowed_tools: &[String],
     disallowed_tools: &[String],
     inherit_context: bool,
+    max_turns: usize,
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
     _parent_use_stream: bool, // not used for background agents
     agent_task_store: Option<&SharedAgentTaskStore>,
@@ -366,7 +373,7 @@ pub fn spawn_sub_agent_sync(
     let agent_id = generate_agent_id();
 
     // Build child config and registry
-    let child_config = build_child_config(parent_config, model);
+    let child_config = build_child_config(parent_config, model, max_turns);
     let child_registry = build_child_registry(
         parent_registry,
         subagent_type,
@@ -750,7 +757,7 @@ mod tests {
     #[test]
     fn test_build_child_config_auto_permission_mode() {
         let parent_config = Config::default();
-        let child_config = build_child_config(&parent_config, "");
+        let child_config = build_child_config(&parent_config, "", 0);
         // Sub-agents always use AUTO mode
         assert_eq!(child_config.permission_mode, crate::permissions::PermissionMode::Auto);
     }
@@ -758,17 +765,17 @@ mod tests {
     #[test]
     fn test_build_child_config_avoid_permission_prompts() {
         let parent_config = Config::default();
-        let child_config = build_child_config(&parent_config, "");
+        let child_config = build_child_config(&parent_config, "", 0);
         // Sub-agents should avoid permission prompts
         assert!(child_config.should_avoid_permission_prompts);
     }
 
     #[test]
-    fn test_build_child_config_no_max_turns_limit() {
+    fn test_build_child_config_default_turns_ceiling() {
         let parent_config = Config::default();
-        let child_config = build_child_config(&parent_config, "");
-        // Sub-agents have no max turns limit
-        assert_eq!(child_config.max_turns, u32::MAX as usize);
+        let child_config = build_child_config(&parent_config, "", 0);
+        // Default max turns is the safety ceiling (200)
+        assert_eq!(child_config.max_turns, 200);
     }
 
     #[test]
@@ -848,7 +855,7 @@ mod tests {
     #[test]
     fn test_custom_model_param_passing() {
         let parent_config = Config::default();
-        let child_config = build_child_config(&parent_config, "claude-3-5-haiku-20241022");
+        let child_config = build_child_config(&parent_config, "claude-3-5-haiku-20241022", 0);
         // Model should be overridden
         assert_eq!(child_config.model, "claude-3-5-haiku-20241022");
     }
@@ -857,7 +864,7 @@ mod tests {
     fn test_custom_model_param_empty_falls_back_to_parent() {
         let mut parent_config = Config::default();
         parent_config.model = "claude-3-5-sonnet-20241022".to_string();
-        let child_config = build_child_config(&parent_config, "");
+        let child_config = build_child_config(&parent_config, "", 0);
         // Empty override should keep parent's model
         assert_eq!(child_config.model, "claude-3-5-sonnet-20241022");
     }
@@ -866,7 +873,7 @@ mod tests {
     fn test_subagent_type_inherits_parent_model_if_no_override() {
         let mut parent_config = Config::default();
         parent_config.model = "claude-3-opus-20240229".to_string();
-        let child_config = build_child_config(&parent_config, "");
+        let child_config = build_child_config(&parent_config, "", 0);
         assert_eq!(child_config.model, "claude-3-opus-20240229");
     }
 
@@ -988,7 +995,7 @@ mod tests {
     #[test]
     fn test_agent_tool_missing_prompt() {
         use crate::tools::agent_tool::AgentTool;
-        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
+        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _, _| {
             ("agent-test".to_string(), "ok".to_string(), String::new(), String::new(), 0, 0)
         });
         let params = HashMap::new(); // empty params - missing required "prompt"
@@ -1000,7 +1007,7 @@ mod tests {
     #[test]
     fn test_agent_tool_empty_prompt() {
         use crate::tools::agent_tool::AgentTool;
-        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _| {
+        let tool = AgentTool::with_spawn_func(|_, _, _, _, _, _, _, _, _| {
             ("agent-test".to_string(), "ok".to_string(), String::new(), String::new(), 0, 0)
         });
         let mut params = HashMap::new();
