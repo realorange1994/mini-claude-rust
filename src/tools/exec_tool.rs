@@ -490,6 +490,50 @@ fn validate_deletion_paths(cmd: &str) -> Option<String> {
     None
 }
 
+/// Check for UNC paths that could leak NTLM credentials via SMB/WebDAV.
+/// Matches upstream's containsVulnerableUncPath logic.
+fn contains_vulnerable_unc_path(cmd: &str) -> bool {
+    // Pattern 1: UNC paths with backslashes (\\server\share)
+    // Also catches WebDAV: \\server@SSL@8443\, \\server@8443@SSL\
+    static UNC_BACKSLASH: OnceLock<Regex> = OnceLock::new();
+    let re1 = UNC_BACKSLASH.get_or_init(|| {
+        Regex::new(r#"\\\\[^\s\\/]+(?:@(?:\d+|ssl))?(?:[\\/]|$|\s)"#).unwrap()
+    });
+    if re1.is_match(cmd) {
+        return true;
+    }
+
+    // Pattern 2: Forward-slash UNC paths (//server/share)
+    // Rust regex doesn't support lookbehind, so match and verify the preceding char
+    static UNC_FORSLASH: OnceLock<Regex> = OnceLock::new();
+    let re2 = UNC_FORSLASH.get_or_init(|| {
+        Regex::new(r"//[^\s\\/]+(?:@(?:\d+|ssl))?(?:[\\/]|$|\s)").unwrap()
+    });
+    if let Some(loc) = re2.find(cmd) {
+        // Ensure not preceded by ':' (which would indicate https:// or similar)
+        let start = loc.start();
+        if start == 0 || cmd.as_bytes()[start - 1] != b':' {
+            return true;
+        }
+    }
+
+    // Pattern 3: DavWWWRoot marker (Windows WebDAV redirector)
+    if cmd.contains("DavWWWRoot") {
+        return true;
+    }
+
+    // Pattern 4: IPv4 literal UNC paths (\\192.168.1.1\share)
+    static UNC_IPV4: OnceLock<Regex> = OnceLock::new();
+    let re4 = UNC_IPV4.get_or_init(|| {
+        Regex::new(r#"^\\\\\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[\\/]"#).unwrap()
+    });
+    if re4.is_match(cmd) {
+        return true;
+    }
+
+    false
+}
+
 /// Extract quoted regions (single, double, backtick) from a command.
 fn extract_quoted_regions(cmd: &str) -> Vec<(usize, usize)> {
     let mut regions = Vec::new();
@@ -790,6 +834,13 @@ impl Tool for ExecTool {
             if re.is_match(&lower) {
                 return Some(ToolResult::error("Internal/private URL detected"));
             }
+        }
+
+        // Check for UNC paths (SMB/WebDAV) that could leak NTLM credentials on Windows
+        if contains_vulnerable_unc_path(command) {
+            return Some(ToolResult::error(
+                "UNC path detected: commands targeting SMB/WebDAV shares are blocked",
+            ));
         }
 
         None
