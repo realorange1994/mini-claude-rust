@@ -184,11 +184,19 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let head_limit = params
+        let head_limit_raw = params
             .get("head_limit")
             .and_then(|v| v.as_i64())
-            .unwrap_or(MAX_GREP_MATCHES as i64)
-            .max(1) as usize;
+            .unwrap_or(MAX_GREP_MATCHES as i64);
+        // Upstream: head_limit=0 means unlimited (escape hatch)
+        // For ripgrep: -m 0 means unlimited; for native: use usize::MAX
+        let head_limit = if head_limit_raw < 0 {
+            MAX_GREP_MATCHES
+        } else if head_limit_raw == 0 {
+            usize::MAX
+        } else {
+            head_limit_raw as usize
+        };
 
         let offset = params
             .get("offset")

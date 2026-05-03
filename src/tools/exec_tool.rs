@@ -15,18 +15,44 @@ use std::sync::OnceLock;
 
 // ─── Security Helper Functions ─────────────────────────────────────────────────
 
-/// Safe environment variable names that are allowed in command substitution.
+/// Safe environment variable names that are allowed in ${...} expansion.
+/// Dangerous vars like PATH, PYTHONPATH, GOFLAGS, NODE_OPTIONS, GIT_DIR
+/// are excluded as they can redirect code execution, import arbitrary
+/// modules, or bypass security. Matches upstream's SAFE_ENV_VARS principles.
 const SAFE_ENV_VARS: &[&str] = &[
-    "HOME", "PATH", "USER", "PWD", "SHELL", "TERM", "EDITOR", "VISUAL", "PAGER",
-    "GOPATH", "GOROOT", "JAVA_HOME", "NODE_PATH", "PYTHONPATH", "PYTHONHOME",
-    "VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME", "RUST_BACKTRACE",
-    "CI", "CI_COMMIT_SHA", "CI_JOB_ID", "CI_PIPELINE_ID",
-    "GITHUB_TOKEN", "GITHUB_RUN_ID", "GITHUB_ACTIONS",
-    "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-    "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP",
-    "HOSTNAME", "OSTYPE", "MACHTYPE", "ARCH",
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMDATA",
-    "COMSPEC", "PATHEXT", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+    // Go - build/runtime settings only
+    "GOOS", "GOARCH", "GOEXPERIMENT", "GO111MODULE", "CGO_ENABLED",
+    // Rust - logging/debugging only
+    "RUST_BACKTRACE", "RUST_LOG",
+    // Node - environment name only (NOT NODE_OPTIONS)
+    "NODE_ENV", "NPM_CONFIG_REGISTRY",
+    // Python - behavior flags only (NOT PYTHONPATH)
+    "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE",
+    // Pytest
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "PYTEST_DEBUG",
+    // API keys
+    "ANTHROPIC_API_KEY",
+    // Locale and terminal
+    "LANG", "LC_ALL", "LC_CTYPE", "LC_TIME", "CHARSET",
+    "TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR", "TZ",
+    // Color configuration
+    "LS_COLORS", "LSCOLORS", "GREP_COLOR", "GREP_COLORS", "GCC_COLORS",
+    // Display formatting
+    "TIME_STYLE", "BLOCK_SIZE", "BLOCKSIZE",
+    // Home/identity
+    "HOME", "USER", "LOGNAME", "PWD", "SHELL",
+    // Temp directories
+    "TMPDIR", "TEMP", "TMP",
+    // Display for GUI apps
+    "DISPLAY", "WAYLAND_DISPLAY",
+    // Proxy
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+    // CI
+    "CI", "GITHUB_ACTIONS",
+    // Windows
+    "SYSTEMROOT", "PROGRAMFILES", "PROGRAMFILES(X86)",
+    "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH",
 ];
 
 /// Detect command substitution patterns: $(), backticks, <(), >(), $((, dangerous ${VAR}.
