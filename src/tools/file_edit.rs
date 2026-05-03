@@ -260,19 +260,78 @@ fn curly_to_straight_double(s: &str) -> String {
     s.replace('\u{201C}', "\"").replace('\u{201D}', "\"")
 }
 
-/// Converts straight double quotes to curly double quotes.
-fn straight_to_curly_double(s: &str) -> String {
-    s.replace('"', "\u{201C}")
-}
-
 /// Converts curly single quotes to straight single quotes.
 fn curly_to_straight_single(s: &str) -> String {
     s.replace('\u{2018}', "'").replace('\u{2019}', "'")
 }
 
-/// Converts straight single quotes to curly single quotes.
+/// Converts straight double quotes to curly double quotes,
+/// using context (preceding character) to distinguish opening vs closing.
+fn straight_to_curly_double(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '"' {
+            let prev = if i > 0 { chars[i - 1] } else { '\0' };
+            if i == 0 || is_opening_double_quote_context(prev) {
+                result.push('\u{201C}'); // opening double curly quote
+            } else {
+                result.push('\u{201D}'); // closing double curly quote
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Returns true if the preceding character indicates an opening curly double quote.
+fn is_opening_double_quote_context(prev: char) -> bool {
+    matches!(prev,
+        '(' | '[' | '{' | ' ' | '\t' | '\n' | '\r' |
+        ':' | ',' | ';' | '=' | '+' | '-' | '*' |
+        '/' | '\\' | '|' | '&' | '<' | '>' |
+        '!' | '?' | '.' | '#' | '@' | '^' | '%' |
+        '~' | '\u{201C}' | '\u{2018}'
+    )
+}
+
+/// Converts straight single quotes to curly single quotes,
+/// using context to distinguish opening (apostrophe) vs closing.
 fn straight_to_curly_single(s: &str) -> String {
-    s.replace('\'', "\u{2019}")
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::with_capacity(s.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\'' {
+            // Check for contraction: letter-'letter pattern (don't, can't, it's, etc.)
+            if i > 0 && i < chars.len() - 1 {
+                let prev = chars[i - 1];
+                let next = chars[i + 1];
+                if prev.is_ascii_alphabetic() && next.is_ascii_alphabetic() {
+                    result.push('\u{2019}'); // right single curly (apostrophe)
+                    continue;
+                }
+            }
+            let prev = if i > 0 { chars[i - 1] } else { '\0' };
+            if i == 0 || is_opening_single_quote_context(prev) {
+                result.push('\u{2018}'); // left single curly quote
+            } else {
+                result.push('\u{2019}'); // right single curly quote
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Returns true if the preceding character indicates an opening curly single quote.
+fn is_opening_single_quote_context(prev: char) -> bool {
+    matches!(prev,
+        '(' | '[' | '{' | ' ' | '\t' | '\n' | '\r' |
+        ':' | ',' | ';' | '<' | '!' | '?' | '"' |
+        '\u{201C}' | '\u{201D}' | '\u{2018}'
+    )
 }
 
 /// Strips trailing whitespace from each line.
