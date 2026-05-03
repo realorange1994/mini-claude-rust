@@ -1577,17 +1577,36 @@ impl AgentLoop {
         // Force text-only response by passing empty tools list
         let empty_tools: Vec<serde_json::Value> = vec![];
 
-        // Try one more non-streaming call
-        match self.call_api_non_streaming(system_prompt, &messages, &empty_tools).await {
-            Ok((_, text)) => {
-                if !text.is_empty() {
-                    let mut ctx = self.context.write().await;
-                    ctx.add_assistant_text(text.clone());
-                    return Ok(text);
-                }
+        // Try one more non-streaming call (with retries, matching Go's callWithNonStreamingNoTools)
+        const MAX_RETRIES: usize = 3; // shorter budget for grace call, matching Go
+        const INITIAL_BACKOFF_MS: u64 = 1000;
+        const MAX_BACKOFF_MS: u64 = 8000;
+        let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+        for attempt in 0..MAX_RETRIES {
+            // Check for interruption
+            if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok("(max turns reached, request cancelled)".to_string());
             }
-            Err(e) => {
-                agent_emit!("[!] Final summary call failed: {}", e);
+
+            match self.call_api_non_streaming(system_prompt, &messages, &empty_tools).await {
+                Ok((_, text)) => {
+                    if !text.is_empty() {
+                        let mut ctx = self.context.write().await;
+                        ctx.add_assistant_text(text.clone());
+                        return Ok(text);
+                    }
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES - 1 {
+                        agent_emit!("[!] Final summary call failed (attempt {}/{}), retrying in {}ms: {}",
+                            attempt + 1, MAX_RETRIES, backoff_ms, e);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                    } else {
+                        agent_emit!("[!] Final summary call failed: {}", e);
+                    }
+                }
             }
         }
 
