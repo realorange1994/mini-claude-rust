@@ -82,6 +82,18 @@ impl Tool for MultiEditTool {
             None => return ToolResult::error("Error: path is required"),
         };
 
+        // 1 GiB guard: stat first to avoid loading huge files into memory
+        const MAX_EDIT_SIZE: u64 = 1 << 30;
+        if let Ok(meta) = fs::metadata(&path) {
+            if meta.len() > MAX_EDIT_SIZE {
+                return ToolResult::error(format!(
+                    "Error: file too large ({} bytes, max {} bytes). Use offset/limit to read portions.",
+                    meta.len(),
+                    MAX_EDIT_SIZE
+                ));
+            }
+        }
+
         let edits_raw = match params.get("edits") {
             Some(v) => v,
             None => return ToolResult::error("Error: edits is required"),
