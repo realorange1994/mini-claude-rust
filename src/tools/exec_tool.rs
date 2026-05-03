@@ -847,6 +847,27 @@ impl Tool for ExecTool {
         // Split compound commands
         let subcommands = split_compound_command(command);
 
+        // Track if any subcommand contains cd (directory change)
+        let has_cd = subcommands.iter().any(|sub| {
+            let stripped = sub.trim();
+            let first = stripped.split_whitespace().next().unwrap_or("").to_lowercase();
+            // Extract base (strip any wrapper like /bin/cd)
+            let base = std::path::Path::new(&first)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&first)
+                .to_lowercase();
+            base == "cd" || base == "pushd" || base == "popd"
+        });
+
+        // If cd is present in compound command, validate redirects more strictly
+        // (path resolution would be relative to the changed directory)
+        if has_cd {
+            if let Some(reason) = validate_redirect_targets(command) {
+                return Some(ToolResult::error(reason));
+            }
+        }
+
         for subcmd in &subcommands {
             // Strip safe wrappers
             let stripped = strip_safe_wrappers(subcmd);
