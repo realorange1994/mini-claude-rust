@@ -49,11 +49,35 @@ pub const AUTO_MODE_SAFE_TOOLS: &[&str] = &[
     "task_list",
     "task_get",
     "task_update",
+    "task_output",
+    "task_stop",
     "list_mcp_tools",
     "list_skills",
     "search_skills",
     "read_skill",
     "mcp_server_status",
+    // System info (all read-only)
+    "system",
+    // Web (all read-only)
+    "web_search",
+    "web_search_scraper",
+    "web_fetch",
+    // File history (read-only + non-destructive metadata)
+    "file_history",
+    "file_history_read",
+    "file_history_grep",
+    "file_history_diff",
+    "file_history_search",
+    "file_history_summary",
+    "file_history_timeline",
+    "file_history_annotate",
+    "file_history_tag",
+    "file_history_batch",
+    "file_history_checkout",
+    // Agent messaging (read-only query / send message)
+    "send_message",
+    // Task tracking (no side effects beyond updating internal state)
+    "TodoWrite",
 ];
 
 /// Git operations that are read-only and safe to auto-allow.
