@@ -1,6 +1,6 @@
 //! FileEditTool - Edit a file by replaced exact strings
 
-use crate::tools::{Tool, ToolResult, expand_path, restore_crlf};
+use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, restore_crlf};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -75,6 +75,11 @@ impl Tool for FileEditTool {
             Some(p) => expand_path(p),
             None => return ToolResult::error("Error: path is required"),
         };
+
+        // SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
+        if is_unc_path(&path) {
+            return ToolResult::error(format!("Error: UNC path access deferred: {}", path.display()));
+        }
 
         let old_str = params
             .get("old_string")

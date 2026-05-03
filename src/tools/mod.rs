@@ -600,6 +600,16 @@ pub fn restore_crlf(s: &str) -> String {
     result
 }
 
+/// Checks if a path is a UNC network path (\\server\share or //server/share).
+/// Accessing UNC paths triggers SMB authentication, potentially leaking NTLM
+/// credentials to an untrusted network server. Matches official Claude Code behavior.
+pub fn is_unc_path(path: &std::path::Path) -> bool {
+    let normalized = path.as_os_str()
+        .to_string_lossy()
+        .replace('\\', "/");
+    normalized.starts_with("//") || normalized.starts_with("\\\\")
+}
+
 /// Safely truncate a string to at most `max` bytes without adding ellipsis.
 pub fn truncate_at(s: &str, max: usize) -> &str {
     if s.len() <= max {
