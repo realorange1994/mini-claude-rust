@@ -1498,8 +1498,11 @@ impl AgentLoop {
                             return Ok("Error: Context overflow - unable to recover".to_string());
                         }
 
-                        // Progressive recovery: try LLM compact first, then truncation
-                        // (silent -- no user-visible output until recovery fails)
+                        // Progressive recovery matching Go's agent_loop.go:
+                        //   context_errors == 1 → LLM compact (or TruncateHistory if disabled)
+                        //   context_errors == 2 → TruncateHistory (keep first + last 10)
+                        //   context_errors == 3 → AggressiveTruncateHistory (keep first + last 5)
+                        //   context_errors > 3 → MinimumHistory (keep first + last 2, last resort)
                         if context_errors == 1 && self.config.auto_compact_enabled {
                             // First attempt: try LLM-driven compaction
                             let mut ctx = self.context.write().await;
@@ -1511,13 +1514,18 @@ impl AgentLoop {
                                 &self.api_key,
                                 &self.base_url,
                             ).await;
-                        } else if context_errors <= 2 {
+                        } else if context_errors == 2 {
                             let mut ctx = self.context.write().await;
                             ctx.truncate_history();
                             self.tool_state_tracker.borrow_mut().on_compaction();
-                        } else {
+                        } else if context_errors == 3 {
                             let mut ctx = self.context.write().await;
                             ctx.aggressive_truncate_history();
+                            self.tool_state_tracker.borrow_mut().on_compaction();
+                        } else {
+                            // Last resort: minimum history (Go: MinimumHistory)
+                            let mut ctx = self.context.write().await;
+                            ctx.minimum_history();
                             self.tool_state_tracker.borrow_mut().on_compaction();
                         }
                         continue;
