@@ -1524,7 +1524,8 @@ impl AgentLoop {
                             "ERROR: Your previous response was malformed. \
                             Do NOT output tool syntax as text. Use proper tool calls only.".to_string(),
                         );
-                        last_transition = Transition::ToolsToText;
+                        // Note: last_transition not updated — model confused means
+                        // no tool calls were made, so there's no transition to record.
                         continue;
                     }
 

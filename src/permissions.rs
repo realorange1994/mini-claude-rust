@@ -417,7 +417,8 @@ impl PermissionGate {
             let count = self.denial_count.fetch_add(1, Ordering::SeqCst) + 1;
             let denial_limit = self.config.auto_denial_limit;
             // After consecutive denials, fall back to interactive prompt
-            if count >= denial_limit {
+            // (but avoid prompts for sub-agents with no terminal user)
+            if count >= denial_limit && !self.should_avoid_prompts() {
                 eprintln!(
                     "  [auto-classifier] {} consecutive denials, falling back to manual approval",
                     count
