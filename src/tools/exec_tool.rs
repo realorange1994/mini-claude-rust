@@ -910,21 +910,20 @@ impl ExecTool {
         // Add exit code
         result.push_str(&format!("\nExit code: {}", exit_code));
 
-        // Truncate if too large
-        const MAX_OUTPUT: usize = 50000;
+        // Truncate if too large (matching official: default 30k, prefix-only with line count)
+        const MAX_OUTPUT: usize = 30000;
         if result.len() > MAX_OUTPUT {
-            let half = MAX_OUTPUT / 2;
-            let mut first_end = half;
-            while first_end > 0 && !result.is_char_boundary(first_end) { first_end -= 1; }
-            let mid_start = result.len() - half;
-            let mut mid_end = mid_start;
-            while mid_end < result.len() && !result.is_char_boundary(mid_end) { mid_end += 1; }
-            let truncated = result.len() - (first_end + (result.len() - mid_end));
+            // Find a valid UTF-8 boundary near MAX_OUTPUT
+            let mut cut = MAX_OUTPUT;
+            while cut > 0 && !result.is_char_boundary(cut) { cut -= 1; }
+            let truncated_part = &result[..cut];
+            let total_lines = result.matches('\n').count();
+            let shown_lines = truncated_part.matches('\n').count();
+            let remaining_lines = total_lines - shown_lines;
             result = format!(
-                "{}\n\n... ({} chars truncated) ...\n\n{}",
-                &result[..first_end],
-                truncated,
-                &result[mid_end..]
+                "{}\n\n... [{} lines truncated] ...",
+                truncated_part,
+                remaining_lines
             );
         }
 
@@ -1228,16 +1227,20 @@ pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> 
             }
         };
 
-        // Truncate if too large
-        const MAX_OUTPUT: usize = 50000;
+        // Truncate if too large (matching official: default 30k, prefix-only with line count)
+        const MAX_OUTPUT: usize = 30000;
         let output = if content.len() > MAX_OUTPUT {
-            let half = MAX_OUTPUT / 2;
-            let mid_start = content.len() - half;
+            // Find a valid UTF-8 boundary
+            let mut cut = MAX_OUTPUT;
+            while cut > 0 && !content.is_char_boundary(cut) { cut -= 1; }
+            let truncated_part = &content[..cut];
+            let total_lines = content.matches('\n').count();
+            let shown_lines = truncated_part.matches('\n').count();
+            let remaining_lines = total_lines - shown_lines;
             format!(
-                "{}\n\n... ({} chars truncated) ...\n\n{}",
-                &content[..half],
-                content.len() - MAX_OUTPUT,
-                &content[mid_start..]
+                "{}\n\n... [{} lines truncated] ...",
+                truncated_part,
+                remaining_lines
             )
         } else {
             content
