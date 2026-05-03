@@ -373,9 +373,9 @@ fn file_read_success() {
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     let result = tool.execute(params);
     assert!(!result.is_error);
-    assert!(result.output.contains("1| line1"));
-    assert!(result.output.contains("2| line2"));
-    assert!(result.output.contains("3| line3"));
+    assert!(result.output.contains("1\tline1"));
+    assert!(result.output.contains("2\tline2"));
+    assert!(result.output.contains("3\tline3"));
     assert!(result.output.contains("3 lines total"));
 }
 
@@ -392,8 +392,8 @@ fn file_read_with_offset_and_limit() {
     params.insert("limit".into(), serde_json::json!(2));
     let result = tool.execute(params);
     assert!(!result.is_error);
-    assert!(result.output.contains("2| b"));
-    assert!(result.output.contains("3| c"));
+    assert!(result.output.contains("2\tb"));
+    assert!(result.output.contains("3\tc"));
     // Should show pagination hint
     assert!(result.output.contains("offset="));
 }

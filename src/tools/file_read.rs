@@ -152,7 +152,7 @@ impl Tool for FileReadTool {
 
         let mut result = String::new();
         for (i, line) in selected.iter().enumerate() {
-            result.push_str(&format!("{}| {}\n", offset + i, line));
+            result.push_str(&format!("{}\t{}\n", offset + i, line));
         }
 
         // Add pagination hint
