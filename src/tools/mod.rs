@@ -29,7 +29,9 @@ mod brief_tool;
 pub mod tool_search_tool;
 pub mod agent_store;
 pub mod agent_tools;
-// bash_task_tools merged into exec_tool
+pub mod todo_write;
+pub mod send_message;
+pub mod ask_user_question;
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
@@ -366,6 +368,7 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(web_fetch::WebFetchTool);
     registry.register(exa_search::ExaSearchTool);
     registry.register(brief_tool::BriefTool::new());
+    registry.register(ask_user_question::AskUserQuestionTool::new());
 
     // ToolSearchTool: uses a shared tools list that gets populated
     // after all tools are registered (see finalize_tool_search).
@@ -452,6 +455,16 @@ pub fn register_agent_tool(registry: &Registry, spawn_func: agent_tool::AgentSpa
 /// Register agent management tools (agent_list, agent_get, agent_kill)
 pub fn register_agent_management_tools(registry: &Registry, store: &agent_store::SharedAgentTaskStore) {
     agent_tools::register_agent_tools(registry, store);
+}
+
+/// Register TodoWrite tool
+pub fn register_todo_write_tools(registry: &Registry, todo_list: &Arc<crate::context::TodoList>) {
+    registry.register(todo_write::TodoWriteTool::new(Arc::clone(todo_list)));
+}
+
+/// Register SendMessage tool
+pub fn register_send_message_tool(registry: &Registry, store: &agent_store::SharedAgentTaskStore) {
+    registry.register(send_message::SendMessageTool::new(Arc::clone(store)));
 }
 
 /// Register bash background task tools (task_stop, task_output) and the exec tool

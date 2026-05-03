@@ -1,6 +1,84 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+// ─── Todo Types ───────────────────────────────────────────────────────────────
+
+/// Status of a todo item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TodoStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "in_progress")]
+    InProgress,
+    #[serde(rename = "completed")]
+    Completed,
+}
+
+/// A single todo item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
+/// Thread-safe todo list shared between the agent loop and TodoWriteTool.
+#[derive(Clone)]
+pub struct TodoList {
+    inner: Arc<RwLock<Vec<TodoItem>>>,
+}
+
+impl TodoList {
+    pub fn new() -> Self {
+        Self { inner: Arc::new(RwLock::new(Vec::new())) }
+    }
+
+    pub fn update(&self, items: Vec<TodoItem>) {
+        if let Ok(mut guard) = self.inner.write() {
+            *guard = items;
+        }
+    }
+
+    pub fn build_reminder(&self) -> String {
+        let guard = match self.inner.read() {
+            Ok(g) => g,
+            Err(_) => return String::new(),
+        };
+        if guard.is_empty() {
+            return String::new();
+        }
+        let mut sb = String::from("\n## Current Tasks\n");
+        for item in guard.iter() {
+            let icon = match item.status {
+                TodoStatus::Pending => "\u{25cb}",   // ○
+                TodoStatus::InProgress => "\u{25d0}", // ◐
+                TodoStatus::Completed => "\u{25cf}",  // ●
+            };
+            let active = item.active_form.as_deref().unwrap_or("");
+            let active_suffix = if !active.is_empty() {
+                format!(" ({})", active)
+            } else {
+                String::new()
+            };
+            sb.push_str(&format!(
+                "  {} {}{} [{:?}]\n",
+                icon, item.content, active_suffix, item.status
+            ));
+        }
+        sb
+    }
+}
+
+impl Default for TodoList {
+    fn default() -> Self { Self::new() }
+}
+
+/// Callback type for todo list updates.
+pub type TodoUpdateFunc = Arc<dyn Fn(Vec<TodoItem>) + Send + Sync>;
+
 
 /// Unique ID for messages (used for transcript tracking and compact boundary relinking)
 fn generate_uuid() -> String {

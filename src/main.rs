@@ -161,6 +161,10 @@ fn main() -> Result<()> {
     tools::register_mcp_and_skills(&registry, &cfg);
     tools::register_memory_tools(&registry, &session_memory_arc);
 
+    // Initialize TodoList for TodoWrite tool
+    let todo_list = Arc::new(miniclaudecode_rust::context::TodoList::new());
+    tools::register_todo_write_tools(&registry, &todo_list);
+
     // Initialize WorkTaskStore and register task tools
     let work_task_store = work_task::WorkTaskStore::new_shared();
     tools::register_task_tools(&registry, &work_task_store);
@@ -172,6 +176,7 @@ fn main() -> Result<()> {
     // Initialize AgentTaskStore for background sub-agent management
     let agent_task_store = miniclaudecode_rust::tools::agent_store::AgentTaskStore::new_shared();
     tools::register_agent_management_tools(&registry, &agent_task_store);
+    tools::register_send_message_tool(&registry, &agent_task_store);
 
     // Parent context slot for agent tool's fork mode — set after agent loop is created
     let parent_context_slot: std::sync::Arc<
@@ -234,20 +239,23 @@ fn main() -> Result<()> {
         tools::register_memory_tools(&resume_registry, &session_memory_arc);
         tools::register_task_tools(&resume_registry, &work_task_store);
         tools::register_bash_task_tools(&resume_registry, task_store);
+        tools::register_todo_write_tools(&resume_registry, &todo_list);
+        tools::register_agent_management_tools(&resume_registry, &agent_task_store);
+        tools::register_send_message_tool(&resume_registry, &agent_task_store);
         resume_registry.finalize_tool_search();
 
-        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, use_stream, &transcript_path, true) {
+        match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, use_stream, &transcript_path, true, Some(Arc::clone(&todo_list))) {
             Ok(agent) => {
                 println!("[+] Resumed session from: {}", transcript_path.display());
                 agent
             }
             Err(e) => {
                 eprintln!("[!] Failed to resume: {}. Starting new session.", e);
-                agent_loop::AgentLoop::new(cfg, registry, use_stream)?
+                agent_loop::AgentLoop::new(cfg, registry, use_stream, Some(Arc::clone(&todo_list)))?
             }
         }
     } else {
-        agent_loop::AgentLoop::new(cfg, registry, use_stream)?
+        agent_loop::AgentLoop::new(cfg, registry, use_stream, Some(Arc::clone(&todo_list)))?
     };
 
     // Set parent context for fork mode so the agent tool can access it
@@ -273,11 +281,11 @@ fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_interactive(agent, work_task_store, agent_task_store);
+    run_interactive(agent, work_task_store, agent_task_store, todo_list);
     Ok(())
 }
 
-fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore, agent_task_store: miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore) {
+fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore, agent_task_store: miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore, todo_list: Arc<miniclaudecode_rust::context::TodoList>) {
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
 
@@ -480,6 +488,9 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                             tools::register_memory_tools(&registry, sm);
                         }
                         tools::register_task_tools(&registry, &work_task_store);
+                        tools::register_todo_write_tools(&registry, &todo_list);
+                        tools::register_agent_management_tools(&registry, &agent_task_store);
+                        tools::register_send_message_tool(&registry, &agent_task_store);
                         registry.finalize_tool_search();
 
                         match agent_loop::AgentLoop::from_transcript(
@@ -488,6 +499,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                             agent.use_stream,
                             &transcript_path.unwrap(),
                             true,
+                            Some(Arc::clone(&todo_list)),
                         ) {
                             Ok(new_agent) => {
                                 agent = new_agent;

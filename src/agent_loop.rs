@@ -216,10 +216,17 @@ pub struct AgentLoop {
     cancel_ctx: Option<CancellationToken>,
     /// Tracks tool state for injection into system prompt (prevents redundant reads/searches).
     tool_state_tracker: std::cell::RefCell<crate::context::ToolStateTracker>,
+    /// Structured task list for TodoWrite tool.
+    todo_list: Arc<crate::context::TodoList>,
 }
 
 impl AgentLoop {
-    pub fn new(config: Config, registry: Registry, use_stream: bool) -> Result<Self> {
+    pub fn new(
+        config: Config,
+        registry: Registry,
+        use_stream: bool,
+        todo_list: Option<Arc<crate::context::TodoList>>,
+    ) -> Result<Self> {
         let api_key = config.api_key.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
                 .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
@@ -312,6 +319,7 @@ impl AgentLoop {
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
+            todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
         })
     }
 
@@ -322,6 +330,7 @@ impl AgentLoop {
         use_stream: bool,
         transcript_path: &Path,
         continue_transcript: bool,
+        todo_list: Option<Arc<crate::context::TodoList>>,
     ) -> Result<Self> {
         let api_key = config.api_key.clone().unwrap_or_else(|| {
             std::env::var("ANTHROPIC_API_KEY")
@@ -445,6 +454,7 @@ impl AgentLoop {
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
+            todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
         })
     }
 
@@ -626,6 +636,14 @@ impl AgentLoop {
         let system_prompt = {
             let session_state = self.tool_state_tracker.borrow().build_session_state_note();
             format!("{}\n\n{}", system_prompt, session_state)
+        };
+
+        // Inject todo reminder into system prompt
+        let todo_reminder = self.todo_list.build_reminder();
+        let system_prompt = if todo_reminder.is_empty() {
+            system_prompt
+        } else {
+            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", system_prompt, todo_reminder)
         };
 
         // Get messages and tools for API call
@@ -828,8 +846,10 @@ impl AgentLoop {
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
-                } else {
+                } else if self.config.reactive_compact_threshold == 0 {
                     // Regular auto-compaction (token threshold based)
+                    // Mutual exclusion: skip proactive compaction when reactive compact is enabled
+                    // (reactive compact catches PTL errors via the API retry loop).
                     // Check if compaction will run first (inside compactor lock),
                     // then drop the lock before calling post_compact_recovery (async).
                     let will_compact = {
@@ -1451,21 +1471,23 @@ impl AgentLoop {
 
                     agent_emit!("[!] Turn failed: {}", e);
 
-                    // Detect context length error
+                    // Detect context length error -- suppress user-visible warnings
+                    // until recovery is exhausted (error withholding)
                     if err_str.contains("context_length") || err_str.contains("prompt is too long") ||
                        err_str.contains("400") || err_str.contains("stream stalled") {
                         context_errors += 1;
                         continue_reason = ContinueReason::PromptTooLong;
 
                         if context_errors > MAX_CONTEXT_RECOVERY {
-                            agent_emit!("[!] Context recovery exhausted after {} attempts, giving up", MAX_CONTEXT_RECOVERY);
+                            // Recovery exhausted -- now tell the user
+                            agent_emit!("[!] Context recovery exhausted after {} attempts", MAX_CONTEXT_RECOVERY);
                             return Ok("Error: Context overflow - unable to recover".to_string());
                         }
 
                         // Progressive recovery: try LLM compact first, then truncation
+                        // (silent -- no user-visible output until recovery fails)
                         if context_errors == 1 && self.config.auto_compact_enabled {
                             // First attempt: try LLM-driven compaction
-                            agent_emit!("[!] Context overflow, attempting LLM compaction...");
                             let mut ctx = self.context.write().await;
                             let mut compactor = self.compactor.write().await;
                             let _ = compactor.compact(
@@ -1476,13 +1498,10 @@ impl AgentLoop {
                                 &self.base_url,
                             ).await;
                         } else if context_errors <= 2 {
-                            agent_emit!("[!] Context overflow, truncating history (phase 1/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.truncate_history();
-                            // Mark tracked items stale after truncation.
                             self.tool_state_tracker.borrow_mut().on_compaction();
                         } else {
-                            agent_emit!("[!] Context still full, aggressive truncation (phase 2/2)...");
                             let mut ctx = self.context.write().await;
                             ctx.aggressive_truncate_history();
                             self.tool_state_tracker.borrow_mut().on_compaction();
@@ -2579,6 +2598,7 @@ impl AgentLoop {
             current_max_tokens: std::sync::atomic::AtomicI64::new(config.max_output_tokens),
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
+            todo_list: Arc::new(crate::context::TodoList::new()),
         })
     }
 

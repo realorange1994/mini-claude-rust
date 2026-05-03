@@ -5,6 +5,8 @@
 //!
 //! 15-category taxonomy matching the Go version's classifyError with recovery hints.
 
+use regex::Regex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Top-level error classification for the agent loop (15 categories).
@@ -607,6 +609,24 @@ pub fn is_context_length_error(err_msg: &str) -> bool {
     matches_any(&lower, CONTEXT_OVERFLOW_PATTERNS)
 }
 
+/// Parse token counts from a prompt-too-long error message.
+/// The API returns messages like: "prompt is too long: 137500 tokens > 135000 maximum"
+/// Returns Some((actual_tokens, max_tokens)) if parseable, None otherwise.
+pub fn parse_prompt_too_long_token_gap(err_msg: &str) -> Option<(usize, usize)> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(\d+)\s*tokens?\s*>\s*(\d+)").unwrap()
+    });
+    if let Some(caps) = re.captures(err_msg) {
+        let actual = caps.get(1)?.as_str().parse::<usize>().ok()?;
+        let max = caps.get(2)?.as_str().parse::<usize>().ok()?;
+        if actual > 0 && max > 0 {
+            return Some((actual, max));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,6 +795,29 @@ mod tests {
         assert!(!h.compress);
         assert!(!h.rotate_key);
         assert!(!h.fallback);
+    }
+
+    #[test]
+    fn test_parse_prompt_too_long_token_gap() {
+        // Standard format from Anthropic API
+        let gap = parse_prompt_too_long_token_gap("prompt is too long: 137500 tokens > 135000 maximum");
+        assert_eq!(gap, Some((137500, 135000)));
+
+        // Without "maximum" suffix
+        let gap = parse_prompt_too_long_token_gap("137500 tokens > 135000");
+        assert_eq!(gap, Some((137500, 135000)));
+
+        // Max=0 is filtered out (no meaningful gap)
+        let gap = parse_prompt_too_long_token_gap("1 token > 0");
+        assert!(gap.is_none());
+
+        // No match
+        let gap = parse_prompt_too_long_token_gap("context_length_exceeded");
+        assert!(gap.is_none());
+
+        // Empty string
+        let gap = parse_prompt_too_long_token_gap("");
+        assert!(gap.is_none());
     }
 
     #[test]

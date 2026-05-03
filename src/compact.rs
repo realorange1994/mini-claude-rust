@@ -13,6 +13,7 @@ use regex::Regex;
 
 use crate::context::{
     CompactTrigger, ConversationContext, Message, MessageContent, MessageRole,
+    ToolResultContent,
 };
 use crate::session_memory::SessionMemory;
 
@@ -442,11 +443,53 @@ fn truncate_large_tool_args(messages: &mut Vec<Message>) {
     }
 }
 
-/// Run all 3 passes of pre-pruning on messages.
+/// Strip base64-encoded image data and image URLs from text/tool results.
+/// Replaces them with a placeholder to save tokens during compaction.
+fn strip_image_content(messages: &mut Vec<Message>) {
+    static IMAGE_RE: OnceLock<Regex> = OnceLock::new();
+    static URL_IMAGE_RE: OnceLock<Regex> = OnceLock::new();
+    let image_re = IMAGE_RE.get_or_init(|| {
+        Regex::new(r"data:image/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]{10,}").unwrap()
+    });
+    let url_re = URL_IMAGE_RE.get_or_init(|| {
+        Regex::new(r"https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|tiff)").unwrap()
+    });
+    const PLACEHOLDER: &str = "[image content stripped]";
+
+    for msg in messages {
+        match &mut msg.content {
+            MessageContent::Text(text) => {
+                let stripped = image_re.replace_all(text, PLACEHOLDER);
+                let stripped = url_re.replace_all(&stripped, PLACEHOLDER);
+                *text = stripped.to_string();
+            }
+            MessageContent::ToolResultBlocks(blocks) => {
+                for block in blocks {
+                    for content in &mut block.content {
+                        if let ToolResultContent::Text { text } = content {
+                            let stripped = image_re.replace_all(text, PLACEHOLDER);
+                            let stripped = url_re.replace_all(&stripped, PLACEHOLDER);
+                            *text = stripped.to_string();
+                        }
+                    }
+                }
+            }
+            MessageContent::Attachment(text) => {
+                let stripped = image_re.replace_all(text, PLACEHOLDER);
+                let stripped = url_re.replace_all(&stripped, PLACEHOLDER);
+                *text = stripped.to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Run all 4 passes of pre-pruning on messages.
 pub fn prune_tool_results(messages: &mut Vec<Message>) {
     dedup_tool_results(messages);
     summarize_old_tool_results(messages);
     truncate_large_tool_args(messages);
+    strip_image_content(messages);
 }
 
 // --- LLM-driven compaction ---
@@ -598,7 +641,84 @@ fn find_closing_quote(s: &str) -> Option<usize> {
 /// Compress messages using LLM summary generation.
 /// This is the primary compaction method -- replaces older truncation-based approaches.
 /// If `last_summary` is provided, uses iterative update prompt.
+/// Includes a PTL (prompt-too-long) retry loop: if the compact API call itself
+/// exceeds the context limit, progressively drop oldest messages and retry,
+/// up to MAX_PTL_RETRIES times.
+const MAX_PTL_RETRIES: usize = 3;
+
 pub async fn compact_conversation(
+    messages: &[Message],
+    client: &reqwest::Client,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    trigger: CompactTrigger,
+    is_auto: bool,
+    last_summary: Option<&str>,
+) -> anyhow::Result<CompactionResult> {
+    if messages.is_empty() {
+        anyhow::bail!("No messages to compact");
+    }
+
+    // PTL retry loop: try compaction, and if the API itself rejects due to
+    // prompt-too-long, progressively drop the oldest messages and retry.
+    let mut current_messages = messages.to_vec();
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 0..=MAX_PTL_RETRIES {
+        let result = do_compact_llm_call(&current_messages, client, model, api_key, base_url, trigger, is_auto, last_summary).await;
+        match result {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                let err_str = e.to_string();
+                if !crate::error_types::is_context_length_error(&err_str) {
+                    // Non-PTL error — bail out
+                    return Err(e);
+                }
+
+                last_err = Some(e);
+
+                // Prompt-too-long: try to drop oldest messages
+                let drop_count = if let Some((actual, max)) = crate::error_types::parse_prompt_too_long_token_gap(&err_str) {
+                    // Drop just enough to cover the token gap
+                    let needed = actual.saturating_sub(max);
+                    let total = estimate_total_tokens(&current_messages);
+                    if total > 0 {
+                        let fraction = (needed as f64 / total as f64).max(0.20);
+                        let count = (current_messages.len() as f64 * fraction) as usize;
+                        count.max(1).min(current_messages.len() / 2)
+                    } else {
+                        current_messages.len() / 5 // fallback: drop 20%
+                    }
+                } else {
+                    // Gap unparseable: drop 20% fallback
+                    current_messages.len() / 5
+                };
+
+                if drop_count < 1 || current_messages.len() - drop_count < 2 {
+                    break; // not enough messages left
+                }
+
+                // Drop the oldest messages (skip system message at index 0 if present)
+                let start = if current_messages.first().map(|m| m.role == MessageRole::System).unwrap_or(false) && current_messages.len() > 2 {
+                    1 + drop_count.min(current_messages.len() - 2)
+                } else {
+                    drop_count.min(current_messages.len() - 2)
+                };
+
+                current_messages = current_messages[start..].to_vec();
+                if current_messages.len() < 2 {
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!("Compact API error: prompt too long after {} retries, {}", MAX_PTL_RETRIES, last_err.unwrap_or_else(|| anyhow::anyhow!("unknown error"))))
+}
+
+/// Single attempt at the LLM compaction API call.
+async fn do_compact_llm_call(
     messages: &[Message],
     client: &reqwest::Client,
     model: &str,
