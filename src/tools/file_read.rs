@@ -82,6 +82,11 @@ impl Tool for FileReadTool {
             return ToolResult::error(format!("Error: not a file: {}", path.display()));
         }
 
+        // Block device files that would block indefinitely or produce infinite output
+        if is_device_file(&path.to_string_lossy()) {
+            return ToolResult::error(format!("Error: cannot read device file: {}", path.display()));
+        }
+
         // Reject binary file extensions (matching official Claude Code behavior)
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if is_binary_extension(ext) {
@@ -182,5 +187,33 @@ fn is_binary_extension(ext: &str) -> bool {
         | "pdf" | "docx" | "xlsx" | "pptx"
         | "woff" | "woff2" | "eot" | "ttf"
     )
+}
+
+/// Checks if a path is a special device file that should be blocked from reading.
+/// These files would block indefinitely (/dev/zero, /dev/stdin) or produce infinite output.
+/// Matches official Claude Code behavior.
+fn is_device_file(path: &str) -> bool {
+    // Normalize to forward slashes and lowercase for comparison
+    let normalized = path.replace('\\', "/").to_lowercase();
+
+    // Check for Unix device files
+    let device_paths = [
+        "/dev/zero", "/dev/random", "/dev/urandom", "/dev/full",
+        "/dev/stdin", "/dev/tty", "/dev/console",
+        "/dev/stdout", "/dev/stderr",
+        "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
+    ];
+    for dp in &device_paths {
+        if normalized == *dp || normalized.ends_with(dp) {
+            return true;
+        }
+    }
+
+    // Check for /proc/self/fd/ and /proc/<pid>/fd/ patterns
+    if normalized.contains("/proc/") && normalized.contains("/fd/") {
+        return true;
+    }
+
+    false
 }
 
