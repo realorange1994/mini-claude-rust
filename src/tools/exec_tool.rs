@@ -840,14 +840,35 @@ impl ExecTool {
             Err(e) => return ToolResult::error(format!("Error: {}", e)),
         };
 
-        // Apply timeout using wait_with_timeout pattern
+        // Read stdout/stderr concurrently to avoid pipe deadlock.
+        // If the child produces >64KB of output and we don't read the pipes,
+        // the OS pipe buffer fills, the child blocks on write, and we deadlock.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stdout_thread = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            }
+            buf
+        });
+        let stderr_thread = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+            }
+            buf
+        });
+
+        // Apply timeout: wait for process to exit, kill if it doesn't
         let timeout = std::time::Duration::from_millis(timeout_ms);
         let start = std::time::Instant::now();
         let timed_out = loop {
             match child.try_wait() {
                 Ok(Some(_)) => break false,
                 Ok(None) => {
-                    if start.elapsed() >= timeout {
+                    if std::time::Instant::now().duration_since(start) >= timeout {
                         let _ = child.kill();
                         let _ = child.wait();
                         break true;
@@ -859,22 +880,27 @@ impl ExecTool {
         };
 
         if timed_out {
+            // Drain the reader threads to avoid leaking
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
             return ToolResult::error(format!(
                 "Error: command timed out after {}ms: {}",
                 timeout_ms, command
             ));
         }
 
-        let output = match child.wait_with_output() {
+        let output = match child.wait() {
             Ok(o) => o,
             Err(e) => return ToolResult::error(format!("Error: {}", e)),
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout_bytes = stdout_thread.join().unwrap_or_default();
+        let stderr_bytes = stderr_thread.join().unwrap_or_default();
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
 
         // Extract exit code, handling signal-killed processes with 128+signal convention.
-        let exit_code = match output.status.code() {
+        let exit_code = match output.code() {
             Some(code) => code,
             None => {
                 // Process was terminated by a signal (Unix).
@@ -882,7 +908,7 @@ impl ExecTool {
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::ExitStatusExt;
-                    if let Some(signal) = output.status.signal() {
+                    if let Some(signal) = output.signal() {
                         128 + signal
                     } else {
                         -1
@@ -941,7 +967,7 @@ impl ExecTool {
 
         ToolResult {
             output: result,
-            is_error: !output.status.success(),
+            is_error: !output.success(),
             metadata,
         }
     }
