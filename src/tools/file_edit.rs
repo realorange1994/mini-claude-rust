@@ -336,7 +336,10 @@ fn is_opening_single_quote_context(prev: char) -> bool {
 
 /// Strips trailing whitespace from each line.
 fn strip_trailing_whitespace(s: &str) -> String {
-    s.lines()
+    // Use split('\n') which keeps trailing empty strings (unlike .lines() which drops them).
+    // "hello\n" → ["hello", ""] → "hello\n" ✓
+    // "hello"   → ["hello"]     → "hello"   ✓
+    s.split('\n')
         .map(|line| line.trim_end_matches(|c| c == ' ' || c == '\t'))
         .collect::<Vec<_>>()
         .join("\n")
