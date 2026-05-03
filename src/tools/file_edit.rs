@@ -273,7 +273,7 @@ fn straight_to_curly_double(s: &str) -> String {
     for (i, &c) in chars.iter().enumerate() {
         if c == '"' {
             let prev = if i > 0 { chars[i - 1] } else { '\0' };
-            if i == 0 || is_opening_double_quote_context(prev) {
+            if i == 0 || is_opening_quote_context(prev) {
                 result.push('\u{201C}'); // opening double curly quote
             } else {
                 result.push('\u{201D}'); // closing double curly quote
@@ -285,14 +285,13 @@ fn straight_to_curly_double(s: &str) -> String {
     result
 }
 
-/// Returns true if the preceding character indicates an opening curly double quote.
-fn is_opening_double_quote_context(prev: char) -> bool {
+/// Returns true if the preceding character indicates an opening curly quote.
+/// Matches upstream's isOpeningContext exactly.
+fn is_opening_quote_context(prev: char) -> bool {
     matches!(prev,
         '(' | '[' | '{' | ' ' | '\t' | '\n' | '\r' |
-        ':' | ',' | ';' | '=' | '+' | '-' | '*' |
-        '/' | '\\' | '|' | '&' | '<' | '>' |
-        '!' | '?' | '.' | '#' | '@' | '^' | '%' |
-        '~' | '\u{201C}' | '\u{2018}'
+        '\u{2014}' | // em dash
+        '\u{2013}'   // en dash
     )
 }
 
@@ -313,7 +312,7 @@ fn straight_to_curly_single(s: &str) -> String {
                 }
             }
             let prev = if i > 0 { chars[i - 1] } else { '\0' };
-            if i == 0 || is_opening_single_quote_context(prev) {
+            if i == 0 || is_opening_quote_context(prev) {
                 result.push('\u{2018}'); // left single curly quote
             } else {
                 result.push('\u{2019}'); // right single curly quote
@@ -325,14 +324,6 @@ fn straight_to_curly_single(s: &str) -> String {
     result
 }
 
-/// Returns true if the preceding character indicates an opening curly single quote.
-fn is_opening_single_quote_context(prev: char) -> bool {
-    matches!(prev,
-        '(' | '[' | '{' | ' ' | '\t' | '\n' | '\r' |
-        ':' | ',' | ';' | '<' | '!' | '?' | '"' |
-        '\u{201C}' | '\u{201D}' | '\u{2018}'
-    )
-}
 
 /// Strips trailing whitespace from each line.
 fn strip_trailing_whitespace(s: &str) -> String {
