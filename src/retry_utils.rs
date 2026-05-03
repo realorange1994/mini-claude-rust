@@ -6,6 +6,18 @@
 
 use std::time::Duration;
 
+/// Simple pseudo-random jitter in [0, 1).
+/// Uses system time nanoseconds for entropy -- no external dependencies.
+fn jitter_fraction() -> f64 {
+    let now = std::time::SystemTime::now();
+    let nanos = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as f64;
+    // Extract fractional part from nanoseconds scaled to seconds
+    (nanos / 1_000_000_000.0).fract()
+}
+
 /// Compute a jittered exponential backoff delay.
 ///
 /// Returns: delay = min(base * 2^(attempt-1), max_delay) + uniform(0, jitter_ratio * delay)
@@ -23,7 +35,7 @@ pub fn jittered_backoff(attempt: usize, base_delay: Duration, max_delay: Duratio
     let delay = (base * 2.0_f64.powi(exponent as i32)).min(max);
 
     // Add uniform random jitter in [0, jitter_ratio * delay]
-    let jitter = fastrand::f64() * jitter_ratio * delay;
+    let jitter = jitter_fraction() * jitter_ratio * delay;
     Duration::from_millis((delay + jitter) as u64)
 }
 

@@ -9,6 +9,7 @@ use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_s
 use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
 use crate::error_types::{classify_error, is_context_length_error};
 use crate::rate_limit::RateLimitState;
+use crate::retry_utils::jittered_backoff;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
 use anyhow::{anyhow, Result};
@@ -1579,9 +1580,6 @@ impl AgentLoop {
 
         // Try one more non-streaming call (with retries, matching Go's callWithNonStreamingNoTools)
         const MAX_RETRIES: usize = 3; // shorter budget for grace call, matching Go
-        const INITIAL_BACKOFF_MS: u64 = 1000;
-        const MAX_BACKOFF_MS: u64 = 8000;
-        let mut backoff_ms = INITIAL_BACKOFF_MS;
 
         for attempt in 0..MAX_RETRIES {
             // Check for interruption
@@ -1599,10 +1597,16 @@ impl AgentLoop {
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES - 1 {
-                        agent_emit!("[!] Final summary call failed (attempt {}/{}), retrying in {}ms: {}",
-                            attempt + 1, MAX_RETRIES, backoff_ms, e);
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        // Use jittered backoff: base=1s, max=8s (matching current grace call values)
+                        let delay = jittered_backoff(
+                            attempt + 1,
+                            Duration::from_secs(1),
+                            Duration::from_secs(8),
+                            0.5,
+                        );
+                        agent_emit!("[!] Final summary call failed (attempt {}/{}), retrying in {:?}: {}",
+                            attempt + 1, MAX_RETRIES, delay, e);
+                        tokio::time::sleep(delay).await;
                     } else {
                         agent_emit!("[!] Final summary call failed: {}", e);
                     }
@@ -1623,10 +1627,6 @@ impl AgentLoop {
         _continue_reason: &ContinueReason,
     ) -> Result<(Vec<ToolCallInfo>, String)> {
         const MAX_RETRIES: usize = 10;
-        const INITIAL_BACKOFF_MS: u64 = 2000;
-        const MAX_BACKOFF_MS: u64 = 18000;
-
-        let mut backoff_ms = INITIAL_BACKOFF_MS;
 
         // Respect use_stream flag: if disabled, skip streaming entirely
         if !self.use_stream {
@@ -1704,21 +1704,32 @@ impl AgentLoop {
                     }
 
                     if attempt < MAX_RETRIES - 1 {
-                        // Prefer rate limit header delay over jittered backoff (matching Go)
-                        let delay_ms = if let Some(rlim_delay) = self.rate_limit_state.retry_delay() {
+                        // Jittered exponential backoff with rate limit header override (matching Go).
+                        // Compute base delay: 2s * 2^(attempt-1), capped at 18s (matching current fixed values).
+                        let exp_delay_ms = 2000u64
+                            .saturating_mul(2u64.saturating_pow(attempt as u32))
+                            .min(18000);
+                        // Prefer rate limit header delay if it's reasonable (not >3x the backoff).
+                        let base_delay = if let Some(rlim_delay) = self.rate_limit_state.retry_delay() {
                             let rlim_ms = rlim_delay.as_millis() as u64;
-                            if rlim_ms > 0 && rlim_ms < backoff_ms * 3 {
+                            if rlim_ms > 0 && rlim_ms < exp_delay_ms * 3 {
                                 rlim_ms
                             } else {
-                                backoff_ms
+                                exp_delay_ms
                             }
                         } else {
-                            backoff_ms
+                            exp_delay_ms
                         };
-                        agent_emit!("[!] Streaming attempt {} failed (transient), retrying in {}ms: {}",
-                            attempt + 1, delay_ms, e);
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        // Add jitter: 0-50% of base delay.
+                        let delay = jittered_backoff(
+                            attempt + 1,
+                            Duration::from_millis(base_delay),
+                            Duration::from_secs(120),
+                            0.5,
+                        );
+                        agent_emit!("[!] Streaming attempt {} failed (transient), retrying in {:?}: {}",
+                            attempt + 1, delay, e);
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
@@ -1829,10 +1840,7 @@ impl AgentLoop {
         tools: &[serde_json::Value],
     ) -> Result<(Vec<ToolCallInfo>, String)> {
         const MAX_RETRIES: usize = 10;
-        const INITIAL_BACKOFF_MS: u64 = 2000;
-        const MAX_BACKOFF_MS: u64 = 18000;
 
-        let mut backoff_ms = INITIAL_BACKOFF_MS;
         let mut current_messages: Vec<serde_json::Value> = messages.to_vec();
 
         for attempt in 0..MAX_RETRIES {
@@ -1878,10 +1886,16 @@ impl AgentLoop {
                     }
 
                     if attempt < MAX_RETRIES - 1 {
-                        agent_emit!("[!] Non-streaming attempt {} failed (transient), retrying in {}ms: {}",
-                            attempt + 1, backoff_ms, e);
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        // Jittered exponential backoff: base=2s, max=18s
+                        let delay = jittered_backoff(
+                            attempt + 1,
+                            Duration::from_secs(2),
+                            Duration::from_secs(18),
+                            0.5,
+                        );
+                        agent_emit!("[!] Non-streaming attempt {} failed (transient), retrying in {:?}: {}",
+                            attempt + 1, delay, e);
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
