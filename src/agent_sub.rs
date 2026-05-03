@@ -240,12 +240,49 @@ pub fn build_sub_agent_system_prompt(
     sb
 }
 
+/// Resolve a model input string to a concrete model ID.
+///
+/// - Empty string or "inherit": inherit parent's model (return parent_model as-is).
+/// - Aliases "sonnet"/"opus"/"haiku": resolved via env vars or parent model tier matching.
+///   When an alias matches the parent's tier, the parent's exact model string is used.
+///   Otherwise resolved via ANTHROPIC_DEFAULT_SONNET/OPUS/HAIKU_MODEL env vars,
+///   with hardcoded defaults as fallback.
+/// - Other strings: used verbatim (assumed to be a full model ID).
+fn resolve_model_alias(model_input: &str, parent_model: &str) -> String {
+    let model_input_lower = model_input.to_lowercase();
+    if model_input.is_empty() || model_input_lower == "inherit" {
+        return parent_model.to_string();
+    }
+
+    match model_input_lower.as_str() {
+        "sonnet" | "opus" | "haiku" => {
+            // If the alias matches the parent's tier, inherit the parent's exact model.
+            // This prevents surprising downgrades (e.g., a user on opus 4.6 spawning
+            // a subagent with model:"opus" should get opus 4.6, not a different default).
+            let parent_lower = parent_model.to_lowercase();
+            if parent_lower.contains(&model_input_lower) {
+                return parent_model.to_string();
+            }
+            // Resolve via environment variable or fall back to a reasonable default.
+            let (env_key, fallback) = match model_input_lower.as_str() {
+                "sonnet" => ("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514"),
+                "opus" => ("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-20250514"),
+                "haiku" => ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-4-20250514"),
+                _ => unreachable!(),
+            };
+            std::env::var(env_key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| fallback.to_string())
+        }
+        _ => model_input.to_string(), // verbatim (full model ID or other alias)
+    }
+}
+
 /// Build a child Config from the parent config with sub-agent overrides.
 pub fn build_child_config(parent_config: &Config, model_override: &str, max_turns: usize) -> Config {
     let mut child_config = parent_config.clone();
-    if !model_override.is_empty() {
-        child_config.model = model_override.to_string();
-    }
+    child_config.model = resolve_model_alias(model_override, &parent_config.model);
     // Set max turns for the child agent.
     // Priority: explicit max_turns from tool call > sub_agent_max_turns config > default ceiling.
     if max_turns > 0 {
