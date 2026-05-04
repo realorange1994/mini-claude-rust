@@ -255,6 +255,29 @@ impl Tool for GrepTool {
     }
 }
 
+/// Split glob on commas and whitespace, respecting brace groups.
+fn split_glob_patterns(glob: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_brace = false;
+    for c in glob.chars() {
+        match c {
+            '{' => { in_brace = true; current.push(c); }
+            '}' => { in_brace = false; current.push(c); }
+            ',' | ' ' if !in_brace => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 fn is_rg_available() -> bool {
     Command::new("rg").arg("--version").output().is_ok()
 }
@@ -312,8 +335,8 @@ fn rg_search(
     if max_depth > 0 { args.push("--max-depth".to_string()); args.push(max_depth.to_string()); }
     if !max_filesize.is_empty() { args.push("--max-filesize".to_string()); args.push(max_filesize.to_string()); }
 
-    args.push("-m".to_string());
-    args.push(head_limit.to_string());
+    // Don't pass -m to rg — apply offset+head_limit in post-processing only.
+    // Passing -m breaks pagination (offset would slice fewer results).
 
     if !type_filter.is_empty() {
         let type_map = get_type_map();
@@ -328,8 +351,11 @@ fn rg_search(
         }
     }
     if !include.is_empty() {
-        args.push("--glob".to_string());
-        args.push(include.to_string());
+        // Split glob on commas/spaces, matching upstream behavior
+        for g in split_glob_patterns(include) {
+            args.push("--glob".to_string());
+            args.push(g.trim().to_string());
+        }
     }
 
     // If pattern starts with dash, use -e flag to prevent rg from interpreting it as an option
@@ -364,7 +390,7 @@ fn rg_search(
     if offset > 0 && offset < lines.len() {
         lines = lines[offset..].to_vec();
     }
-    if lines.len() > head_limit {
+    if head_limit > 0 && lines.len() > head_limit {
         lines = lines[..head_limit].to_vec();
         lines.push(format!("(showing first {} matches, truncated)", head_limit));
     }
@@ -386,13 +412,13 @@ fn go_search(
     count_matches: bool,
     max_depth: usize,
 ) -> ToolResult {
-    let search_pattern = if fixed_strings {
-        regex::escape(pattern)
-    } else if case_insensitive {
-        format!("(?i){}", pattern)
-    } else {
-        pattern.to_string()
-    };
+    let mut search_pattern = pattern.to_string();
+    if fixed_strings {
+        search_pattern = regex::escape(&search_pattern);
+    }
+    if case_insensitive {
+        search_pattern = format!("(?i){}", search_pattern);
+    }
     let re = match Regex::new(&search_pattern) {
         Ok(r) => r,
         Err(e) => return ToolResult::error(format!("Invalid regex: {}", e)),
