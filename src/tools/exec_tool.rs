@@ -8,6 +8,7 @@ use crate::tools::{Tool, ToolResult};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -765,6 +766,27 @@ fn is_exit_error(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::Other
 }
 
+/// Read at most `limit` bytes from a reader, preventing unbounded memory growth.
+/// This prevents OOM when a command produces very large output.
+/// Matches Go's readLimited() behavior.
+fn read_limited<R: std::io::Read>(r: &mut R, limit: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; limit];
+    let mut off = 0;
+    loop {
+        if off >= limit {
+            break;
+        }
+        match r.read(&mut buf[off..]) {
+            Ok(0) => break,
+            Ok(n) => off += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    buf.truncate(off);
+    buf
+}
+
 /// Check if a path contains directory traversal (../).
 fn contains_path_escape(path: &str) -> bool {
     path.contains("..")
@@ -1102,18 +1124,18 @@ impl ExecTool {
         let stderr_pipe = child.stderr.take();
 
         let stdout_thread = std::thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(mut pipe) = stdout_pipe {
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                read_limited(&mut pipe, 50000)
+            } else {
+                Vec::new()
             }
-            buf
         });
         let stderr_thread = std::thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(mut pipe) = stderr_pipe {
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                read_limited(&mut pipe, 25000)
+            } else {
+                Vec::new()
             }
-            buf
         });
 
         // Apply timeout: wait for process to exit, kill if it doesn't
