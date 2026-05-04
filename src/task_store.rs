@@ -250,15 +250,16 @@ impl Default for TaskStore {
 // ─── Process kill helpers ───────────────────────────────────────────────────
 
 /// Kill a process by PID using platform-specific commands.
+/// On Unix, kills the entire process group (tree-kill) to prevent orphaned subprocesses.
+/// On Windows, uses taskkill /T to kill the process tree.
 fn kill_process(pid: u32) {
     #[cfg(unix)]
     {
-        // Send SIGKILL to the process
-        // Use std::process::Command to run kill for cross-platform safety
-        let _ = std::process::Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .output();
+        // Kill the entire process group (tree-kill) by sending SIGKILL to -pid.
+        // This matches upstream's treeKill behavior and prevents orphaned subprocesses.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
     }
 
     #[cfg(windows)]

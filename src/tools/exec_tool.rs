@@ -1733,14 +1733,20 @@ fn run_background_bash(
     let start = std::time::Instant::now();
 
     // Spawn the child process
-    let spawn_result = std::process::Command::new(shell)
-        .arg(flag)
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg(flag)
         .arg(command)
         .current_dir(working_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    // Set process group on Unix for tree-kill support
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let spawn_result = cmd.spawn();
 
     let mut child = match spawn_result {
         Ok(c) => c,
