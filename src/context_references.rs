@@ -833,8 +833,8 @@ fn strip_trailing_punctuation(value: &str) -> String {
 fn strip_quotes(value: &str) -> String {
     if value.len() >= 2 {
         let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"') ||
-           (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'') {
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"') ||
+           (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'') {
             return value[1..value.len()-1].to_string();
         }
     }

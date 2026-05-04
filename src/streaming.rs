@@ -926,8 +926,7 @@ pub async fn process_sse_events(
     }
     // Serialize once before the retry loop — serde_json::Map serializes deterministically
     // and all values are serializable, so this cannot fail.
-    let body_bytes = serde_json::to_string(&payload)
-        .expect("payload should always be serializable");
+    let body_bytes = serde_json::to_string(&payload)?;
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
     let mut retry = 0;
