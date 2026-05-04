@@ -267,9 +267,8 @@ impl Tool for FileEditTool {
             content_norm.replacen(&old_str_norm, &new_str_norm, 1)
         };
 
-        // Preserve original quote style — pass ORIGINAL (pre-normalized) content
-        // so curly quotes can be detected in the actual file content
-        let result = preserve_quote_style(&result, &content, &old_str, &new_str);
+        // Preserve original quote style
+        let result = preserve_quote_style(&result, &old_str, &new_str, &old_str_norm);
 
         // Restore CRLF
         let result = if has_crlf {
@@ -295,25 +294,34 @@ fn normalize_quotes(s: &str) -> String {
 }
 
 /// Preserves original quote style in the result.
-/// If the file actually contains curly quotes, the replacement also uses curly quotes.
-fn preserve_quote_style(result: &str, content_orig: &str, old_str: &str, new_str: &str) -> String {
-    // Check if the file actually contains curly quotes
-    let has_curly_double = content_orig.contains('\u{201C}') || content_orig.contains('\u{201D}');
-    let has_curly_single = content_orig.contains('\u{2018}') || content_orig.contains('\u{2019}');
-    if !has_curly_double && !has_curly_single {
+/// Matching upstream's logic:
+/// 1. If old_str === old_str_norm (no normalization), return new_str as-is.
+/// 2. If normalization happened, check if the ACTUAL matched text in the file
+///    had curly quotes. If so, apply the same curly quote style to new_str.
+fn preserve_quote_style(result: &str, old_str: &str, new_str: &str, old_str_norm: &str) -> String {
+    // If no normalization was needed, return as-is
+    if old_str == old_str_norm {
         return result.to_string();
     }
 
-    // Detect quote style used in old_str (the matched text in the file)
-    let old_has_curly_double = old_str.contains('\u{201C}') || old_str.contains('\u{201D}');
-    let old_has_curly_single = old_str.contains('\u{2018}') || old_str.contains('\u{2019}');
+    // Find the actual matched text in the result (before replacement)
+    // The result is after replacement, so find old_str_norm position and extract
+    let actual_matched = if let Some(idx) = result.find(old_str_norm) {
+        &result[idx..idx + old_str_norm.len()]
+    } else {
+        return new_str.to_string();
+    };
 
-    let mut out = result.to_string();
-    if old_has_curly_double && has_curly_double {
+    // Check if the actual matched text has curly quotes
+    let has_curly_double = actual_matched.contains('\u{201C}') || actual_matched.contains('\u{201D}');
+    let has_curly_single = actual_matched.contains('\u{2018}') || actual_matched.contains('\u{2019}');
+
+    let mut out = new_str.to_string();
+    if has_curly_double {
         out = curly_to_straight_double(&out);
         out = straight_to_curly_double(&out);
     }
-    if old_has_curly_single && has_curly_single {
+    if has_curly_single {
         out = curly_to_straight_single(&out);
         out = straight_to_curly_single(&out);
     }
