@@ -267,6 +267,8 @@ fn main() -> Result<()> {
     // Wire notification channel for bash task/sub-agent completion notifications
     let mut agent_with_notif = agent;
     agent_with_notif.set_notification_rx(notification_rx);
+    // Inject running agent status during compaction
+    agent_with_notif.set_agent_task_store(agent_task_store.clone());
 
     // Set parent context for fork mode so the agent tool can access it
     {

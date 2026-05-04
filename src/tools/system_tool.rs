@@ -307,7 +307,7 @@ impl SystemTool {
             cmd_args.extend(flags.split_whitespace());
         }
 
-        let output = Command::new(&cmd_args[0]).args(&cmd_args[1..]).output();
+        let output = Command::new(cmd_args[0]).args(&cmd_args[1..]).output();
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);

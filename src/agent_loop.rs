@@ -223,6 +223,9 @@ pub struct AgentLoop {
     /// Drained at turn boundaries and injected as user messages.
     /// Wrapped in Mutex to allow draining via shared &self reference.
     notification_rx: Option<std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    /// Shared agent task store for tracking background sub-agents.
+    /// Used during compaction to inject running agent status.
+    agent_task_store: Option<crate::tools::agent_store::SharedAgentTaskStore>,
 }
 
 impl AgentLoop {
@@ -326,6 +329,7 @@ impl AgentLoop {
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
+            agent_task_store: None,
         })
     }
 
@@ -462,6 +466,7 @@ impl AgentLoop {
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
+            agent_task_store: None,
         })
     }
 
@@ -915,6 +920,8 @@ impl AgentLoop {
                         if recovered_paths.is_empty() {
                             self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
+                        // Inject running agent status so model doesn't spawn duplicates
+                        self.inject_running_agent_status();
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
@@ -962,6 +969,8 @@ impl AgentLoop {
                         }
                         // Phase 3: History snip — preserve recent messages verbatim
                         let mut ctx = self.context.write().await;
+                        // Inject running agent status so model doesn't spawn duplicates
+                        self.inject_running_agent_status();
                         let snip_count = self.config.post_compact_history_snip_count;
                         ctx.add_history_snip(snip_count, &recovered_paths);
                     }
@@ -2645,6 +2654,8 @@ impl AgentLoop {
         context.replace_messages(kept);
         // Mark all tracked items as stale (context has been compacted).
         self.tool_state_tracker.borrow_mut().on_compaction();
+        // Inject running agent status so model doesn't spawn duplicates
+        self.inject_running_agent_status();
 
         let entries_after = context.len();
 
@@ -2815,6 +2826,7 @@ impl AgentLoop {
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: Arc::new(crate::context::TodoList::new()),
             notification_rx: None,
+            agent_task_store: None,
         })
     }
 
@@ -2836,6 +2848,32 @@ impl AgentLoop {
     /// Called after construction when the notification channel is created.
     pub fn set_notification_rx(&mut self, rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
         self.notification_rx = Some(std::sync::Mutex::new(rx));
+    }
+
+    /// Set the agent task store for tracking background sub-agents.
+    /// Used during compaction to inject running agent status so the model
+    /// doesn't spawn duplicate agents after compaction.
+    pub fn set_agent_task_store(&mut self, store: crate::tools::agent_store::SharedAgentTaskStore) {
+        self.agent_task_store = Some(store);
+    }
+
+    /// Inject running agent status attachments into the conversation context.
+    /// This prevents the model from spawning duplicate agents after compaction.
+    /// Matches upstream's createAsyncAgentAttachmentsIfNeeded.
+    pub fn inject_running_agent_status(&self) {
+        let store = match &self.agent_task_store {
+            Some(s) => s,
+            None => return,
+        };
+        let tasks = store.list_by_status(crate::tools::agent_store::AgentTaskStatus::Running);
+        let mut context = self.context.blocking_write();
+        for task in tasks {
+            let status_line = format!(
+                "[task_status] taskId: {}, type: local_agent, description: {}, status: running\nThis agent is still running in the background. Do NOT spawn a duplicate agent for this task.",
+                task.id, task.description
+            );
+            context.add_attachment(status_line);
+        }
     }
 }
 
