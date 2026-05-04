@@ -338,14 +338,15 @@ impl Registry {
     }
 }
 
-/// Normalize a file path for consistent comparison (lowercase on Windows, forward slashes)
+/// Normalize a file path for consistent comparison.
+/// Always lowercases on ALL platforms — the LLM may send paths with different
+/// casing than the actual filesystem (e.g. `src/MyFile.rs` vs `src/myfile.rs`).
+/// Without unconditional lowercasing, the read-registry lookup fails on
+/// case-sensitive filesystems (Linux/macOS), causing the "file has not been
+/// read yet" infinite loop.
 pub(crate) fn normalize_file_path(path: &str) -> String {
     let p = path.replace('\\', "/");
-    #[cfg(target_os = "windows")]
-    let normalized = p.to_lowercase();
-    #[cfg(not(target_os = "windows"))]
-    let normalized = p;
-    normalized
+    p.to_lowercase()
 }
 
 impl Default for Registry {

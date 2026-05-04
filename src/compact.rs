@@ -417,8 +417,9 @@ fn truncate_large_tool_args(messages: &mut Vec<Message>) {
                 if let Ok(json) = serde_json::to_string(&block.input) {
                     if json.len() > MAX_ARGS_LEN {
                         // Truncate the JSON representation and store back
+                        let truncated: String = json.chars().take(MAX_ARGS_LEN).collect();
                         let truncated_json =
-                            format!("{}...[truncated]", &json[..MAX_ARGS_LEN]);
+                            format!("{}...[truncated]", truncated);
                         // Parse the truncated JSON back; if it fails, create a simple map
                         if let Ok(parsed) =
                             serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(
@@ -1377,8 +1378,13 @@ pub fn try_sm_compact(
         MessageContent::Summary(summary_content),
     );
 
-    // Keep the last few messages as tail to maintain context continuity
-    const TAIL_SIZE: usize = 4;
+    // Keep the last few messages as tail to maintain context continuity.
+    // 4 was too small: a single tool_use + tool_result = 2 messages, so 4 only
+    // preserved 2 recent tool pairs. After SM-compact the model would forget the
+    // tool results from just 2 turns back, causing re-execution.
+    // 8 gives 4 tool pairs (~2 turns of back-and-forth) which matches upstream's
+    // keepLast default in SmartCompact.
+    const TAIL_SIZE: usize = 8;
     let tail_start = messages.len().saturating_sub(TAIL_SIZE);
     let tail: Vec<Message> = messages[tail_start..].to_vec();
 
@@ -1834,7 +1840,8 @@ impl Compactor {
             if let Some(ref mem) = self.session_memory {
                 let mem_content = mem.format_for_prompt();
                 if !mem_content.is_empty() {
-                    self.last_summary = Some(format!("[SM-compact summary] {}", &mem_content[..mem_content.len().min(2000)]));
+                    let preview: String = mem_content.chars().take(2000).collect();
+                        self.last_summary = Some(format!("[SM-compact summary] {}", preview));
                 }
             }
             // Reset LLM failure count on successful SM-compact

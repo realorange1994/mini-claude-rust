@@ -727,7 +727,8 @@ impl AutoModeClassifier {
         if !resp.status().is_success() {
             let status = resp.status();
             let error_text = resp.text().unwrap_or_default();
-            eprintln!("  [auto-classifier] API error: {} - {}", status, &error_text[..error_text.len().min(200)]);
+            let error_preview: String = error_text.chars().take(200).collect();
+            eprintln!("  [auto-classifier] API error: {} - {}", status, error_preview);
             return None;
         }
 
