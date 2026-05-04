@@ -648,7 +648,7 @@ When you are using compact - please focus on test output and code changes. Inclu
 /// Partial compact prompt template (matches upstream PARTIAL_COMPACT_PROMPT).
 /// Summarizes only the recent portion of the conversation.
 #[allow(dead_code)]
-const PARTIAL_COMPACT_PROMPT: &str = r#" = r#"Your task is to create a detailed summary of the RECENT portion of the conversation — the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on what was discussed, learned, and accomplished in the recent messages only.
+const PARTIAL_COMPACT_PROMPT: &str = r#"Your task is to create a detailed summary of the RECENT portion of the conversation — the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on what was discussed, learned, and accomplished in the recent messages only.
 
 Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
