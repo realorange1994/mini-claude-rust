@@ -104,9 +104,21 @@ impl Tool for FileEditTool {
         if old_str.is_empty() {
             // Official: allows creating a new file when old_string is empty
             if path.exists() {
-                return ToolResult::error(
-                    "Error: cannot create new file - file already exists with content".to_string(),
-                );
+                // Allow writing to an existing empty file (matching upstream behavior)
+                if let Ok(existing) = fs::read(&path) {
+                    let trimmed = String::from_utf8_lossy(&existing);
+                    if trimmed.trim().is_empty() {
+                        // Truly empty file — allow overwrite
+                    } else {
+                        return ToolResult::error(
+                            "Error: cannot create new file - file already exists with content".to_string(),
+                        );
+                    }
+                } else {
+                    return ToolResult::error(
+                        "Error: cannot create new file - file already exists with content".to_string(),
+                    );
+                }
             }
             if let Some(parent) = path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
@@ -196,7 +208,26 @@ impl Tool for FileEditTool {
             ));
         }
 
-        let result = if replace_all {
+        // When deleting a line (newStr is empty), also strip a trailing \n
+        // that follows the oldString in the file (matching upstream).
+        // E.g. deleting "  let x = 1;" from "  let x = 1;\n" should remove the orphan \n too.
+        let result = if new_str_norm.is_empty() && !old_str_norm.ends_with('\n') {
+            let old_with_lf = format!("{}\n", old_str_norm);
+            if replace_all {
+                content_norm.replace(&old_with_lf, &new_str_norm)
+            } else if let Some(idx) = content_norm.find(&old_with_lf) {
+                let mut r = content_norm[..idx].to_string();
+                r.push_str(&new_str_norm);
+                r.push_str(&content_norm[idx + old_with_lf.len()..]);
+                r
+            } else {
+                if replace_all {
+                    content_norm.replace(&old_str_norm, &new_str_norm)
+                } else {
+                    content_norm.replacen(&old_str_norm, &new_str_norm, 1)
+                }
+            }
+        } else if replace_all {
             content_norm.replace(&old_str_norm, &new_str_norm)
         } else {
             content_norm.replacen(&old_str_norm, &new_str_norm, 1)
