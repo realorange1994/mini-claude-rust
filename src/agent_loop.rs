@@ -1125,9 +1125,12 @@ impl AgentLoop {
                                     let tool_name = tc.name.clone();
 
                                     // Capture path for post-execution snapshot before params is moved
-                                    // Also captures read_file path for mark_file_read tracking
+                                    // Also captures read_file path for mark_file_read tracking.
+                                    // NOTE: The LLM sends "file_path" per the tool schema, but after
+                                    // remap_file_path it becomes "path". We must check BOTH keys
+                                    // because remap hasn't happened yet at this point.
                                     let snapshot_path = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" || tool_name == "read_file" {
-                                        params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p))
+                                        params.get("file_path").or(params.get("path")).and_then(|v| v.as_str()).map(|p| expand_path(p))
                                     } else {
                                         None
                                     };
@@ -1153,7 +1156,7 @@ impl AgentLoop {
                                     // Capture fileops delete info before params is moved
                                     let fileops_delete_info = if tool_name == "fileops" {
                                         let op = params.get("operation").and_then(|v| v.as_str());
-                                        let path = params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p));
+                                        let path = params.get("file_path").or(params.get("path")).and_then(|v| v.as_str()).map(|p| expand_path(p));
                                         match (op, path) {
                                             (Some("rm"), Some(p)) => Some(("rm", p)),
                                             (Some("rmrf"), Some(p)) => Some(("rmrf", p)),
@@ -1461,7 +1464,7 @@ impl AgentLoop {
                                 drop(rx); // release lock before acquiring context lock
                                 if !notifications.is_empty() {
                                     let mut ctx = self.context.write().await;
-                                    let mut sb = String::from("[System: The following background tasks completed while you were working]\n\n");
+                                    let mut sb = String::from("[System: The following sub-agent tasks completed while you were waiting]\n\n");
                                     for notification in notifications {
                                         sb.push_str(&notification);
                                         sb.push_str("\n\n");
