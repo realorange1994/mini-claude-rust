@@ -156,7 +156,7 @@ impl Tool for GlobTool {
             return ToolResult::ok("No files matched.".to_string());
         }
 
-        // Sort by modification time (newest first)
+        // Sort by modification time (oldest first, matching upstream ripgrep --sort=modified)
         matches.sort_by(|a, b| {
             let time_a = a.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
@@ -164,15 +164,19 @@ impl Tool for GlobTool {
             let time_b = b.1.as_ref().ok().and_then(|m| m.modified().ok())
                 .map(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
                 .unwrap_or(0);
-            time_b.cmp(&time_a)
+            time_a.cmp(&time_b)
         });
 
         let total = matches.len();
         let matches: Vec<_> = matches.into_iter().take(head_limit).collect();
 
+        // Output relative paths (matching upstream)
+        let cwd = std::env::current_dir().ok();
         let mut lines = Vec::new();
         for (path, _meta) in matches {
-            lines.push(path.display().to_string());
+            let rel = cwd.as_ref().and_then(|c| path.strip_prefix(c).ok())
+                .unwrap_or(&path);
+            lines.push(rel.display().to_string());
         }
 
         if total > head_limit {
