@@ -196,12 +196,10 @@ impl CollectHandler {
     /// (the stream cut off mid-tool-call, so args may be incomplete JSON).
     pub fn has_partial_tool_call(&self) -> bool {
         let calls = self.tool_calls.read().unwrap();
-        if calls.is_empty() {
-            return false;
-        }
-        // Last tool call has no arguments -- stream cut off during tool_use block
-        let last = calls.last().unwrap();
-        last.arguments.is_empty()
+        // Last tool call has no arguments -- stream cut off during tool_use block.
+        // Clone the last element while holding the read lock to avoid a race where
+        // another task clears tool_calls between the is_empty check and last().
+        calls.last().map(|c| c.arguments.is_empty()).unwrap_or(false)
     }
 
     /// Check if any tool call has truncated (invalid JSON) arguments.

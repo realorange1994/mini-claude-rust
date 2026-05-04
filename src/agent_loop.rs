@@ -2637,6 +2637,20 @@ impl AgentLoop {
             };
         }
 
+        if messages.is_empty() {
+            // Nothing to compact — return empty stats
+            return crate::compact::CompactStats {
+                phase: crate::compact::CompactPhase::Truncated,
+                entries_before: 0,
+                entries_after: 0,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: tokens_before,
+                estimated_tokens_after: 0,
+                tokens_after: 0,
+                post_compact_tokens: 0,
+            };
+        }
+
         // Use local truncation: keep system + last N messages
         let keep_last = 10;
         let total = messages.len();
@@ -2652,6 +2666,8 @@ impl AgentLoop {
         // Add compact boundary marker
         context.add_compact_boundary(crate::context::CompactTrigger::Manual, tokens_before);
         context.replace_messages(kept);
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
         // Mark all tracked items as stale (context has been compacted).
         self.tool_state_tracker.borrow_mut().on_compaction();
         // Inject running agent status so model doesn't spawn duplicates

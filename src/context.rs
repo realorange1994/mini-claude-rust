@@ -620,9 +620,10 @@ impl ConversationContext {
                 // After truncation, validate tool pairing and fix alternation
                 self.validate_tool_pairing();
                 self.fix_role_alternation();
-            } else {
+            } else if !self.messages.is_empty() {
                 self.messages = vec![self.messages[0].clone()];
             }
+            // else: messages already empty, nothing to truncate
         }
     }
 

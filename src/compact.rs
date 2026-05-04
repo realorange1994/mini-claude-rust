@@ -1184,7 +1184,9 @@ async fn do_compact_llm_call(
     );
 
     let summary_content = format!(
-        "[Previous conversation summary ({} tokens compressed)]\n\n{}",
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
+         [Previous conversation summary ({} tokens compressed)]\n\n{}\n\n\
+         Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
         pre_compact_tokens, summary_text
     );
     let summary = Message::new(
@@ -1348,7 +1350,9 @@ pub fn try_sm_compact(
 
     // Format the session memory as a summary message
     let summary_content = format!(
-        "[Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}",
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
+         [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}\n\n\
+         Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
         tokens_before, mem_content
     );
     let summary = Message::new(
@@ -1491,7 +1495,8 @@ pub fn partial_compact(
     let summary = Message::new(
         MessageRole::User,
         MessageContent::Summary(format!(
-            "[Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}",
+            "[Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}\n\n\
+             Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
             tokens_before, direction, summary_text
         )),
     );
@@ -1707,6 +1712,8 @@ impl Compactor {
         let saved = tokens_before.saturating_sub(tokens_after);
 
         context.replace_messages(new_messages);
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
 
         CompactStats {
             phase: CompactPhase::Truncated,
