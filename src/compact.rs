@@ -993,6 +993,7 @@ pub async fn compact_conversation(
     trigger: CompactTrigger,
     is_auto: bool,
     last_summary: Option<&str>,
+    transcript_path: Option<&str>,
 ) -> anyhow::Result<CompactionResult> {
     if messages.is_empty() {
         anyhow::bail!("No messages to compact");
@@ -1004,7 +1005,7 @@ pub async fn compact_conversation(
     let mut last_err: Option<anyhow::Error> = None;
 
     for _attempt in 0..=MAX_PTL_RETRIES {
-        let result = do_compact_llm_call(&current_messages, client, model, api_key, base_url, trigger, is_auto, last_summary).await;
+        let result = do_compact_llm_call(&current_messages, client, model, api_key, base_url, trigger, is_auto, last_summary, transcript_path).await;
         match result {
             Ok(r) => return Ok(r),
             Err(e) => {
@@ -1069,6 +1070,7 @@ async fn do_compact_llm_call(
     trigger: CompactTrigger,
     is_auto: bool,
     last_summary: Option<&str>,
+    transcript_path: Option<&str>,
 ) -> anyhow::Result<CompactionResult> {
     if messages.is_empty() {
         anyhow::bail!("No messages to compact");
@@ -1183,12 +1185,19 @@ async fn do_compact_llm_call(
         },
     );
 
+    // Match upstream's getCompactUserSummaryMessage: add transcript path
+    // for detail recovery and recentMessagesPreserved notice.
     let summary_content = format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
-         [Previous conversation summary ({} tokens compressed)]\n\n{}\n\n\
-         Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+         [Previous conversation summary ({} tokens compressed)]\n\n{}",
         pre_compact_tokens, summary_text
     );
+    let summary_content = if let Some(tp) = transcript_path {
+        format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)
+    } else {
+        summary_content
+    };
+    let summary_content = format!("{}\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u{2014} do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.", summary_content);
     let summary = Message::new(
         MessageRole::User,
         MessageContent::Summary(summary_content),
@@ -1325,6 +1334,7 @@ pub fn try_sm_compact(
     context: &mut ConversationContext,
     session_memory: Option<&SessionMemory>,
     trigger: CompactTrigger,
+    transcript_path: Option<&str>,
 ) -> Option<CompactStats> {
     // Check if session memory is available and has content
     let mem = session_memory?;
@@ -1349,12 +1359,19 @@ pub fn try_sm_compact(
     );
 
     // Format the session memory as a summary message
+    // Match upstream's getCompactUserSummaryMessage: add transcript path
+    // for detail recovery and recentMessagesPreserved notice.
     let summary_content = format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
-         [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}\n\n\
-         Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+         [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}",
         tokens_before, mem_content
     );
+    let summary_content = if let Some(tp) = transcript_path {
+        format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)
+    } else {
+        summary_content
+    };
+    let summary_content = format!("{}\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u{2014} do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.", summary_content);
     let summary = Message::new(
         MessageRole::User,
         MessageContent::Summary(summary_content),
@@ -1408,6 +1425,7 @@ pub fn partial_compact(
     context: &mut ConversationContext,
     direction: PartialCompactDirection,
     pivot_index: usize,
+    transcript_path: Option<&str>,
 ) -> PartialCompactionResult {
     let messages = context.messages().to_vec();
     let entries_before = context.len();
@@ -1492,13 +1510,22 @@ pub fn partial_compact(
         },
     );
 
+    // Match upstream's getCompactUserSummaryMessage: add transcript path
+    // for detail recovery and recentMessagesPreserved notice.
+    let summary_content = format!(
+        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
+         [Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}",
+        tokens_before, direction, summary_text
+    );
+    let summary_content = if let Some(tp) = transcript_path {
+        format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)
+    } else {
+        summary_content
+    };
+    let summary_content = format!("{}\n\nRecent messages are preserved verbatim.\n\nContinue the conversation from where it left off without asking the user any further questions. Resume directly \u{2014} do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.", summary_content);
     let summary = Message::new(
         MessageRole::User,
-        MessageContent::Summary(format!(
-            "[Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}\n\n\
-             Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
-            tokens_before, direction, summary_text
-        )),
+        MessageContent::Summary(summary_content),
     );
 
     let mut new_messages = vec![boundary.clone(), summary.clone()];
@@ -1565,6 +1592,8 @@ pub struct Compactor {
     prev_turn_tokens: Option<usize>,
     /// Threshold for reactive compact (token delta that triggers proactive compaction)
     reactive_compact_threshold: usize,
+    /// Path to transcript file for detail recovery after compaction
+    transcript_path: Option<String>,
 }
 
 impl Compactor {
@@ -1582,6 +1611,7 @@ impl Compactor {
             session_memory: None,
             prev_turn_tokens: None,
             reactive_compact_threshold: 5000, // default: 5000 token delta
+            transcript_path: None,
         }
     }
 
@@ -1607,6 +1637,16 @@ impl Compactor {
     pub fn with_session_memory(mut self, memory: Option<std::sync::Arc<SessionMemory>>) -> Self {
         self.session_memory = memory;
         self
+    }
+
+    /// Set the transcript path for detail recovery after compaction
+    pub fn set_transcript_path(&mut self, path: String) {
+        self.transcript_path = Some(path);
+    }
+
+    /// Get the transcript path as Option<&str> for passing to compact functions
+    pub fn get_transcript_path(&self) -> Option<&str> {
+        self.transcript_path.as_deref()
     }
 
     /// Set the reactive compact threshold (token delta that triggers proactive compaction).
@@ -1784,7 +1824,7 @@ impl Compactor {
         // Try SM-compact first (Feature 1): use session memory as summary, skipping LLM API call.
         // This is the preferred path when session memory is available and has content,
         // following the official Claude Code approach in sessionMemoryCompact.ts.
-        if let Some(sm_stats) = try_sm_compact(context, self.session_memory.as_deref(), CompactTrigger::Auto) {
+        if let Some(sm_stats) = try_sm_compact(context, self.session_memory.as_deref(), CompactTrigger::Auto, self.get_transcript_path()) {
             eprintln!(
                 "[sm-compact] {}: {} -> {} entries, ~{} tokens saved",
                 "auto",
@@ -1829,6 +1869,7 @@ impl Compactor {
                 CompactTrigger::Auto,
                 true,
                 self.last_summary.as_deref(), // A2: iterative summary
+                self.get_transcript_path(),
             ).await {
                 Ok(result) => {
                     let savings = if tokens_before > 0 {

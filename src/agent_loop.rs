@@ -887,6 +887,7 @@ impl AgentLoop {
                 if reactive_triggered {
                     let mut ctx = self.context.write().await;
                     let mut compactor = self.compactor.write().await;
+                    compactor.set_transcript_path(self.transcript_path());
                     let saved_threshold = compactor.get_compact_threshold();
                     compactor.set_compact_threshold(0.0); // Force should_compact to return true
                     let stats = compactor.compact(
@@ -934,6 +935,7 @@ impl AgentLoop {
                     let will_compact = {
                         let mut ctx = self.context.write().await;
                         let mut compactor = self.compactor.write().await;
+                        compactor.set_transcript_path(self.transcript_path());
                         let stats = compactor.compact(
                             &mut ctx,
                             &self.client,
@@ -1616,6 +1618,7 @@ impl AgentLoop {
                             // First attempt: try LLM-driven compaction
                             let mut ctx = self.context.write().await;
                             let mut compactor = self.compactor.write().await;
+                            compactor.set_transcript_path(self.transcript_path());
                             let _ = compactor.compact(
                                 &mut ctx,
                                 &self.client,
@@ -2516,6 +2519,11 @@ impl AgentLoop {
         self.transcript.filename()
     }
 
+    /// Get the transcript path as a String for compaction detail recovery
+    pub fn transcript_path(&self) -> String {
+        self.transcript.path().to_string_lossy().to_string()
+    }
+
     /// Set interrupted flag (from Ctrl+C handler)
     pub fn set_interrupted(&self, value: bool) {
         self.interrupted.store(value, std::sync::atomic::Ordering::SeqCst);
@@ -2706,7 +2714,8 @@ impl AgentLoop {
 
         agent_emit!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
 
-        let result = crate::compact::partial_compact(&mut context, dir, pivot);
+        let tp = self.transcript_path();
+        let result = crate::compact::partial_compact(&mut context, dir, pivot, Some(&tp));
 
         // Mark all tracked items as stale (partial compact removes tool results).
         self.tool_state_tracker.borrow_mut().on_compaction();
