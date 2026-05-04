@@ -409,8 +409,9 @@ fn file_read_offset_beyond_end() {
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("offset".into(), serde_json::json!(100));
     let result = tool.execute(params);
-    assert!(result.is_error);
-    assert!(result.output.contains("beyond end"));
+    // Upstream returns a warning instead of an error (matching Claude Code behavior)
+    assert!(!result.is_error);
+    assert!(result.output.contains("shorter than the provided offset"));
 }
 
 // ============================================================

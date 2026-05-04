@@ -139,9 +139,14 @@ impl Tool for FileReadTool {
             .map(|v| if v <= 0 { total } else { v as usize })
             .unwrap_or(total); // default: read entire file (matching Claude Code official)
 
+        if total == 0 {
+            return ToolResult::ok(
+                "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>".to_string()
+            );
+        }
         if offset > total {
-            return ToolResult::error(format!(
-                "Error: offset {} is beyond end of file ({} lines)",
+            return ToolResult::ok(format!(
+                "<system-reminder>Warning: the file exists but is shorter than the provided offset ({}). The file has {} lines.</system-reminder>",
                 offset, total
             ));
         }
