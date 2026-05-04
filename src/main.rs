@@ -169,9 +169,13 @@ fn main() -> Result<()> {
     let work_task_store = work_task::WorkTaskStore::new_shared();
     tools::register_task_tools(&registry, &work_task_store);
 
-    // Initialize TaskStore for bash background tasks and register bash task tools
+    // Initialize TaskStore for bash background tasks.
+    // Create a shared notification channel so both main and resume sessions
+    // can send task completion notifications to the parent agent loop.
     let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
-    let _notification_rx = tools::register_bash_task_tools(&registry, task_store.clone());
+    let (notification_tx, notification_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notification_tx_arc = Arc::new(notification_tx);
+    tools::register_bash_task_tools_with_tx(&registry, task_store.clone(), Arc::clone(&notification_tx_arc));
 
     // Initialize AgentTaskStore for background sub-agent management
     let agent_task_store = miniclaudecode_rust::tools::agent_store::AgentTaskStore::new_shared();
@@ -192,6 +196,7 @@ fn main() -> Result<()> {
         let context_slot_for_closure = parent_context_slot.clone();
         let use_stream_for_spawn = use_stream;
         let store_for_closure = agent_task_store.clone();
+        let notification_tx_for_spawn = notification_tx_arc.clone();
         let spawn_func: tools::agent_tool::AgentSpawnFunc = std::sync::Arc::new(move |
             prompt: &str,
             subagent_type: &str,
@@ -220,6 +225,7 @@ fn main() -> Result<()> {
                 parent_ctx,
                 use_stream_for_spawn,
                 Some(&store_for_closure),
+                Some(Arc::clone(&notification_tx_for_spawn)),
             )
         });
         tools::register_agent_tool(&registry, spawn_func);
@@ -238,7 +244,7 @@ fn main() -> Result<()> {
         tools::register_mcp_and_skills(&resume_registry, &cfg);
         tools::register_memory_tools(&resume_registry, &session_memory_arc);
         tools::register_task_tools(&resume_registry, &work_task_store);
-        tools::register_bash_task_tools(&resume_registry, task_store);
+        tools::register_bash_task_tools_with_tx(&resume_registry, task_store.clone(), Arc::clone(&notification_tx_arc));
         tools::register_todo_write_tools(&resume_registry, &todo_list);
         tools::register_agent_management_tools(&resume_registry, &agent_task_store);
         tools::register_send_message_tool(&resume_registry, &agent_task_store);
@@ -258,30 +264,34 @@ fn main() -> Result<()> {
         agent_loop::AgentLoop::new(cfg, registry, use_stream, Some(Arc::clone(&todo_list)))?
     };
 
+    // Wire notification channel for bash task/sub-agent completion notifications
+    let mut agent_with_notif = agent;
+    agent_with_notif.set_notification_rx(notification_rx);
+
     // Set parent context for fork mode so the agent tool can access it
     {
         let mut slot = parent_context_slot.blocking_write();
-        *slot = Some(agent.context_arc());
+        *slot = Some(agent_with_notif.context_arc());
     }
 
     // One-shot mode
     if let Some(message) = args.message {
         let prompt = message.join(" ");
-        let result = agent.run(&prompt);
+        let result = agent_with_notif.run(&prompt);
         // When streaming was used, TerminalHandler already displayed the text
         // via stderr (eprint! calls). Printing the same text again to stdout
         // would cause duplication (e.g., "hellohello" when redirected with 2>&1).
         // Only print to stdout when streaming was NOT used (non-streaming mode).
-        let last_was_streaming = agent.last_call_was_streaming.load(std::sync::atomic::Ordering::SeqCst);
+        let last_was_streaming = agent_with_notif.last_call_was_streaming.load(std::sync::atomic::Ordering::SeqCst);
         if !last_was_streaming {
             println!("{}", result);
         }
-        agent.close();
+        agent_with_notif.close();
         return Ok(());
     }
 
     // Interactive REPL
-    run_interactive(agent, work_task_store, agent_task_store, todo_list);
+    run_interactive(agent_with_notif, work_task_store, agent_task_store, todo_list);
     Ok(())
 }
 

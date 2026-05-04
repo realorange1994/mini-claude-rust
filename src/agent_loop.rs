@@ -219,6 +219,10 @@ pub struct AgentLoop {
     tool_state_tracker: std::cell::RefCell<crate::context::ToolStateTracker>,
     /// Structured task list for TodoWrite tool.
     todo_list: Arc<crate::context::TodoList>,
+    /// Notification channel for async task/sub-agent completions.
+    /// Drained at turn boundaries and injected as user messages.
+    /// Wrapped in Mutex to allow draining via shared &self reference.
+    notification_rx: Option<std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
 }
 
 impl AgentLoop {
@@ -321,6 +325,7 @@ impl AgentLoop {
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
+            notification_rx: None,
         })
     }
 
@@ -456,6 +461,7 @@ impl AgentLoop {
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
+            notification_rx: None,
         })
     }
 
@@ -1440,6 +1446,28 @@ impl AgentLoop {
                                     sb.push_str("\n\n");
                                 }
                                 ctx.add_user_message(sb);
+                            }
+                        }
+
+                        // Between-turn drain: inject sub-agent/bash task completion
+                        // notifications into the conversation context. This ensures
+                        // the LLM sees completed task results at the next turn boundary.
+                        if let Some(ref rx_mutex) = self.notification_rx {
+                            if let Ok(mut rx) = rx_mutex.try_lock() {
+                                let mut notifications = Vec::new();
+                                while let Ok(msg) = rx.try_recv() {
+                                    notifications.push(msg);
+                                }
+                                drop(rx); // release lock before acquiring context lock
+                                if !notifications.is_empty() {
+                                    let mut ctx = self.context.write().await;
+                                    let mut sb = String::from("[System: The following background tasks completed while you were working]\n\n");
+                                    for notification in notifications {
+                                        sb.push_str(&notification);
+                                        sb.push_str("\n\n");
+                                    }
+                                    ctx.add_user_message(sb);
+                                }
                             }
                         }
 
@@ -2783,6 +2811,7 @@ impl AgentLoop {
             cancel_ctx: None,
             tool_state_tracker: std::cell::RefCell::new(crate::context::ToolStateTracker::new()),
             todo_list: Arc::new(crate::context::TodoList::new()),
+            notification_rx: None,
         })
     }
 
@@ -2798,6 +2827,12 @@ impl AgentLoop {
     /// and the agent loop checks it at each turn boundary and during HTTP requests.
     pub fn set_cancel_ctx(&mut self, token: CancellationToken) {
         self.cancel_ctx = Some(token);
+    }
+
+    /// Set the notification channel receiver for async task/sub-agent completions.
+    /// Called after construction when the notification channel is created.
+    pub fn set_notification_rx(&mut self, rx: tokio::sync::mpsc::UnboundedReceiver<String>) {
+        self.notification_rx = Some(std::sync::Mutex::new(rx));
     }
 }
 

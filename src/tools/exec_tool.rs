@@ -1579,10 +1579,11 @@ pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> 
 /// Returns (task_id, output_file, error_text).
 pub fn make_bash_bg_callback(
     task_store: crate::task_store::SharedTaskStore,
-    notification_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    notification_tx: std::sync::Arc<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> BashBgTaskCallback {
     Arc::new(move |command: String, working_dir: String| {
-        spawn_background_bash(&task_store, &notification_tx, command, working_dir)
+        let tx = notification_tx.clone();
+        spawn_background_bash(&task_store, tx, command, working_dir)
     })
 }
 
@@ -1592,7 +1593,7 @@ pub fn make_bash_bg_callback(
 /// Returns (task_id, output_file, error_text).
 fn spawn_background_bash(
     task_store: &crate::task_store::SharedTaskStore,
-    notification_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    notification_tx: std::sync::Arc<tokio::sync::mpsc::UnboundedSender<String>>,
     command: String,
     working_dir: String,
 ) -> (String, String, String) {
@@ -1658,7 +1659,7 @@ fn spawn_background_bash(
         .spawn(move || {
             run_background_bash(
                 &task_store_clone,
-                &notification_tx_clone,
+                notification_tx_clone,
                 &task_id_clone,
                 &output_file_clone,
                 &shell_owned,
@@ -1722,7 +1723,7 @@ fn write_output_header(
 /// Uses std::process::Command and writes output to file.
 fn run_background_bash(
     task_store: &crate::task_store::SharedTaskStore,
-    notification_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    notification_tx: std::sync::Arc<tokio::sync::mpsc::UnboundedSender<String>>,
     task_id: &str,
     output_file: &str,
     shell: &str,

@@ -481,6 +481,7 @@ pub fn register_bash_task_tools(
     task_store: crate::task_store::SharedTaskStore,
 ) -> tokio::sync::mpsc::UnboundedReceiver<String> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx_arc = std::sync::Arc::new(tx);
 
     // Register task_stop tool
     registry.register(exec_tool::TaskStopTool::new(
@@ -493,10 +494,32 @@ pub fn register_bash_task_tools(
     ));
 
     // Register exec tool with background callback
-    let callback = exec_tool::make_bash_bg_callback(task_store, tx);
+    let callback = exec_tool::make_bash_bg_callback(task_store, tx_arc);
     registry.register(exec_tool::ExecTool::with_background_callback(callback));
 
     rx
+}
+
+/// Register bash task tools with an existing notification sender (for resume sessions).
+pub fn register_bash_task_tools_with_tx(
+    registry: &Registry,
+    task_store: crate::task_store::SharedTaskStore,
+    tx: std::sync::Arc<tokio::sync::mpsc::UnboundedSender<String>>,
+) {
+    // Register task_stop tool
+    registry.register(exec_tool::TaskStopTool::new(
+        exec_tool::make_task_stop_func(Arc::clone(&task_store)),
+    ));
+
+    // Register task_output tool
+    registry.register(exec_tool::TaskOutputTool::new(
+        exec_tool::make_task_output_func(Arc::clone(&task_store)),
+    ));
+
+    // Register exec tool with background callback
+    let tx_clone = tx.clone();
+    let callback = exec_tool::make_bash_bg_callback(task_store, tx_clone);
+    registry.register(exec_tool::ExecTool::with_background_callback(callback));
 }
 
 // ─── Shared utility functions ───

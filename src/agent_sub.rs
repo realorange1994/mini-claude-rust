@@ -391,6 +391,7 @@ pub fn spawn_sub_agent_sync(
     parent_context: Option<Arc<RwLock<ConversationContext>>>,
     _parent_use_stream: bool, // not used for background agents
     agent_task_store: Option<&SharedAgentTaskStore>,
+    notification_tx: Option<Arc<tokio::sync::mpsc::UnboundedSender<String>>>,
 ) -> (String, String, String, String, usize, u64) {
     let start = std::time::Instant::now();
 
@@ -450,6 +451,7 @@ pub fn spawn_sub_agent_sync(
     // Clones to move into the thread (so we can still use task_id/task_store_clone after spawn)
     let task_id_for_spawn = task_id.clone();
     let task_store_for_spawn = task_store_clone.clone();
+    let notification_tx_for_child = notification_tx.map(|tx| Arc::clone(&tx));
 
     // Capture parent entries for fork mode before spawning the thread
     let parent_entries: Vec<Message> = if inherit_context {
@@ -568,9 +570,36 @@ pub fn spawn_sub_agent_sync(
                         }
                         store.update_stats(tid, *tools_used as u32, *duration_ms);
                         store.complete(tid);
+                        // Send sub-agent completion notification to parent agent
+                        if let Some(ref tx) = notification_tx_for_child {
+                            let output_file = format!(".claude/sub-agents/{}_output.txt", tid);
+                            let notification = make_agent_notification(
+                                tid,
+                                "completed",
+                                final_result,
+                                &output_file,
+                                "",
+                                *tools_used,
+                                *duration_ms,
+                            );
+                            let _ = tx.send(notification);
+                        }
                     }
                     Err(e) => {
                         store.fail(tid, e);
+                        // Send sub-agent failure notification to parent agent
+                        if let Some(ref tx) = notification_tx_for_child {
+                            let notification = make_agent_notification(
+                                tid,
+                                "failed",
+                                e,
+                                "",
+                                "",
+                                0,
+                                start.elapsed().as_millis() as u64,
+                            );
+                            let _ = tx.send(notification);
+                        }
                     }
                 }
             }
@@ -598,6 +627,39 @@ pub fn spawn_sub_agent_sync(
         0, // tools_used (not known yet)
         start.elapsed().as_millis() as u64,
     )
+}
+
+/// Build an XML agent notification string (matching Go's EnqueueAgentNotification format).
+fn make_agent_notification(
+    agent_id: &str,
+    status: &str,
+    result: &str,
+    output_file: &str,
+    transcript_path: &str,
+    tools_used: usize,
+    duration_ms: u64,
+) -> String {
+    let result_escaped = escape_xml(result);
+    format!(
+        r#"<task-notification>
+<agentId>{}</agentId>
+<status>{}</status>
+<result>{}</result>
+<output_file>{}</output_file>
+<transcript_path>{}</transcript_path>
+<usage><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>
+</task-notification>"#,
+        agent_id, status, result_escaped, output_file, transcript_path, tools_used, duration_ms
+    )
+}
+
+/// Escape special characters for XML.
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 // ─── Agent type prompt modifiers ──────────────────────────────────────────────
