@@ -926,6 +926,10 @@ pub async fn process_sse_events(
     if !tools.is_empty() {
         payload.insert("tools".to_string(), serde_json::json!(tools));
     }
+    // Serialize once before the retry loop — serde_json::Map serializes deterministically
+    // and all values are serializable, so this cannot fail.
+    let body_bytes = serde_json::to_string(&payload)
+        .expect("payload should always be serializable");
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
     let mut retry = 0;
@@ -963,7 +967,7 @@ pub async fn process_sse_events(
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream")
                 .header("anthropic-version", "2023-06-01")
-                .body(serde_json::to_string(&payload).unwrap())
+                .body(body_bytes.clone())
                 .send() => {
                     match resp {
                         Ok(r) => r,
