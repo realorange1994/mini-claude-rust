@@ -212,34 +212,30 @@ pub fn get_git_context_for_prompt() -> String {
 fn is_dangerous_git_operation(operation: &str, flags: &[String]) -> Option<String> {
     match operation {
         "push" => {
-            if flags.iter().any(|f| f == "--force" || f == "-f" || f == "--force-with-lease") {
+            if flags.iter().any(|f| f == "--force" || f == "-f") {
                 return Some("Force push is not allowed: it can overwrite remote history and cause data loss".to_string());
             }
+            // --force-with-lease is allowed (safer variant that protects against overwriting others' work)
         }
         "reset" => {
-            if flags.iter().any(|f| f == "--hard" || f == "--merge") {
-                return Some(format!("git reset {} is not allowed: it discards uncommitted changes permanently", flags.iter().find(|f| *f == "--hard" || *f == "--merge").unwrap()));
+            if flags.iter().any(|f| f == "--hard") {
+                return Some("git reset --hard is not allowed: it discards uncommitted changes permanently".to_string());
             }
+            // --merge is allowed (upstream only warns)
         }
         "clean" => {
-            // Block any clean with force/delete flags
-            if flags.iter().any(|f| f == "-f" || f == "-d" || f == "-x" || f == "-df" || f == "-xdf" || f == "-fd") {
-                return Some("git clean with force/delete flags is not allowed: it permanently removes untracked files".to_string());
+            // Block any clean with force flag
+            if flags.iter().any(|f| f == "-f" || f == "--force") {
+                return Some("git clean with force flag is not allowed: it permanently removes untracked files".to_string());
             }
+            // -d (remove untracked directories) and -x (remove ignored files) are allowed
         }
-        "checkout" => {
-            if flags.iter().any(|f| f == "--force" || f == "-f") {
-                return Some("git checkout --force is not allowed: it discards local changes".to_string());
-            }
-        }
-        "commit" => {
-            if flags.iter().any(|f| f == "--amend") {
-                return Some("git commit --amend is not allowed: it rewrites git history".to_string());
-            }
-        }
-        "rebase" => {
-            if flags.iter().any(|f| f == "--interactive" || f == "-i") {
-                return Some("Interactive rebase is not allowed: it rewrites git history".to_string());
+        // checkout --force: upstream only warns, not blocked
+        // commit --amend: upstream only warns, not blocked
+        // rebase --interactive: upstream only warns, not blocked
+        "branch" => {
+            if flags.iter().any(|f| f == "-D") {
+                return Some("git branch -D is not allowed: it force-deletes a branch".to_string());
             }
         }
         _ => {}
@@ -251,23 +247,27 @@ fn is_dangerous_git_operation(operation: &str, flags: &[String]) -> Option<Strin
 /// Returns Some(error_message) if a flag is not allowed, None if all OK.
 fn validate_git_flags(operation: &str, flags: &[String]) -> Option<String> {
     let allowed: Vec<&str> = match operation {
-        "status" => vec![],
-        "diff" => vec!["--cached", "--staged", "--stat", "--name-only", "--name-status", "--stat-width"],
-        "log" => vec!["--oneline", "--graph", "--all", "--decorate", "--simplify-by-decoration"],
-        "push" => vec!["--set-upstream", "-u", "--dry-run", "--verbose"],
-        "pull" => vec!["--rebase", "--ff-only", "--no-ff", "--squash", "--verbose"],
-        "commit" => vec!["--amend", "--no-edit", "--allow-empty", "--signoff", "-a"],
-        "branch" => vec!["-d", "-D", "-m", "-M", "-a", "-r", "--list", "-v", "--merged", "--no-merged"],
-        "checkout" => vec!["-b", "-B", "--detach"],
-        "merge" => vec!["--no-ff", "--squash", "--abort", "--continue", "--no-commit"],
-        "rebase" => vec!["--interactive", "-i", "--continue", "--abort", "--skip"],
-        "stash" => vec!["-u", "--include-untracked", "--all", "--keep-index"],
-        "clean" => vec!["--dry-run"],
-        "reset" => vec!["--soft", "--mixed", "--keep"],
-        "tag" => vec!["-d", "-a", "-m", "-s", "-l", "--list", "--sort"],
-        "fetch" => vec!["--all", "--prune", "--tags", "--dry-run"],
-        "revert" => vec!["--no-commit", "--continue", "--abort", "--mainline"],
-        "cherry-pick" => vec!["--continue", "--abort", "--skip", "--no-commit", "--mainline"],
+        "status" => vec!["--porcelain", "-s", "-b", "--short", "--branch", "-u", "--ignored"],
+        "diff" => vec!["--cached", "--staged", "--stat", "--name-only", "--name-status", "--stat-width", "--stat-name-width", "--numstat", "--color", "--no-color", "-w", "--ignore-space-change", "-b", "--check", "-U", "--unified", "-M", "--detect-rename", "--follow", "--relative"],
+        "log" => vec!["--oneline", "--graph", "--all", "--decorate", "--simplify-by-decoration", "-n", "--max-count", "--since", "--until", "--author", "--grep", "--all-match", "-p", "--stat", "--name-only", "--name-status", "-10", "--format"],
+        "push" => vec!["--set-upstream", "-u", "--dry-run", "--verbose", "--force-with-lease", "--force", "--force-if-includes", "--tags", "--delete", "-f"],
+        "pull" => vec!["--rebase", "--ff-only", "--no-ff", "--squash", "--verbose", "--no-commit", "-X"],
+        "commit" => vec!["--amend", "--no-edit", "--allow-empty", "--signoff", "-a", "-m", "--message", "-s", "--no-verify", "--author"],
+        "branch" => vec!["-d", "-D", "-m", "-M", "-a", "-r", "--list", "-v", "--merged", "--no-merged", "--show-current"],
+        "checkout" => vec!["-b", "-B", "--detach", "--force", "-f", "--"],
+        "merge" => vec!["--no-ff", "--squash", "--abort", "--continue", "--no-commit", "--no-verify", "--edit", "-m"],
+        "rebase" => vec!["--interactive", "-i", "--continue", "--abort", "--skip", "--onto", "--autosquash", "--autostash"],
+        "stash" => vec!["-u", "--include-untracked", "--all", "--keep-index", "push", "pop", "apply", "list", "show", "drop", "clear", "save", "-p", "--index"],
+        "clean" => vec!["--dry-run", "-f", "--force", "-d", "-x", "-X", "-n"],
+        "reset" => vec!["--soft", "--mixed", "--hard", "--merge", "--keep", "--"],
+        "tag" => vec!["-d", "-a", "-m", "-s", "-l", "--list", "--sort", "-f"],
+        "fetch" => vec!["--all", "--prune", "--tags", "--dry-run", "--verbose", "-p"],
+        "revert" => vec!["--no-commit", "--continue", "--abort", "--skip", "--mainline", "-m"],
+        "cherry-pick" => vec!["--continue", "--abort", "--skip", "--no-commit", "--mainline", "-m", "-x"],
+        "reflog" => vec!["--all", "-n", "--date"],
+        "ls-files" => vec!["--cached", "--deleted", "--modified", "--others", "--ignored", "--stage", "--full-name", "-s", "-v"],
+        "ls-tree" => vec!["--name-only", "-r", "-l", "--full-name"],
+        "worktree" => vec!["list", "add", "remove", "prune", "lock", "unlock", "--force"],
         _ => vec![],
     };
 
