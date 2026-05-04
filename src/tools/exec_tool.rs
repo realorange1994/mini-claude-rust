@@ -459,6 +459,10 @@ fn is_dangerous_deletion_path(path: &str) -> Option<String> {
             return Some(format!("Dangerous path '{}' would be deleted", path));
         }
     }
+    // Block bare wildcard deletion
+    if normalized == "*" || normalized == "*/*" {
+        return Some("Bare wildcard deletion is blocked".into());
+    }
     if normalized.contains('*') || normalized.contains('?') {
         if normalized.starts_with('/') || normalized.starts_with('*') {
             return Some(format!("Glob pattern '{}' could match dangerous paths", path));
@@ -467,17 +471,26 @@ fn is_dangerous_deletion_path(path: &str) -> Option<String> {
             return Some(format!("Pattern '{}' matches home directory", path));
         }
     }
+    // Block tilde variants: ~user, ~+, ~-, ~N (bash tilde expansion)
+    if normalized.starts_with('~') && normalized != "~" && !normalized.starts_with("~/") {
+        return Some(format!("Tilde expansion '{}' could resolve to another home directory", path));
+    }
     if contains_path_escape(path) {
         return Some(format!("Path '{}' contains traversal that could escape", path));
     }
+    // Block ANY Windows drive root child (C:\X, D:\foo, etc.)
     if normalized.len() >= 2 {
         let first_char = normalized.chars().next().unwrap();
         if normalized.chars().nth(1) == Some(':') && first_char.is_alphabetic() {
-            let drive_upper = normalized[..2].to_uppercase();
-            if drive_upper.starts_with('C') || drive_upper.starts_with('D') || drive_upper.starts_with('E') {
-                let rest = &normalized[2..];
-                if rest.is_empty() || rest == "\\" || rest == "/" {
-                    return Some(format!("Dangerous Windows path '{}' would be deleted", path));
+            let rest = &normalized[2..];
+            if rest.is_empty() || rest == "\\" || rest == "/" {
+                return Some(format!("Dangerous Windows path '{}' would be deleted", path));
+            }
+            // Block any direct child of a drive root (C:\X, D:\Y)
+            if rest.starts_with('\\') || rest.starts_with('/') {
+                let child = &rest[1..];
+                if !child.is_empty() && !child.contains('\\') && !child.contains('/') {
+                    return Some(format!("Dangerous Windows drive root child '{}' would be deleted", path));
                 }
             }
         }
