@@ -1,17 +1,24 @@
 //! FileWriteTool - Write content to a file
 
-use crate::tools::{Tool, ToolResult, expand_path, is_unc_path};
+use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, FileReadInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, RwLock};
 
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
-pub struct FileWriteTool;
+pub struct FileWriteTool {
+    files_read: Option<Arc<RwLock<HashMap<String, FileReadInfo>>>>,
+}
 
 impl FileWriteTool {
     pub fn new() -> Self {
-        Self
+        Self { files_read: None }
+    }
+
+    pub fn with_files_read(files_read: Arc<RwLock<HashMap<String, FileReadInfo>>>) -> Self {
+        Self { files_read: Some(files_read) }
     }
 }
 
@@ -23,7 +30,9 @@ impl Default for FileWriteTool {
 
 impl Clone for FileWriteTool {
     fn clone(&self) -> Self {
-        Self
+        Self {
+            files_read: self.files_read.clone(),
+        }
     }
 }
 
@@ -69,6 +78,33 @@ impl Tool for FileWriteTool {
         // SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
         if is_unc_path(&path) {
             return ToolResult::error(format!("Error: UNC path access deferred: {}", path.display()));
+        }
+
+        // Read-before-write validation and concurrent modification detection.
+        if let Some(files_read) = &self.files_read {
+            let path_str = path.to_string_lossy().to_string();
+            if path.exists() {
+                let fr = files_read.read().unwrap();
+                if let Some(info) = fr.get(&path_str) {
+                    // File was read — check for concurrent modification
+                    if let Ok(meta) = fs::metadata(&path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified != info.mtime {
+                                drop(fr);
+                                return ToolResult::error(
+                                    "Error: file has been modified since read, either by the user or a linter. Read it again before attempting to write it.".to_string()
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    // File was not read first
+                    drop(fr);
+                    return ToolResult::error(
+                        "Error: file has not been read yet. Read it first before writing to it.".to_string()
+                    );
+                }
+            }
         }
 
         let content = match params.get("content").and_then(|v| v.as_str()) {

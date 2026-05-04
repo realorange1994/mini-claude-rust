@@ -78,7 +78,7 @@ fn permission_gate_auto_allows_everything() {
 
     let registry = Registry::new();
     registry.register(ExecTool::new());
-    registry.register(FileWriteTool);
+    registry.register(FileWriteTool::new());
 
     let tools = registry.all_tools();
 
@@ -124,8 +124,8 @@ fn permission_gate_plan_blocks_write() {
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
-    registry.register(FileWriteTool);
-    registry.register(FileEditTool);
+    registry.register(FileWriteTool::new());
+    registry.register(FileEditTool::new());
     registry.register(ExecTool::new());
 
     let tools = registry.all_tools();

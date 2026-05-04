@@ -1,15 +1,22 @@
 //! FileEditTool - Edit a file by replaced exact strings
 
-use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, restore_crlf};
+use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, restore_crlf, FileReadInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, RwLock};
 
-pub struct FileEditTool;
+pub struct FileEditTool {
+    files_read: Option<Arc<RwLock<HashMap<String, FileReadInfo>>>>,
+}
 
 impl FileEditTool {
     pub fn new() -> Self {
-        Self
+        Self { files_read: None }
+    }
+
+    pub fn with_files_read(files_read: Arc<RwLock<HashMap<String, FileReadInfo>>>) -> Self {
+        Self { files_read: Some(files_read) }
     }
 }
 
@@ -21,7 +28,9 @@ impl Default for FileEditTool {
 
 impl Clone for FileEditTool {
     fn clone(&self) -> Self {
-        Self
+        Self {
+            files_read: self.files_read.clone(),
+        }
     }
 }
 
@@ -79,6 +88,31 @@ impl Tool for FileEditTool {
         // SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
         if is_unc_path(&path) {
             return ToolResult::error(format!("Error: UNC path access deferred: {}", path.display()));
+        }
+
+        // Read-before-write validation and concurrent modification detection.
+        if let Some(files_read) = &self.files_read {
+            let path_str = path.to_string_lossy().to_string();
+            if path.exists() {
+                let fr = files_read.read().unwrap();
+                if let Some(info) = fr.get(&path_str) {
+                    if let Ok(meta) = fs::metadata(&path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified != info.mtime {
+                                drop(fr);
+                                return ToolResult::error(
+                                    "Error: file has been modified since read, either by the user or a linter. Read it again before attempting to edit.".to_string()
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    drop(fr);
+                    return ToolResult::error(
+                        "Error: file has not been read yet. Read it first before editing it.".to_string()
+                    );
+                }
+            }
         }
 
         let old_str = params

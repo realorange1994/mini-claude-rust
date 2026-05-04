@@ -131,7 +131,7 @@ fn registry_get_unknown() {
 fn registry_all_tools() {
     let reg = Registry::new();
     reg.register(FileReadTool);
-    reg.register(FileWriteTool);
+    reg.register(FileWriteTool::new());
     let tools = reg.all_tools();
     assert_eq!(tools.len(), 2);
 }
@@ -419,7 +419,7 @@ fn file_read_offset_beyond_end() {
 
 #[test]
 fn file_write_tool_name_and_schema() {
-    let tool = FileWriteTool;
+    let tool = FileWriteTool::new();
     assert_eq!(tool.name(), "write_file");
     let schema = tool.input_schema();
     let required = schema.get("required").unwrap().as_array().unwrap();
@@ -432,7 +432,7 @@ fn file_write_success() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("output.txt");
 
-    let tool = FileWriteTool;
+    let tool = FileWriteTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("content".into(), serde_json::json!("hello world"));
@@ -450,7 +450,7 @@ fn file_write_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("sub").join("dir").join("file.txt");
 
-    let tool = FileWriteTool;
+    let tool = FileWriteTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("content".into(), serde_json::json!("content"));
@@ -465,7 +465,7 @@ fn file_write_overwrites() {
     let file = dir.path().join("overwrite.txt");
     fs::write(&file, "old content").unwrap();
 
-    let tool = FileWriteTool;
+    let tool = FileWriteTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("content".into(), serde_json::json!("new content"));
@@ -476,7 +476,7 @@ fn file_write_overwrites() {
 
 #[test]
 fn file_write_missing_content() {
-    let tool = FileWriteTool;
+    let tool = FileWriteTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!("/tmp/test.txt"));
     let result = tool.execute(params);
@@ -493,7 +493,7 @@ fn file_edit_success() {
     let file = dir.path().join("edit.txt");
     fs::write(&file, "hello world\nfoo bar").unwrap();
 
-    let tool = FileEditTool;
+    let tool = FileEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("old_string".into(), serde_json::json!("hello"));
@@ -510,7 +510,7 @@ fn file_edit_not_found() {
     let file = dir.path().join("edit.txt");
     fs::write(&file, "some content").unwrap();
 
-    let tool = FileEditTool;
+    let tool = FileEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("old_string".into(), serde_json::json!("not there"));
@@ -526,7 +526,7 @@ fn file_edit_multiple_without_replace_all() {
     let file = dir.path().join("edit.txt");
     fs::write(&file, "foo\nfoo\nfoo").unwrap();
 
-    let tool = FileEditTool;
+    let tool = FileEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("old_string".into(), serde_json::json!("foo"));
@@ -542,7 +542,7 @@ fn file_edit_replace_all() {
     let file = dir.path().join("edit.txt");
     fs::write(&file, "foo\nfoo\nfoo").unwrap();
 
-    let tool = FileEditTool;
+    let tool = FileEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("old_string".into(), serde_json::json!("foo"));
@@ -556,7 +556,7 @@ fn file_edit_replace_all() {
 
 #[test]
 fn file_edit_missing_old_string() {
-    let tool = FileEditTool;
+    let tool = FileEditTool::new();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("existing.txt");
     fs::write(&file, "existing content").unwrap();

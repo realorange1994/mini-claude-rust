@@ -173,7 +173,7 @@ pub trait Tool: Send + Sync {
 
 /// FileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
 #[derive(Clone)]
-struct FileReadInfo {
+pub struct FileReadInfo {
     mtime: SystemTime,
     read_time: SystemTime,
 }
@@ -312,6 +312,12 @@ impl Registry {
         self.files_read.write().unwrap().clear();
     }
 
+    /// Returns a handle to the files_read map for tools that need
+    /// read-before-write validation (FileWriteTool, FileEditTool).
+    pub fn files_read_handle(&self) -> Arc<RwLock<HashMap<String, FileReadInfo>>> {
+        Arc::clone(&self.files_read)
+    }
+
     /// Returns paths of recently read files, sorted by most recently read first.
     /// Returns up to max_files paths. Used by post-compact recovery to re-inject
     /// file content after compaction.
@@ -352,8 +358,8 @@ impl Default for Registry {
 pub fn register_builtin_tools(registry: &Registry) {
     registry.register(exec_tool::ExecTool::new());
     registry.register(file_read::FileReadTool);
-    registry.register(file_write::FileWriteTool);
-    registry.register(file_edit::FileEditTool);
+    registry.register(FileWriteTool::with_files_read(registry.files_read_handle()));
+    registry.register(FileEditTool::with_files_read(registry.files_read_handle()));
     registry.register(multi_edit::MultiEditTool);
     registry.register(fileops::FileOpsTool);
     registry.register(glob_tool::GlobTool);
