@@ -622,8 +622,8 @@ fn parse_file_target(value: &str) -> (String, Option<usize>, Option<usize>) {
     let line_re = Regex::new(r"^(.+):(\d+)(?:-(\d+))?$").expect("invalid line range regex");
 
     if let Some(cap) = line_re.captures(value) {
-        let path = cap.get(1).unwrap().as_str().to_string();
-        let start: usize = cap.get(2).unwrap().as_str().parse().unwrap_or(1);
+        let path = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let start: usize = cap.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
         let end = cap.get(3).and_then(|m| m.as_str().parse::<usize>().ok());
 
         let looks_like_file = path.contains('.')
@@ -680,15 +680,15 @@ fn extract_html_content(html: &str) -> String {
     // Try to extract <article>, <main>, or <body> content
     let article_re = Regex::new(r"(?is)<article[^>]*>(.*?)</article>").unwrap();
     if let Some(cap) = article_re.captures(&text) {
-        text = cap.get(1).unwrap().as_str().to_string();
+        text = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
     } else {
         let main_re = Regex::new(r"(?is)<main[^>]*>(.*?)</main>").unwrap();
         if let Some(cap) = main_re.captures(&text) {
-            text = cap.get(1).unwrap().as_str().to_string();
+            text = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
         } else {
             let body_re = Regex::new(r"(?is)<body[^>]*>(.*?)</body>").unwrap();
             if let Some(cap) = body_re.captures(&text) {
-                text = cap.get(1).unwrap().as_str().to_string();
+                text = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
             }
         }
     }
