@@ -1103,14 +1103,23 @@ impl ExecTool {
             }
         });
 
-        let output_result = Command::new(shell)
-            .arg(flag)
+        // Build command with platform-specific process group setup
+        // On Unix, set process group so we can kill the entire tree on timeout (tree-kill).
+        // On Windows, process groups are not used — child.kill() terminates the process.
+        let mut cmd = Command::new(shell);
+        cmd.arg(flag)
             .arg(command)
             .current_dir(&working_dir)
             .stdin(std::process::Stdio::null())  // Isolate from REPL stdin
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
+        let output_result = cmd.spawn();
 
         let mut child = match output_result {
             Ok(c) => c,
@@ -1146,6 +1155,15 @@ impl ExecTool {
                 Ok(Some(_)) => break false,
                 Ok(None) => {
                     if std::time::Instant::now().duration_since(start) >= timeout {
+                        // Kill the entire process group (matching upstream's tree-kill)
+                        let pid = child.id();
+                        #[cfg(unix)]
+                        unsafe {
+                            // Negative PID = process group. Cast to i32 for Unix kill.
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                        }
+                        #[cfg(windows)]
+                        let _ = child.kill(); // Windows: kill() already terminates the process tree
                         let _ = child.kill();
                         let _ = child.wait();
                         break true;

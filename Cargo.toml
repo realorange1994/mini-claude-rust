@@ -73,6 +73,9 @@ ctrlc = "3.4"
 # Cancellation token
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# Low-level Unix process group kill
+libc = "0.2"
+
 # Home directory detection
 dirs = "5"
 
