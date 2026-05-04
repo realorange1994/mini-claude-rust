@@ -339,7 +339,7 @@ impl Registry {
 }
 
 /// Normalize a file path for consistent comparison (lowercase on Windows, forward slashes)
-fn normalize_file_path(path: &str) -> String {
+pub(crate) fn normalize_file_path(path: &str) -> String {
     let p = path.replace('\\', "/");
     #[cfg(target_os = "windows")]
     let normalized = p.to_lowercase();

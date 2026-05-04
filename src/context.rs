@@ -774,12 +774,20 @@ impl ConversationContext {
                         (MessageContent::Text(_), MessageContent::Text(_))
                         | (MessageContent::ToolUseBlocks(_), MessageContent::ToolUseBlocks(_))
                         | (MessageContent::ToolResultBlocks(_), MessageContent::ToolResultBlocks(_))
-                        | (MessageContent::Summary(_), MessageContent::Summary(_)) => true,
-                        // Text-compatible types: safe to merge
+                        | (MessageContent::Summary(_), MessageContent::Summary(_))
+                        | (MessageContent::Attachment(_), MessageContent::Attachment(_)) => true,
+                        // Text-compatible types (all user-role non-tool types): safe to merge.
+                        // This prevents multiple consecutive user-role messages after compaction,
+                        // which the Anthropic API rejects as error 2013.
                         (MessageContent::Text(_), MessageContent::Summary(_))
-                        | (MessageContent::Summary(_), MessageContent::Text(_)) => true,
-                        // Type mismatch: NEVER merge -- ToolResultBlocks must stay intact
-                        // to preserve tool_use/tool_result pairing (API 2013 error otherwise)
+                        | (MessageContent::Summary(_), MessageContent::Text(_))
+                        | (MessageContent::Text(_), MessageContent::Attachment(_))
+                        | (MessageContent::Attachment(_), MessageContent::Text(_))
+                        | (MessageContent::Summary(_), MessageContent::Attachment(_))
+                        | (MessageContent::Attachment(_), MessageContent::Summary(_)) => true,
+                        // ToolResultBlocks: never merge with different types -- doing so
+                        // destroys the tool_use/tool_result pairing (API 2013 error)
+                        // ToolUseBlocks: keep separate when mixed with non-tool types
                         _ => false,
                     };
 

@@ -1,6 +1,6 @@
 //! FileEditTool - Edit a file by replaced exact strings
 
-use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, restore_crlf, FileReadInfo};
+use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, normalize_file_path, restore_crlf, FileReadInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -92,7 +92,7 @@ impl Tool for FileEditTool {
 
         // Read-before-write validation and concurrent modification detection.
         if let Some(files_read) = &self.files_read {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = normalize_file_path(&path.to_string_lossy());
             if path.exists() {
                 let fr = files_read.read().unwrap();
                 if let Some(info) = fr.get(&path_str) {

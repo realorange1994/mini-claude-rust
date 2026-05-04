@@ -849,7 +849,7 @@ pub fn redact_sensitive_text(text: &str) -> String {
                 if let Some(end_offset) = find_closing_quote(&after_colon[1..]) {
                     let value_start = start + json_key.len()
                         + (after_key.len() - after_key.trim_start().len());
-                    let value_end = value_start + 1 + 1 + end_offset; // colon + space + closing quote
+                    let value_end = value_start + 1 + end_offset; // opening quote + end_offset of closing quote
                     let replacement = ": \"[REDACTED]\"";
                     result.replace_range(value_start..=value_end, replacement);
                     // Advance past the replacement to avoid re-matching the same key
