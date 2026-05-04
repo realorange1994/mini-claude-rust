@@ -2538,20 +2538,25 @@ mod tests {
         let result = is_dangerous_git_operation("reset", &["--soft".to_string()]);
         assert!(result.is_none(), "reset --soft should not be dangerous");
 
-        // clean -fd is dangerous
-        let result = is_dangerous_git_operation("clean", &["-f".to_string(), "-d".to_string()]);
-        assert!(result.is_some(), "clean -fd should be dangerous");
-        assert!(result.unwrap().contains("clean"), "Reason should mention clean");
+        // clean -f is dangerous (but -d and -x are allowed per upstream)
+        let result = is_dangerous_git_operation("clean", &["-f".to_string()]);
+        assert!(result.is_some(), "clean -f should be dangerous");
 
-        // commit --amend is dangerous
+        // branch -D is dangerous
+        let result = is_dangerous_git_operation("branch", &["-D".to_string()]);
+        assert!(result.is_some(), "branch -D should be dangerous");
+
+        // checkout --force is allowed (upstream only warns)
+        let result = is_dangerous_git_operation("checkout", &["--force".to_string()]);
+        assert!(result.is_none(), "checkout --force should not be dangerous");
+
+        // commit --amend is allowed (upstream only warns)
         let result = is_dangerous_git_operation("commit", &["--amend".to_string()]);
-        assert!(result.is_some(), "commit --amend should be dangerous");
-        assert!(result.unwrap().contains("amend"), "Reason should mention amend");
+        assert!(result.is_none(), "commit --amend should not be dangerous");
 
-        // rebase -i is dangerous
+        // rebase --interactive is allowed (upstream only warns)
         let result = is_dangerous_git_operation("rebase", &["--interactive".to_string()]);
-        assert!(result.is_some(), "rebase --interactive should be dangerous");
-        assert!(result.unwrap().contains("rebase"), "Reason should mention rebase");
+        assert!(result.is_none(), "rebase --interactive should not be dangerous");
 
         // Safe operations
         assert!(is_dangerous_git_operation("status", &[]).is_none(), "status should not be dangerous");
@@ -2571,13 +2576,18 @@ mod tests {
 
         // Valid flags for push
         assert!(validate_git_flags("push", &["--set-upstream".to_string()]).is_none());
+        assert!(validate_git_flags("push", &["--delete".to_string()]).is_none());
 
-        // Invalid flag for push
-        let err = validate_git_flags("push", &["--delete".to_string()]);
-        assert!(err.is_some(), "Invalid push flag should be rejected");
+        // Valid flags for status
+        assert!(validate_git_flags("status", &["--short".to_string()]).is_none());
+        assert!(validate_git_flags("status", &["--porcelain".to_string()]).is_none());
+
+        // Invalid flag for status
+        let err = validate_git_flags("status", &["--invalid-flag".to_string()]);
+        assert!(err.is_some(), "Invalid status flag should be rejected");
 
         // No validation for unlisted operations (accept all)
-        assert!(validate_git_flags("status", &["--anything".to_string()]).is_none());
+        assert!(validate_git_flags("show", &["--anything".to_string()]).is_none());
     }
 
     #[test]
@@ -2687,8 +2697,9 @@ mod tests {
         params.insert("operation".to_string(), Value::String("commit".to_string()));
         params.insert("flags".to_string(), Value::Array(vec![Value::String("--amend".to_string())]));
 
+        // commit --amend is allowed (upstream only warns, doesn't block)
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git commit --amend should be permission-denied");
+        assert!(result.is_none(), "git commit --amend should be allowed");
     }
 
     #[test]
@@ -2698,8 +2709,9 @@ mod tests {
         params.insert("operation".to_string(), Value::String("rebase".to_string()));
         params.insert("flags".to_string(), Value::Array(vec![Value::String("--interactive".to_string())]));
 
+        // rebase --interactive is allowed (upstream only warns, doesn't block)
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git rebase --interactive should be permission-denied");
+        assert!(result.is_none(), "git rebase --interactive should be allowed");
     }
 
     #[test]
@@ -2709,8 +2721,9 @@ mod tests {
         params.insert("operation".to_string(), Value::String("push".to_string()));
         params.insert("flags".to_string(), Value::Array(vec![Value::String("--force-with-lease".to_string())]));
 
+        // --force-with-lease is allowed (safer variant)
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git push --force-with-lease should be permission-denied");
+        assert!(result.is_none(), "git push --force-with-lease should be allowed");
     }
 
     #[test]
