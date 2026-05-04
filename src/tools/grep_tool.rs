@@ -505,34 +505,33 @@ fn go_search_content(
         let data = match fs::read_to_string(fp) { Ok(d) => d, Err(_) => continue };
         let lines: Vec<&str> = data.split('\n').collect();
         for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            if !re.is_match(trimmed) { continue; }
+            if !re.is_match(line) { continue; }
             total_match_count += 1;
             if skipped < offset { skipped += 1; continue; }
             let rel_path = fp.strip_prefix(&cwd).unwrap_or(fp).to_string_lossy().to_string();
 
             if count_matches {
-                let count = re.find_iter(trimmed).count();
+                let count = re.find_iter(line).count();
                 if ctx_lines > 0 {
                     let start = i.saturating_sub(ctx_lines);
                     let end = (i + ctx_lines).min(lines.len() - 1);
                     for j in start..=end {
                         let prefix = if j == i { ">>> " } else { "    " };
-                        matches.push(format!("{}:{}: {}{}", rel_path, j + 1, prefix, truncate_line(lines[j].trim())));
+                        matches.push(format!("{}:{}: {}{}", rel_path, j + 1, prefix, truncate_line(lines[j])));
                     }
                     matches.push(format!("  [{} match(es) on this line]", count));
                 } else {
-                    matches.push(format!("{}:{}:[{}] {}", rel_path, i + 1, count, truncate_line(trimmed)));
+                    matches.push(format!("{}:{}:[{}] {}", rel_path, i + 1, count, truncate_line(line)));
                 }
             } else if ctx_lines > 0 {
                 let start = i.saturating_sub(ctx_lines);
                 let end = (i + ctx_lines).min(lines.len() - 1);
                 for j in start..=end {
                     let prefix = if j == i { ">>> " } else { "    " };
-                    matches.push(format!("{}:{}: {}{}", rel_path, j + 1, prefix, truncate_line(lines[j].trim())));
+                    matches.push(format!("{}:{}: {}{}", rel_path, j + 1, prefix, truncate_line(lines[j])));
                 }
             } else {
-                matches.push(format!("{}:{}:{}", rel_path, i + 1, truncate_line(trimmed)));
+                matches.push(format!("{}:{}:{}", rel_path, i + 1, truncate_line(line)));
             }
             if matches.len() >= head_limit {
                 matches.push(format!("(showing first {} matches, truncated)", head_limit));
