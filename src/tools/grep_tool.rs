@@ -474,7 +474,7 @@ fn go_search(
     let files_searched = files.len();
     match output_mode {
         "files_with_matches" => go_search_files_only(&re, &files, head_limit, offset, files_searched),
-        "count" => go_search_count(&re, &files, files_searched),
+        "count" => go_search_count(&re, &files, head_limit, offset, files_searched),
         _ => go_search_content(&re, &files, head_limit, offset, ctx_lines, count_matches, files_searched),
     }
 }
@@ -570,7 +570,7 @@ fn go_search_files_only(re: &Regex, files: &[PathBuf], head_limit: usize, offset
     ToolResult::ok(format!("{}\n(Searched {} files, {} matches)", found.join("\n"), files_searched, found.len()))
 }
 
-fn go_search_count(re: &Regex, files: &[PathBuf], files_searched: usize) -> ToolResult {
+fn go_search_count(re: &Regex, files: &[PathBuf], head_limit: usize, offset: usize, files_searched: usize) -> ToolResult {
     let mut lines = Vec::new();
     let mut total_matches = 0;
     let cwd = std::env::current_dir().ok().unwrap_or_else(|| PathBuf::from("."));
@@ -584,6 +584,16 @@ fn go_search_count(re: &Regex, files: &[PathBuf], files_searched: usize) -> Tool
     }
     if lines.is_empty() {
         return ToolResult::ok(format!("No matches found. (Searched {} files)", files_searched));
+    }
+
+    // Apply offset and head_limit (matching upstream behavior)
+    let start = offset.min(lines.len());
+    if start > 0 {
+        lines = lines[start..].to_vec();
+    }
+    if head_limit > 0 && lines.len() > head_limit {
+        lines = lines[..head_limit].to_vec();
+        lines.push(format!("(showing first {} matches, truncated)", head_limit));
     }
     ToolResult::ok(format!("{}\n(Searched {} files, {} matching lines)", lines.join("\n"), files_searched, total_matches))
 }
