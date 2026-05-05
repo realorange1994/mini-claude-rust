@@ -3037,9 +3037,10 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let mut kept = vec![messages[0].clone()];
         kept.extend(messages[split..].to_vec());
 
-        // Build the new message set: compact boundary + kept messages.
+        // Build the new message set: compact boundary + summary + kept messages.
         // The boundary MUST be included before calling replace_messages,
         // matching the pattern used by try_sm_compact (compact.rs:1456).
+        // The summary MUST follow the boundary so BuildMessages resets at the boundary.
         let boundary = Message::new(
             MessageRole::System,
             MessageContent::CompactBoundary {
@@ -3047,7 +3048,46 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 pre_compact_tokens: tokens_before,
             },
         );
-        let mut new_messages = vec![boundary];
+
+        // Build a structured summary matching upstream's getCompactUserSummaryMessage format.
+        // Without this, the model sees a boundary + old messages with no continuation directive
+        // and re-executes historical instructions instead of continuing.
+        let mut summary_lines = vec![
+            "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.".to_string(),
+            format!("\n[compact: {} tokens compressed]\n", tokens_before),
+        ];
+
+        // Include tool state tracker conclusions (what the agent claimed was done).
+        let conclusions = self.tool_state_tracker.borrow().get_conclusions();
+        if !conclusions.is_empty() {
+            summary_lines.push("## Completed Work\n".to_string());
+            for c in &conclusions {
+                summary_lines.push(format!("- {}\n", c));
+            }
+            summary_lines.push("\n".to_string());
+        }
+
+        summary_lines.push("## Current Work\n".to_string());
+        summary_lines.push("(compact truncated the conversation — recent messages are preserved verbatim below)\n".to_string());
+
+        // Transcript path for detail recovery.
+        let tp = self.transcript_path();
+        if !tp.is_empty() {
+            summary_lines.push(format!(
+                "\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}\n",
+                tp
+            ));
+        }
+
+        summary_lines.push("\nRecent messages are preserved verbatim.\n\n".to_string());
+        summary_lines.push(
+            "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.".to_string(),
+        );
+
+        let summary_content = summary_lines.join("");
+        let summary = Message::new(MessageRole::User, MessageContent::Summary(summary_content));
+
+        let mut new_messages = vec![boundary, summary];
         new_messages.extend(kept);
 
         let tokens_after = crate::compact::estimate_total_tokens(&new_messages);

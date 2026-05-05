@@ -362,6 +362,11 @@ impl ToolStateTracker {
         self.conclusions.clear();
     }
 
+    /// Return a copy of the recorded conclusions.
+    pub fn get_conclusions(&self) -> Vec<String> {
+        self.conclusions.clone()
+    }
+
     /// Return the text to inject into the system prompt.
     pub fn build_session_state_note(&self) -> String {
         let mut sb = String::new();
