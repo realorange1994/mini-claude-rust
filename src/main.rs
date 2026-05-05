@@ -564,7 +564,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                                     format!("{}h ago", elapsed.as_secs() / 3600)
                                 };
                                 let desc = if task.description.len() > 28 {
-                                    format!("{}...", &task.description[..25])
+                                    format!("{}...", &task.description[..task.description.floor_char_boundary(25)])
                                 } else {
                                     task.description.clone()
                                 };

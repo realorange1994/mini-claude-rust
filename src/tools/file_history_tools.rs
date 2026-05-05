@@ -525,7 +525,7 @@ impl Tool for FileRestoreTool {
         match self.history.restore(&full_path) {
             Ok(Some(content)) => {
                 let preview = if content.len() > 200 {
-                    format!("{}...", &content[..200])
+                    format!("{}...", &content[..content.floor_char_boundary(200)])
                 } else {
                     content.clone()
                 };
@@ -605,7 +605,7 @@ impl Tool for FileRewindTool {
         match self.history.rewind(&full_path, steps) {
             Ok(Some(content)) => {
                 let preview = if content.len() > 200 {
-                    format!("{}...", &content[..200])
+                    format!("{}...", &content[..content.floor_char_boundary(200)])
                 } else {
                     content.clone()
                 };
@@ -1556,7 +1556,7 @@ impl Tool for FileHistoryCheckoutTool {
         match self.history.checkout(&full_path, target_ver) {
             Ok(Some(content)) => {
                 let preview = if content.len() > 200 {
-                    format!("{}...", &content[..200])
+                    format!("{}...", &content[..content.floor_char_boundary(200)])
                 } else {
                     content.clone()
                 };

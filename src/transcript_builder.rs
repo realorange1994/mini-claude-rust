@@ -22,7 +22,7 @@ pub fn build_compact_transcript(ctx: &ConversationContext, max_messages: usize) 
                 if entry.role == crate::context::MessageRole::User {
                     let mut truncated = text.as_str();
                     if truncated.len() > 500 {
-                        truncated = &truncated[..500];
+                        truncated = &truncated[..truncated.floor_char_boundary(500)];
                     }
                     sb.push_str(&format!("[User] {}\n", truncated));
                 }
@@ -41,7 +41,7 @@ pub fn build_compact_transcript(ctx: &ConversationContext, max_messages: usize) 
                 for r in blocks {
                     let content = extract_tool_result_text(&r.content);
                     let truncated = if content.len() > 100 {
-                        &content[..100]
+                        &content[..content.floor_char_boundary(100)]
                     } else {
                         content.as_str()
                     };
@@ -73,7 +73,7 @@ pub fn format_tool_input_compact(tool_name: &str, input: &HashMap<String, serde_
         "exec" => {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
                 if cmd.len() > 200 {
-                    return format!("{}...", &cmd[..200]);
+                    return format!("{}...", &cmd[..cmd.floor_char_boundary(200)]);
                 }
                 return cmd.to_string();
             }
@@ -102,7 +102,7 @@ pub fn format_tool_input_compact(tool_name: &str, input: &HashMap<String, serde_
         .map(|(k, v)| {
             let s = format!("{}", v);
             if s.len() > 80 {
-                format!("{}={}...", k, &s[..80])
+                format!("{}={}...", k, &s[..s.floor_char_boundary(80)])
             } else {
                 format!("{}={}", k, s)
             }

@@ -84,14 +84,14 @@ impl Tool for AgentListTool {
                 format!("{}h ago", elapsed.as_secs() / 3600)
             };
             let desc = if task.description.len() > 28 {
-                format!("{}...", &task.description[..25])
+                format!("{}...", &task.description[..task.description.floor_char_boundary(25)])
             } else {
                 task.description.clone()
             };
             let model = if task.model.is_empty() {
                 "-".to_string()
             } else if task.model.len() > 23 {
-                format!("{}...", &task.model[..20])
+                format!("{}...", &task.model[..task.model.floor_char_boundary(20)])
             } else {
                 task.model.clone()
             };

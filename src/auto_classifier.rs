@@ -622,7 +622,7 @@ impl AutoModeClassifier {
         if !transcript.is_empty() {
             // Truncate transcript to avoid exceeding context
             let truncated = if transcript.len() > 4000 {
-                format!("{}...\n... [transcript truncated]", &transcript[..4000])
+                format!("{}...\n... [transcript truncated]", &transcript[..transcript.floor_char_boundary(4000)])
             } else {
                 transcript.to_string()
             };
@@ -753,7 +753,7 @@ impl AutoModeClassifier {
         if tool_name == "exec" {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
                 let prefix = if cmd.len() > 100 {
-                    cmd[..100].to_string()
+                    cmd[..cmd.floor_char_boundary(100)].to_string()
                 } else {
                     cmd.to_string()
                 };
@@ -887,7 +887,7 @@ fn format_action_for_classifier(
             if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                 let old_str = input.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
                 let preview = if old_str.len() > 100 {
-                    format!("{}...", &old_str[..100])
+                    format!("{}...", &old_str[..old_str.floor_char_boundary(100)])
                 } else {
                     old_str.to_string()
                 };
@@ -922,7 +922,7 @@ fn format_action_for_classifier(
             let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
             let prompt_preview = if prompt.len() > 200 {
-                format!("{}...", &prompt[..200])
+                format!("{}...", &prompt[..prompt.floor_char_boundary(200)])
             } else {
                 prompt.to_string()
             };
@@ -940,7 +940,7 @@ fn format_action_for_classifier(
         .map(|(k, v)| {
             let s = format!("{}", v);
             let truncated = if s.len() > 100 {
-                format!("{}...", &s[..100])
+                format!("{}...", &s[..s.floor_char_boundary(100)])
             } else {
                 s
             };

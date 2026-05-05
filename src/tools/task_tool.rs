@@ -182,7 +182,7 @@ impl Tool for TaskListTool {
 
         for task in &tasks {
             let subject = if task.subject.len() > 38 {
-                format!("{}...", &task.subject[..35])
+                format!("{}...", &task.subject[..task.subject.floor_char_boundary(35)])
             } else {
                 task.subject.clone()
             };

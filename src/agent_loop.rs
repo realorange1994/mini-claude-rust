@@ -1149,10 +1149,10 @@ impl AgentLoop {
                                     // Build snapshot description from tool name and params
                                     let snapshot_desc = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" {
                                         let old_str_preview = params.get("old_string").and_then(|v| v.as_str()).map(|s| {
-                                            if s.len() > 50 { format!("{}...", &s[..50]) } else { s.to_string() }
+                                            if s.len() > 50 { format!("{}...", &s[..s.floor_char_boundary(50)]) } else { s.to_string() }
                                         });
                                         let new_str_preview = params.get("new_string").and_then(|v| v.as_str()).map(|s| {
-                                            if s.len() > 50 { format!("{}...", &s[..50]) } else { s.to_string() }
+                                            if s.len() > 50 { format!("{}...", &s[..s.floor_char_boundary(50)]) } else { s.to_string() }
                                         });
                                         match (&*tool_name, old_str_preview, new_str_preview) {
                                             ("edit_file", Some(old), Some(new)) => format!("edit: '{}' → '{}'", old, new),
@@ -3006,7 +3006,7 @@ pub fn tool_arg_summary(tool_name: &str, args_json: &str) -> String {
             let v_str = match v {
                 serde_json::Value::String(s) if !s.is_empty() => {
                     if s.len() > 80 {
-                        format!("{}...", &s[..80])
+                        format!("{}...", &s[..s.floor_char_boundary(80)])
                     } else {
                         s.clone()
                     }
