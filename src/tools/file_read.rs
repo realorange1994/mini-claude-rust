@@ -216,6 +216,8 @@ impl Tool for FileReadTool {
         }
 
         // Mark file as read so subsequent edit/write operations don't require re-reading
+        // Store full content for content-based staleness fallback (matching upstream).
+        // Only store content for full-file reads (when limit covers the rest of the file).
         if let Some(files_read) = &self.files_read {
             let path_str = normalize_file_path(&path.to_string_lossy());
             let mtime = fs::metadata(&path)
@@ -223,11 +225,14 @@ impl Tool for FileReadTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
+            // Store content only for full reads (offset=1, limit covering rest of file)
+            let stored_content = if limit >= total { content.clone() } else { String::new() };
             files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo {
                 mtime,
                 read_time,
                 read_offset: offset,
                 read_limit: limit,
+                content: stored_content,
             });
         }
 

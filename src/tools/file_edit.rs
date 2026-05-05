@@ -101,16 +101,6 @@ Usage:
             if path.exists() {
                 let fr = files_read.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(info) = fr.get(&path_str) {
-                    if let Ok(meta) = fs::metadata(&path) {
-                        if let Ok(modified) = meta.modified() {
-                            if modified != info.mtime {
-                                drop(fr);
-                                return ToolResult::error(
-                                    "Error: file has been modified since read, either by the user or a linter. Read it again before attempting to edit.".to_string()
-                                );
-                            }
-                        }
-                    }
                     // Partial-view check: if the user read only a portion (with
                     // offset/limit), they must do a fresh full read before editing.
                     // This prevents the model from editing based on incomplete content.
@@ -121,6 +111,35 @@ Usage:
                         return ToolResult::error(
                             "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing.".to_string()
                         );
+                    }
+                    if let Ok(meta) = fs::metadata(&path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified != info.mtime {
+                                // Timestamp changed. On Windows, timestamps can change without content changes
+                                // (cloud sync, antivirus, etc.). For full reads where we have stored content,
+                                // compare content as a fallback to avoid false positives.
+                                let is_full_read = info.read_offset == usize::MAX && info.read_limit == usize::MAX;
+                                if is_full_read && !info.content.is_empty() {
+                                    let stored_content = info.content.clone();
+                                    drop(fr);
+                                    if let Ok(current_content) = fs::read_to_string(&path) {
+                                        let normalized_current = current_content.replace("\r\n", "\n");
+                                        if normalized_current == stored_content {
+                                            // Content unchanged despite timestamp change — safe to proceed
+                                        } else {
+                                            return ToolResult::error(
+                                                "Error: file has been modified since read, either by the user or a linter. Read it again before attempting to edit.".to_string()
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    drop(fr);
+                                    return ToolResult::error(
+                                        "Error: file has been modified since read, either by the user or a linter. Read it again before attempting to edit.".to_string()
+                                    );
+                                }
+                            }
+                        }
                     }
                 } else {
                     drop(fr);
@@ -186,7 +205,7 @@ Usage:
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 let read_time = SystemTime::now();
-                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: new_str.to_string() });
             }
             return ToolResult::ok(format!("Successfully created {}", path.display()));
         }
@@ -201,6 +220,14 @@ Usage:
                     MAX_EDIT_SIZE
                 ));
             }
+        }
+
+        // Reject .ipynb files — they must be edited via notebook tool, not raw file edit.
+        // Matching upstream behavior: file_edit cannot reliably edit JSON-based notebook format.
+        if path.to_string_lossy().to_lowercase().ends_with(".ipynb") {
+            return ToolResult::error(
+                "Error: file is a Jupyter Notebook (.ipynb). Jupyter notebooks cannot be edited with the edit_file tool — use the notebook tool instead.".to_string(),
+            );
         }
 
         let content = match fs::read_to_string(&path) {
@@ -315,7 +342,7 @@ Usage:
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: result.clone() });
         }
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))

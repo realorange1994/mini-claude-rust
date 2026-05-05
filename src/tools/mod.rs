@@ -174,6 +174,8 @@ pub trait Tool: Send + Sync {
 
 /// FileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
 /// Also tracks the offset and limit used during read, for dedup detection (file_unchanged stub).
+/// Stores file content for full reads to enable content-based staleness fallback
+/// (matches upstream: timestamps can change without content changes on Windows).
 #[derive(Clone)]
 pub struct FileReadInfo {
     pub mtime: SystemTime,
@@ -182,6 +184,9 @@ pub struct FileReadInfo {
     pub read_offset: usize,
     /// The limit used when reading (usize::MAX if from edit/write, not a read_file call).
     pub read_limit: usize,
+    /// File content at read time (for content-based staleness fallback).
+    /// Empty string means no content was stored (partial read or from edit/write).
+    pub content: String,
 }
 
 /// Registry collects tool instances and provides lookup
@@ -268,6 +273,11 @@ impl Registry {
 
     /// Mark a file as having been read, storing its current mtime and the read timestamp
     pub fn mark_file_read(&self, path: &str) {
+        self.mark_file_read_with_content(path, String::new());
+    }
+
+    /// Mark a file as having been read, storing content for staleness fallback.
+    pub fn mark_file_read_with_content(&self, path: &str, content: String) {
         // Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
         let expanded = expand_path(path);
         let normalized = normalize_file_path(&expanded.to_string_lossy());
@@ -276,7 +286,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content });
     }
 
     /// Check if a file has been read before and hasn't been modified since
@@ -302,6 +312,18 @@ impl Registry {
                 if current_mtime == stored.mtime {
                     Ok(())
                 } else {
+                    // Timestamp changed. On Windows, timestamps can change without content changes
+                    // (cloud sync, antivirus, etc.). For full reads (offset=usize::MAX, limit=usize::MAX)
+                    // where we have the stored content, compare content as a fallback.
+                    let is_full_read = stored.read_offset == usize::MAX && stored.read_limit == usize::MAX;
+                    if is_full_read && !stored.content.is_empty() {
+                        if let Ok(current_content) = std::fs::read_to_string(&expanded) {
+                            if current_content == stored.content {
+                                // Content unchanged despite timestamp change — safe to proceed
+                                return Ok(());
+                            }
+                        }
+                    }
                     Err("Error: file has been modified since read, either by the user or by a linter. Read it again before attempting to write it.".to_string())
                 }
             }
@@ -318,14 +340,14 @@ impl Registry {
     /// Mark a file as having been written to, updating its mtime in the registry.
     /// This is called after a successful write/edit so that subsequent writes
     /// are allowed without requiring a re-read.
-    pub fn mark_file_written(&self, path: &Path) {
+    pub fn mark_file_written(&self, path: &Path, content: &str) {
         let normalized = normalize_file_path(&path.to_string_lossy());
         let mtime = std::fs::metadata(path)
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: content.to_string() });
     }
 
     /// Clear the read-file tracking (e.g., on /clear)
