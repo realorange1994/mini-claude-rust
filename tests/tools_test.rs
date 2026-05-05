@@ -579,7 +579,7 @@ fn multi_edit_success() {
     let file = dir.path().join("multi.txt");
     fs::write(&file, "a\nb\nc\n").unwrap();
 
-    let tool = MultiEditTool;
+    let tool = MultiEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("edits".into(), serde_json::json!([
@@ -598,7 +598,7 @@ fn multi_edit_atomic_rollback_on_failure() {
     let file = dir.path().join("multi.txt");
     fs::write(&file, "a\nb\nc\n").unwrap();
 
-    let tool = MultiEditTool;
+    let tool = MultiEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("edits".into(), serde_json::json!([
@@ -617,7 +617,7 @@ fn multi_edit_empty_edits_array() {
     let file = dir.path().join("test.txt");
     fs::write(&file, "content").unwrap();
 
-    let tool = MultiEditTool;
+    let tool = MultiEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("edits".into(), serde_json::json!([]));
@@ -627,7 +627,7 @@ fn multi_edit_empty_edits_array() {
 
 #[test]
 fn multi_edit_missing_file() {
-    let tool = MultiEditTool;
+    let tool = MultiEditTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!("/nonexistent/file.txt"));
     params.insert("edits".into(), serde_json::json!([
