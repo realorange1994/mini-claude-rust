@@ -226,6 +226,9 @@ pub struct AgentLoop {
     /// Shared agent task store for tracking background sub-agents.
     /// Used during compaction to inject running agent status.
     agent_task_store: Option<crate::tools::agent_store::SharedAgentTaskStore>,
+    /// Cumulative token usage across all turns (for accurate sub-agent reporting).
+    total_input_tokens: std::sync::atomic::AtomicI64,
+    total_output_tokens: std::sync::atomic::AtomicI64,
 }
 
 impl AgentLoop {
@@ -330,6 +333,8 @@ impl AgentLoop {
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
             agent_task_store: None,
+            total_input_tokens: std::sync::atomic::AtomicI64::new(0),
+            total_output_tokens: std::sync::atomic::AtomicI64::new(0),
         })
     }
 
@@ -467,6 +472,8 @@ impl AgentLoop {
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
             agent_task_store: None,
+            total_input_tokens: std::sync::atomic::AtomicI64::new(0),
+            total_output_tokens: std::sync::atomic::AtomicI64::new(0),
         })
     }
 
@@ -1969,6 +1976,14 @@ impl AgentLoop {
         // NOT print the returned text to stdout.
         self.last_call_was_streaming.store(true, std::sync::atomic::Ordering::SeqCst);
 
+        // Accumulate token usage from this streaming response
+        if let Some(u) = collect.usage() {
+            if u.input_tokens > 0 || u.output_tokens > 0 {
+                self.total_input_tokens.fetch_add(u.input_tokens, std::sync::atomic::Ordering::SeqCst);
+                self.total_output_tokens.fetch_add(u.output_tokens, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
         Ok((tool_calls, text))
     }
 
@@ -2231,6 +2246,14 @@ impl AgentLoop {
                     self.context.write().await.add_user_message("Output token limit reached. Resume directly -- no apology, no recap. Pick up mid-thought and break remaining work into smaller pieces.".to_string());
                 }
             }
+        }
+
+        // Extract and record token usage from response
+        if let (Some(input_tokens), Some(output_tokens)) = (
+            body.get("usage").and_then(|u| u.get("input_tokens")).and_then(|v| v.as_i64()),
+            body.get("usage").and_then(|u| u.get("output_tokens")).and_then(|v| v.as_i64()),
+        ) {
+            self.record_token_usage(input_tokens, output_tokens);
         }
 
         Ok((tool_calls, text))
@@ -3244,6 +3267,22 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         self.tools_used.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Get total tokens consumed by this agent across all turns.
+    pub fn total_tokens(&self) -> i64 {
+        self.total_input_tokens.load(std::sync::atomic::Ordering::SeqCst)
+            + self.total_output_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Record token usage from a single API response.
+    pub fn record_token_usage(&self, input_tokens: i64, output_tokens: i64) {
+        if input_tokens > 0 {
+            self.total_input_tokens.fetch_add(input_tokens, std::sync::atomic::Ordering::SeqCst);
+        }
+        if output_tokens > 0 {
+            self.total_output_tokens.fetch_add(output_tokens, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// Get a clone of the context Arc (for fork mode)
     pub fn context_arc(&self) -> Arc<RwLock<ConversationContext>> {
         self.context.clone()
@@ -3347,6 +3386,8 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             todo_list: Arc::new(crate::context::TodoList::new()),
             notification_rx: None,
             agent_task_store: None,
+            total_input_tokens: std::sync::atomic::AtomicI64::new(0),
+            total_output_tokens: std::sync::atomic::AtomicI64::new(0),
         })
     }
 

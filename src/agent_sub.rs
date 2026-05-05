@@ -548,8 +548,9 @@ pub fn spawn_sub_agent_sync(
                 };
 
                 let tools_used = child_loop.tools_used_count();
+                let total_tokens = child_loop.total_tokens();
                 let duration_ms = start.elapsed().as_millis() as u64;
-                Ok((final_result, tools_used, duration_ms))
+                Ok((final_result, tools_used, total_tokens, duration_ms))
             }
             Err(e) => {
                 Err(format!("failed to create sub-agent: {e}"))
@@ -563,7 +564,7 @@ pub fn spawn_sub_agent_sync(
         if let Some(ref tid) = task_id_for_spawn {
             if let Some(ref store) = task_store_for_spawn {
                 match &result {
-                    Ok((final_result, tools_used, duration_ms)) => {
+                    Ok((final_result, tools_used, total_tokens, duration_ms)) => {
                         // Write the final result to the task's output buffer
                         if let Some(task) = store.get(tid) {
                             task.write_output(&format!("\n--- Agent Result ---\n{}\n", final_result));
@@ -580,6 +581,7 @@ pub fn spawn_sub_agent_sync(
                                 &output_file,
                                 "",
                                 *tools_used,
+                                *total_tokens,
                                 *duration_ms,
                             );
                             let _ = tx.send(notification);
@@ -595,6 +597,7 @@ pub fn spawn_sub_agent_sync(
                                 e,
                                 "",
                                 "",
+                                0,
                                 0,
                                 start.elapsed().as_millis() as u64,
                             );
@@ -637,6 +640,7 @@ fn make_agent_notification(
     output_file: &str,
     transcript_path: &str,
     tools_used: usize,
+    total_tokens: i64,
     duration_ms: u64,
 ) -> String {
     let result_escaped = escape_xml(result);
@@ -647,9 +651,9 @@ fn make_agent_notification(
 <result>{}</result>
 <output_file>{}</output_file>
 <transcript_path>{}</transcript_path>
-<usage><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>
+<usage><total_tokens>{}</total_tokens><tool_uses>{}</tool_uses><duration_ms>{}</duration_ms></usage>
 </task-notification>"#,
-        agent_id, status, result_escaped, output_file, transcript_path, tools_used, duration_ms
+        agent_id, status, result_escaped, output_file, transcript_path, total_tokens, tools_used, duration_ms
     )
 }
 
