@@ -41,11 +41,15 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string with a new string. \
-         You MUST use read_file to read the file at least once before editing. \
-         ALWAYS prefer edit_file for modifying existing files — it only sends the diff. \
-         The edit will FAIL if old_string is not unique in the file. Provide enough context to uniquely match. \
-         Use replace_all to change every instance of old_string."
+        "Performs exact string replacements in files.
+
+Usage:
+- You must use read_file at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- When editing text from read_file output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- The edit will FAIL if old_string is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use replace_all to change every instance of old_string.
+- Use replace_all for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {

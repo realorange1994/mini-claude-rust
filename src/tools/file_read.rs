@@ -43,7 +43,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Returns numbered lines for easy reference."
+        "Reads a file from the local filesystem. You can access any file directly by using this tool.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to 2000 lines starting from the beginning of the file\n- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n- Results are returned using cat -n format, with line numbers starting at 1\n- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs\n- You must read a file before editing it with edit_file or write_file"
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
