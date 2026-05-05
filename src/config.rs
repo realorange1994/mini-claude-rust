@@ -687,5 +687,9 @@ pub fn build_system_prompt(
         }
     }
 
+    // Upstream: tell the model to note important info from tool results
+    // before they're cleared by micro-compact, preventing memory loss
+    prompt.push_str("\n\n## Context Management\nWhen working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later.\n\nOld tool results will be automatically cleared from context to free up space. The 5 most recent results are always kept.\n");
+
     prompt
 }
