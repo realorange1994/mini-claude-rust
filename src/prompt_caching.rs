@@ -20,7 +20,7 @@ pub fn apply_prompt_caching(messages: &mut [serde_json::Value], ttl: &str) {
     let mut breakpoints_used = 0;
 
     // 1. Cache the system prompt (first message if system role)
-    if messages[0].get("role").and_then(|v| v.as_str()) == Some("system") {
+    if !messages.is_empty() && messages[0].get("role").and_then(|v| v.as_str()) == Some("system") {
         apply_cache_marker(&mut messages[0], &marker);
         breakpoints_used += 1;
     }

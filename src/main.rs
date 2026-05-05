@@ -55,19 +55,21 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    // Suppress tokio runtime shutdown panic message
+    // Enhanced panic hook: log location + message to stderr, plus backtrace
     std::panic::set_hook(Box::new(|info| {
         let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
             *s
         } else if let Some(s) = info.payload().downcast_ref::<String>() {
             s.as_str()
         } else {
+            eprintln!("thread panicked: (unknown payload)");
             return;
         };
         if msg.contains("Cannot drop a runtime in a context where blocking is not allowed") {
             return;  // Suppress this specific panic
         }
-        eprintln!("thread panicked: {}", msg);
+        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
+        eprintln!("PANIC at {}: {}", location, msg);
     }));
 
     let args = Args::parse();
