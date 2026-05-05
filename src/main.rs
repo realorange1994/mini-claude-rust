@@ -280,6 +280,15 @@ fn main() -> Result<()> {
     if let Some(message) = args.message {
         let prompt = message.join(" ");
         let result = agent_with_notif.run(&prompt);
+
+        // Drain any pending sub-agent notifications before exit.
+        // Brief wait to allow in-flight notifications to arrive,
+        // then drain and display them (matching Go's drainOneShotNotifications).
+        let notifications = {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            agent_with_notif.drain_notifications()
+        };
+
         // When streaming was used, TerminalHandler already displayed the text
         // via stderr (eprint! calls). Printing the same text again to stdout
         // would cause duplication (e.g., "hellohello" when redirected with 2>&1).
@@ -288,6 +297,14 @@ fn main() -> Result<()> {
         if !last_was_streaming {
             println!("{}", result);
         }
+
+        if !notifications.is_empty() {
+            println!("\n--- Sub-agent notifications ---");
+            for n in &notifications {
+                println!("{}", n);
+            }
+        }
+
         agent_with_notif.close();
         return Ok(());
     }

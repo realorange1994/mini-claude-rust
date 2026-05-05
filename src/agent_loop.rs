@@ -3039,6 +3039,22 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         self.notification_rx = Some(std::sync::Mutex::new(rx));
     }
 
+    /// Drain all pending sub-agent notifications and return them.
+    /// Used in one-shot mode after run() returns to capture any
+    /// in-flight notifications that arrived after the final turn.
+    pub fn drain_notifications(&self) -> Vec<String> {
+        if let Some(ref rx_mutex) = self.notification_rx {
+            if let Ok(mut rx) = rx_mutex.try_lock() {
+                let mut notifications = Vec::new();
+                while let Ok(msg) = rx.try_recv() {
+                    notifications.push(msg);
+                }
+                return notifications;
+            }
+        }
+        Vec::new()
+    }
+
     /// Set the agent task store for tracking background sub-agents.
     /// Used during compaction to inject running agent status so the model
     /// doesn't spawn duplicate agents after compaction.
