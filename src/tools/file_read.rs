@@ -115,7 +115,22 @@ impl Tool for FileReadTool {
             }
         }
 
-        if metadata.len() > MAX_FILE_SIZE {
+        // Parse offset/limit early so we can skip the size check for partial reads.
+        // If the user specified offset and/or limit, they're reading a portion — allow it
+        // even for large files (matching upstream behavior).
+        let has_explicit_offset = params.contains_key("offset");
+        let has_explicit_limit = params.contains_key("limit");
+        let is_partial_request = has_explicit_offset || has_explicit_limit;
+
+        let offset = params
+            .get("offset")
+            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+            .map(|v| if v < 1 { 1 } else { v as usize })
+            .unwrap_or(1);
+
+        // Only enforce file size limit for full-file reads.
+        // Partial reads (with offset/limit) are allowed for large files.
+        if !is_partial_request && metadata.len() > MAX_FILE_SIZE {
             return ToolResult::error("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions.".to_string());
         }
 
@@ -127,7 +142,11 @@ impl Tool for FileReadTool {
 
         let content = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
             // UTF-16 LE BOM — decode to UTF-8
-            let u16s: Vec<u16> = bytes[2..]
+            // Skip BOM (2 bytes), then decode pairs. If odd byte count after BOM,
+            // ignore the trailing byte (incomplete UTF-16 code unit).
+            let data = &bytes[2..];
+            let even_len = data.len() & !1; // round down to even
+            let u16s: Vec<u16> = data[..even_len]
                 .chunks_exact(2)
                 .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                 .collect();
@@ -147,12 +166,6 @@ impl Tool for FileReadTool {
         }
 
         let total = lines.len();
-
-        let offset = params
-            .get("offset")
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
-            .map(|v| if v < 1 { 1 } else { v as usize })
-            .unwrap_or(1);
 
         // Official: limit=0 or missing means read entire file
         let limit = params

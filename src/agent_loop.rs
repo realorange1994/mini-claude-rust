@@ -3047,7 +3047,19 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             };
         }
 
-        // If too few messages, nothing to compact
+        // If empty or too few messages, nothing to compact
+        if messages.is_empty() {
+            return crate::compact::CompactStats {
+                phase: crate::compact::CompactPhase::Truncated,
+                entries_before: 0,
+                entries_after: 0,
+                estimated_tokens_saved: 0,
+                estimated_tokens_before: tokens_before,
+                estimated_tokens_after: 0,
+                tokens_after: 0,
+                post_compact_tokens: 0,
+            };
+        }
         if messages.len() <= 3 {
             return crate::compact::CompactStats {
                 phase: crate::compact::CompactPhase::None,
@@ -3058,20 +3070,6 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 estimated_tokens_after: tokens_before,
                 tokens_after: tokens_before,
                 post_compact_tokens: tokens_before,
-            };
-        }
-
-        if messages.is_empty() {
-            // Nothing to compact — return empty stats
-            return crate::compact::CompactStats {
-                phase: crate::compact::CompactPhase::Truncated,
-                entries_before: 0,
-                entries_after: 0,
-                estimated_tokens_saved: 0,
-                estimated_tokens_before: tokens_before,
-                estimated_tokens_after: 0,
-                tokens_after: 0,
-                post_compact_tokens: 0,
             };
         }
 
