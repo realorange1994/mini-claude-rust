@@ -1,17 +1,25 @@
 //! FileReadTool - Read file contents with optional line range
 
-use crate::tools::{Tool, ToolResult, expand_path, is_unc_path};
+use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, normalize_file_path, FileReadInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 const MAX_FILE_SIZE: u64 = 256 * 1024; // 256 KB, matching Claude Code official
 
-pub struct FileReadTool;
+pub struct FileReadTool {
+    files_read: Option<Arc<RwLock<HashMap<String, FileReadInfo>>>>,
+}
 
 impl FileReadTool {
     pub fn new() -> Self {
-        Self
+        Self { files_read: None }
+    }
+
+    pub fn with_files_read(files_read: Arc<RwLock<HashMap<String, FileReadInfo>>>) -> Self {
+        Self { files_read: Some(files_read) }
     }
 }
 
@@ -23,7 +31,9 @@ impl Default for FileReadTool {
 
 impl Clone for FileReadTool {
     fn clone(&self) -> Self {
-        Self
+        Self {
+            files_read: self.files_read.clone(),
+        }
     }
 }
 
@@ -171,6 +181,17 @@ impl Tool for FileReadTool {
             ));
         } else {
             result.push_str(&format!("\n\n(End of file - {} lines total)", total));
+        }
+
+        // Mark file as read so subsequent edit/write operations don't require re-reading
+        if let Some(files_read) = &self.files_read {
+            let path_str = normalize_file_path(&path.to_string_lossy());
+            let mtime = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let read_time = SystemTime::now();
+            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time });
         }
 
         ToolResult::ok(result.trim_end().to_string())

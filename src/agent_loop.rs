@@ -1255,12 +1255,9 @@ impl AgentLoop {
                                                     }
                                                 }
                                                 let result = t.execute(coerced);
-                                                // Mark file as read after successful read_file
-                                                if !result.is_error && tool_name == "read_file" {
-                                                    if let Some(path) = &snapshot_path {
-                                                        registry.mark_file_read(&path.to_string_lossy());
-                                                    }
-                                                }
+                                                // NOTE: FileReadTool.execute() handles files_read update internally.
+                                                // The mark_file_read call below was removed to avoid duplication
+                                                // with potentially different path normalization.
                                                 result
                                             }
                                             None => ToolResult::error(format!("Tool not found: {}", tool_name)),

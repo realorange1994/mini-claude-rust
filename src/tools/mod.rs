@@ -374,7 +374,7 @@ impl Default for Registry {
 /// Register all built-in tools
 pub fn register_builtin_tools(registry: &Registry) {
     registry.register(exec_tool::ExecTool::new());
-    registry.register(file_read::FileReadTool);
+    registry.register(file_read::FileReadTool::with_files_read(registry.files_read_handle()));
     registry.register(FileWriteTool::with_files_read(registry.files_read_handle()));
     registry.register(FileEditTool::with_files_read(registry.files_read_handle()));
     registry.register(multi_edit::MultiEditTool::with_files_read(registry.files_read_handle()));

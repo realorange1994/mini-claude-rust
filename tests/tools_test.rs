@@ -116,7 +116,7 @@ fn validate_params_no_required_fields() {
 #[test]
 fn registry_register_and_get() {
     let reg = Registry::new();
-    reg.register(FileReadTool);
+    reg.register(FileReadTool::new());
     let tool = reg.get("read_file").unwrap();
     assert_eq!(tool.name(), "read_file");
 }
@@ -130,7 +130,7 @@ fn registry_get_unknown() {
 #[test]
 fn registry_all_tools() {
     let reg = Registry::new();
-    reg.register(FileReadTool);
+    reg.register(FileReadTool::new());
     reg.register(FileWriteTool::new());
     let tools = reg.all_tools();
     assert_eq!(tools.len(), 2);
@@ -328,7 +328,7 @@ fn truncate_at_zero() {
 
 #[test]
 fn file_read_tool_name_and_schema() {
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     assert_eq!(tool.name(), "read_file");
     let schema = tool.input_schema();
     assert!(schema.get("required").is_some());
@@ -336,7 +336,7 @@ fn file_read_tool_name_and_schema() {
 
 #[test]
 fn file_read_file_not_found() {
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!("/nonexistent/file.txt"));
     let result = tool.execute(params);
@@ -346,7 +346,7 @@ fn file_read_file_not_found() {
 
 #[test]
 fn file_read_missing_path() {
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let params: HashMap<String, serde_json::Value> = HashMap::new();
     let result = tool.execute(params);
     assert!(result.is_error);
@@ -354,7 +354,7 @@ fn file_read_missing_path() {
 
 #[test]
 fn file_read_directory() {
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!("/tmp"));
     let result = tool.execute(params);
@@ -368,7 +368,7 @@ fn file_read_success() {
     let file = dir.path().join("test.txt");
     fs::write(&file, "line1\nline2\nline3\n").unwrap();
 
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     let result = tool.execute(params);
@@ -385,7 +385,7 @@ fn file_read_with_offset_and_limit() {
     let file = dir.path().join("test.txt");
     fs::write(&file, "a\nb\nc\nd\ne\n").unwrap();
 
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("offset".into(), serde_json::json!(2));
@@ -404,7 +404,7 @@ fn file_read_offset_beyond_end() {
     let file = dir.path().join("test.txt");
     fs::write(&file, "single line\n").unwrap();
 
-    let tool = FileReadTool;
+    let tool = FileReadTool::new();
     let mut params = HashMap::new();
     params.insert("path".into(), serde_json::json!(file.to_string_lossy().to_string()));
     params.insert("offset".into(), serde_json::json!(100));

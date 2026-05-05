@@ -100,7 +100,7 @@ fn permission_gate_plan_allows_read_only() {
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
-    registry.register(FileReadTool);
+    registry.register(FileReadTool::new());
     registry.register(ListDirTool);
     registry.register(GrepTool);
     registry.register(GlobTool);
