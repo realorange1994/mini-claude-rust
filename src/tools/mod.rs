@@ -369,18 +369,18 @@ impl Registry {
 ///   read yet" infinite loop.
 pub(crate) fn normalize_file_path(path: &str) -> String {
     let with_forward_slashes = path.replace('\\', "/");
-    let path = std::path::Path::new(&with_forward_slashes);
-    let mut cleaned = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => { /* skip "." */ }
-            std::path::Component::ParentDir => {
-                cleaned.pop();
-            }
-            _ => cleaned.push(component),
+    // On Windows, Path::components() only splits on backslashes, so a
+    // forward-slash path like "E:/a/b/../c.rs" is treated as a single
+    // component and ".." is never resolved. Split on '/' manually.
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in with_forward_slashes.split('/') {
+        match seg {
+            "" | "." => { /* skip empty (from leading/trailing //) and . */ }
+            ".." => { parts.pop(); }
+            _ => parts.push(seg),
         }
     }
-    let result = cleaned.to_string_lossy().replace('\\', "/");
+    let result = parts.join("/");
     result.to_lowercase()
 }
 
@@ -586,7 +586,15 @@ pub fn expand_path(p: &str) -> std::path::PathBuf {
     };
 
     let path = std::path::Path::new(&normalized);
-    if path.is_absolute() {
+    // On Windows, is_absolute() returns false for forward-slash paths
+    // like "E:/Git/..." even though they are logically absolute.
+    // Detect Windows drive-letter + slash pattern as absolute.
+    let is_win_abs = cfg!(target_os = "windows")
+        && normalized.len() >= 3
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':'
+        && (normalized.as_bytes()[2] == b'/' || normalized.as_bytes()[2] == b'\\');
+    if path.is_absolute() || is_win_abs {
         path.to_path_buf()
     } else {
         std::env::current_dir()
