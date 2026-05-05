@@ -187,6 +187,12 @@ pub struct FileReadInfo {
     /// File content at read time (for content-based staleness fallback).
     /// Empty string means no content was stored (partial read or from edit/write).
     pub content: String,
+    /// True if this entry represents a partial (offset/limit) read_file call.
+    /// Set by Read for partial reads; false for full reads and edit/write entries.
+    pub is_partial: bool,
+    /// True if this entry was created by a read_file call (vs edit/write).
+    /// Used by dedup logic to avoid matching edit/write entries.
+    pub from_read: bool,
 }
 
 /// Registry collects tool instances and provides lookup
@@ -286,7 +292,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content, is_partial: false, from_read: false });
     }
 
     /// Check if a file has been read before and hasn't been modified since
@@ -313,9 +319,9 @@ impl Registry {
                     Ok(())
                 } else {
                     // Timestamp changed. On Windows, timestamps can change without content changes
-                    // (cloud sync, antivirus, etc.). For full reads (offset=usize::MAX, limit=usize::MAX)
-                    // where we have the stored content, compare content as a fallback.
-                    let is_full_read = stored.read_offset == usize::MAX && stored.read_limit == usize::MAX;
+                    // (cloud sync, antivirus, etc.). For full reads where we have stored content,
+                    // compare content as a fallback.
+                    let is_full_read = !stored.is_partial;
                     if is_full_read && !stored.content.is_empty() {
                         if let Ok(current_content) = std::fs::read_to_string(&expanded) {
                             if current_content == stored.content {
@@ -347,7 +353,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: content.to_string() });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: content.to_string(), is_partial: false, from_read: false });
     }
 
     /// Clear the read-file tracking (e.g., on /clear)

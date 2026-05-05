@@ -100,9 +100,7 @@ impl Tool for FileWriteTool {
                     }
                     // Partial-view check: if the user read only a portion (with
                     // offset/limit), they must do a fresh full read before writing.
-                    let is_partial = info.read_offset != usize::MAX
-                        && (info.read_offset != 1 || info.read_limit != usize::MAX);
-                    if is_partial {
+                    if info.is_partial {
                         drop(fr);
                         return ToolResult::error(
                             "Error: file was only partially read. You must do a fresh full read (without offset/limit) before writing.".to_string()
@@ -151,7 +149,7 @@ impl Tool for FileWriteTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: content.to_string() });
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: content.to_string(), is_partial: false, from_read: false });
         }
 
         ToolResult::ok(format!("Wrote {} chars to {}", content.len(), path.display()))

@@ -104,9 +104,7 @@ Usage:
                     // Partial-view check: if the user read only a portion (with
                     // offset/limit), they must do a fresh full read before editing.
                     // This prevents the model from editing based on incomplete content.
-                    let is_partial = info.read_offset != usize::MAX
-                        && (info.read_offset != 1 || info.read_limit != usize::MAX);
-                    if is_partial {
+                    if info.is_partial {
                         drop(fr);
                         return ToolResult::error(
                             "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing.".to_string()
@@ -205,7 +203,7 @@ Usage:
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 let read_time = SystemTime::now();
-                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: new_str.to_string() });
+                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: new_str.to_string(), is_partial: false, from_read: false });
             }
             return ToolResult::ok(format!("Successfully created {}", path.display()));
         }
@@ -350,7 +348,7 @@ Usage:
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: result.clone() });
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX, content: result.clone(), is_partial: false, from_read: false });
         }
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))

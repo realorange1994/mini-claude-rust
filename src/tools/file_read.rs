@@ -169,11 +169,9 @@ impl Tool for FileReadTool {
             let path_str = normalize_file_path(&path.to_string_lossy());
             let fr = files_read.read().unwrap_or_else(|e| e.into_inner());
             if let Some(info) = fr.get(&path_str) {
-                // Only dedup entries from a prior Read (offset is always set by Read).
-                // Edit/Write store offset=usize::MAX — their entry reflects post-edit
-                // mtime, so deduping against it would wrongly point the model at the
-                // pre-edit Read content.
-                let is_from_read = info.read_offset != usize::MAX;
+                // Only dedup entries from a prior Read (edit/write entries reflect post-edit
+                // mtime, so deduping against them would wrongly point the model at the pre-edit Read content).
+                let is_from_read = info.from_read;
                 if is_from_read {
                     let range_match = info.read_offset == offset && info.read_limit == limit;
                     if range_match {
@@ -226,26 +224,35 @@ impl Tool for FileReadTool {
             result.push_str(&format!("\n\n(End of file - {} lines total)", total));
         }
 
-        // Mark file as read so subsequent edit/write operations don't require re-reading
-        // Store full content for content-based staleness fallback (matching upstream).
-        // Only store content for full-file reads (when limit covers the rest of the file).
-        if let Some(files_read) = &self.files_read {
-            let path_str = normalize_file_path(&path.to_string_lossy());
-            let mtime = fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            let read_time = SystemTime::now();
-            // Store content only for full reads (offset=1, limit covering rest of file)
-            let stored_content = if limit >= total { content.clone() } else { String::new() };
-            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo {
-                mtime,
-                read_time,
-                read_offset: offset,
-                read_limit: limit,
-                content: stored_content,
-            });
-        }
+            // Mark file as read so subsequent edit/write operations don't require re-reading
+            // Store full content for content-based staleness fallback (matching upstream).
+            // Only store content for full-file reads (when limit covers the rest of the file).
+            if let Some(files_read) = &self.files_read {
+                let path_str = normalize_file_path(&path.to_string_lossy());
+                let mtime = fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let read_time = SystemTime::now();
+                // For full-file reads (offset=1, limit covers entire file), store sentinel values
+                // so edit/write tools recognize it as a full read. Partial reads keep actual values.
+                let is_full_read = offset == 1 && limit >= total;
+                let (stored_offset, stored_limit) = if is_full_read {
+                    (usize::MAX, usize::MAX)
+                } else {
+                    (offset, limit)
+                };
+                let stored_content = if is_full_read { content.clone() } else { String::new() };
+                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo {
+                    mtime,
+                    read_time,
+                    read_offset: stored_offset,
+                    read_limit: stored_limit,
+                    content: stored_content,
+                    is_partial: !is_full_read,
+                    from_read: true,
+                });
+            }
 
         ToolResult::ok(result.trim_end().to_string())
     }
