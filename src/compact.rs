@@ -1947,9 +1947,49 @@ impl Compactor {
                     // pattern used by hermes and the Go version.
                     // Keep the last few messages as "tail" to maintain context
                     // continuity after compaction.
-                    const TAIL_SIZE: usize = 4;
+                    // 4 was too small (only ~2 tool pairs); use 8 like SM-compact.
+                    const TAIL_SIZE: usize = 8;
                     let tail_start = messages.len().saturating_sub(TAIL_SIZE);
-                    let tail: Vec<Message> = messages[tail_start..].to_vec();
+                    let mut tail: Vec<Message> = messages[tail_start..].to_vec();
+
+                    // Adjust tail backwards to include missing tool_use blocks.
+                    // If tail starts with a ToolResultBlocks that references a tool_use NOT in the tail,
+                    // walk backwards to include the corresponding tool_use message.
+                    // This prevents orphaned tool_results that validate_tool_pairing would delete,
+                    // matching the same adjustment done in try_sm_compact.
+                    let mut missing_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for msg in &tail {
+                        if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
+                            for block in blocks {
+                                missing_ids.insert(block.tool_use_id.clone());
+                            }
+                        }
+                    }
+                    for msg in &tail {
+                        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                            for block in blocks {
+                                missing_ids.remove(&block.id);
+                            }
+                        }
+                    }
+                    if !missing_ids.is_empty() {
+                        for i in (0..tail_start).rev() {
+                            if let MessageContent::ToolUseBlocks(blocks) = &messages[i].content {
+                                let mut has_match = false;
+                                for block in blocks {
+                                    if missing_ids.remove(&block.id) {
+                                        has_match = true;
+                                    }
+                                }
+                                if has_match {
+                                    tail.insert(0, messages[i].clone());
+                                }
+                            }
+                            if missing_ids.is_empty() {
+                                break;
+                            }
+                        }
+                    }
 
                     let mut new_messages = vec![result.boundary, result.summary];
                     new_messages.extend(tail);
