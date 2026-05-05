@@ -31,12 +31,44 @@ impl Tool for TodoWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Update your task list. Use this to track multi-step work. \
-         Create tasks when starting non-trivial work, update status as you progress, \
-         mark completed when done. Mark each task as completed as soon as you are done \
-         with the task. Do not batch up multiple tasks before marking them as completed. \
-         The list is shown in the system prompt as a reminder. \
-         Call this tool with the full updated list — it replaces the previous list."
+        "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. \
+         Make sure that at least one task is in_progress at all times. \
+         Always provide both content (imperative form, e.g. 'Fix authentication bug') and activeForm (present continuous, e.g. 'Fixing authentication bug') for each task.\n\n\
+         ## When to Use This Tool\n\
+         Use this tool proactively in these scenarios:\n\n\
+         1. Complex multi-step tasks - When a task requires 3 or more distinct steps or actions\n\
+         2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations\n\
+         3. User explicitly requests todo list - When the user directly asks you to use the todo list\n\
+         4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n\
+         5. After receiving new instructions - Immediately capture user requirements as todos\n\
+         6. When you start working on a task - Mark it as in_progress BEFORE beginning work. Ideally you should only have one todo as in_progress at a time\n\
+         7. After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation\n\n\
+         ## When NOT to Use This Tool\n\n\
+         Skip using this tool when:\n\
+         1. There is only a single, straightforward task\n\
+         2. The task is trivial and tracking it provides no organizational benefit\n\
+         3. The task can be completed in less than 3 trivial steps\n\
+         4. The task is purely conversational or informational\n\n\
+         ## Task States and Management\n\n\
+         1. Task States: Use these states to track progress:\n\
+            - pending: Task not yet started\n\
+            - in_progress: Currently working on (limit to ONE task at a time)\n\
+            - completed: Task finished successfully\n\n\
+         2. Task Management:\n\
+            - Update task status in real-time as you work\n\
+            - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)\n\
+            - Exactly ONE task must be in_progress at any time (not less, not more)\n\
+            - Complete current tasks before starting new ones\n\
+            - Remove tasks that are no longer relevant from the list entirely\n\n\
+         3. Task Completion Requirements:\n\
+            - ONLY mark a task as completed when you have FULLY accomplished it\n\
+            - If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n\
+            - When blocked, create a new task describing what needs to be resolved\n\
+            - Never mark a task as completed if:\n\
+              - Tests are failing\n\
+              - Implementation is partial\n\
+              - You encountered unresolved errors\n\n\
+         When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully."
     }
 
     fn input_schema(&self) -> Map<String, Value> {
@@ -118,25 +150,8 @@ impl Tool for TodoWriteTool {
 
         self.todo_list.update(items.clone());
 
-        // Build concise result
-        let mut sb = String::from("Todo list updated:\n");
-        for item in &items {
-            let icon = match item.status {
-                crate::context::TodoStatus::Pending => "\u{25cb} ",
-                crate::context::TodoStatus::InProgress => "\u{25d0} ",
-                crate::context::TodoStatus::Completed => "\u{25cf} ",
-            };
-            sb.push_str(icon);
-            sb.push_str(&item.content);
-            sb.push_str(" [");
-            sb.push_str(match item.status {
-                crate::context::TodoStatus::Pending => "pending",
-                crate::context::TodoStatus::InProgress => "in_progress",
-                crate::context::TodoStatus::Completed => "completed",
-            });
-            sb.push_str("]\n");
-        }
-
-        ToolResult::ok(sb)
+        // Matching upstream: reinforce that the model should use the todo list
+        // to track progress and proceed with the current task.
+        ToolResult::ok("Todos have been successfully. Ensure that you use the todo list to track your progress. Please proceed with the current tasks as applicable")
     }
 }
