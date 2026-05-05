@@ -361,7 +361,7 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(file_read::FileReadTool);
     registry.register(FileWriteTool::with_files_read(registry.files_read_handle()));
     registry.register(FileEditTool::with_files_read(registry.files_read_handle()));
-    registry.register(multi_edit::MultiEditTool);
+    registry.register(multi_edit::MultiEditTool::with_files_read(registry.files_read_handle()));
     registry.register(fileops::FileOpsTool);
     registry.register(glob_tool::GlobTool);
     registry.register(grep_tool::GrepTool);
