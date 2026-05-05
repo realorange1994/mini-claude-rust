@@ -29,17 +29,54 @@ pub struct TodoItem {
 #[derive(Clone)]
 pub struct TodoList {
     inner: Arc<RwLock<Vec<TodoItem>>>,
+    /// Turns since TodoWrite was last called. Reset to 0 on Update.
+    turns_since_last_write: Arc<std::sync::atomic::AtomicUsize>,
+    /// Turns since the last idle reminder was shown. Reset to 0 when reminder shown.
+    turns_since_last_remind: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl TodoList {
     pub fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(Vec::new())) }
+        Self {
+            inner: Arc::new(RwLock::new(Vec::new())),
+            turns_since_last_write: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            turns_since_last_remind: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     pub fn update(&self, items: Vec<TodoItem>) {
         if let Ok(mut guard) = self.inner.write() {
             *guard = items;
         }
+        self.turns_since_last_write
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns true if an idle TodoWrite reminder should be injected.
+    /// Increments both turn counters; resets the "since last remind" counter
+    /// when a reminder is due (to prevent spamming).
+    pub fn increment_turn(&self) -> bool {
+        const TURNS_SINCE_WRITE: usize = 10;
+        const TURNS_BETWEEN_REMINDERS: usize = 10;
+
+        let prev_write = self.turns_since_last_write.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.turns_since_last_remind
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let since_write = self.turns_since_last_write.load(std::sync::atomic::Ordering::Relaxed);
+        let since_remind = self.turns_since_last_remind.load(std::sync::atomic::Ordering::Relaxed);
+
+        if since_write >= TURNS_SINCE_WRITE && since_remind >= TURNS_BETWEEN_REMINDERS {
+            self.turns_since_last_remind
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Returns a nudge message when the model hasn't used TodoWrite for 10+ turns.
+    pub fn build_idle_reminder(&self) -> String {
+        String::from("The TodoWrite tool hasn't been used recently. If you're on tasks that would benefit from tracking progress, consider using the TodoWrite tool to update your task list. If your current task list is stale, update it. If you don't have a task list, create one for multi-step work.")
     }
 
     pub fn build_reminder(&self) -> String {

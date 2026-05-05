@@ -680,12 +680,20 @@ impl AgentLoop {
         let prompt = format!("{}\n\n{}", prompt, session_state);
 
         // Inject todo reminder
-        let todo_reminder = self.todo_list.build_reminder();
-        if todo_reminder.is_empty() {
+        let reminder = self.todo_list.build_reminder();
+        let mut prompt = if reminder.is_empty() {
             prompt
         } else {
-            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, todo_reminder)
+            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, reminder)
+        };
+
+        // Periodic idle reminder: if model hasn't used TodoWrite for 10+ turns
+        if self.todo_list.increment_turn() && self.todo_list.build_reminder().is_empty() {
+            let idle = self.todo_list.build_idle_reminder();
+            prompt = format!("{}\n\n{}", prompt, idle);
         }
+
+        prompt
     }
 
     /// Async version for use inside run_agent_loop.
@@ -708,15 +716,23 @@ impl AgentLoop {
 
         // Inject tool state tracker session state
         let session_state = self.tool_state_tracker.borrow().build_session_state_note();
-        let prompt = format!("{}\n\n{}", prompt, session_state);
+        let mut prompt = format!("{}\n\n{}", prompt, session_state);
 
         // Inject todo reminder
-        let todo_reminder = self.todo_list.build_reminder();
-        if todo_reminder.is_empty() {
+        let reminder = self.todo_list.build_reminder();
+        let mut result = if reminder.is_empty() {
             prompt
         } else {
-            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, todo_reminder)
+            format!("{}\n\n{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.", prompt, reminder)
+        };
+
+        // Periodic idle reminder
+        if self.todo_list.increment_turn() && self.todo_list.build_reminder().is_empty() {
+            let idle = self.todo_list.build_idle_reminder();
+            result = format!("{}\n\n{}", result, idle);
         }
+
+        result
     }
 
     /// Async version for use inside async context.

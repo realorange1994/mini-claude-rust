@@ -446,6 +446,7 @@ pub fn build_system_prompt(
         ("exec", "(for shell commands, package installs, git operations)"),
         ("file_edit", "(MUST read file first)"),
         ("file_write", "(overwrites entire file)"),
+        ("TodoWrite", "(track multi-step tasks, update as you progress)"),
     ].iter().cloned().collect();
 
     for tool in registry.all_tools() {
@@ -511,6 +512,7 @@ pub fn build_system_prompt(
     prompt.push_str("- To create files use file_write instead of cat with heredoc or echo redirection\n");
     prompt.push_str("- To search for files use glob instead of find or ls\n");
     prompt.push_str("- To search the content of files, use grep instead of grep or rg\n");
+    prompt.push_str("- Use the TodoWrite tool to track multi-step work. Break down tasks, update progress as you go, and mark items completed when done. The task list is injected into your system prompt as a reminder every turn.\n");
     prompt.push_str("- Reserve using the exec tool exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the exec tool for these if it is absolutely necessary.\n\n");
     prompt.push_str("Tool selection decision tree — follow in order, stop at the first match:\n");
     prompt.push_str("  Step 0: Does this task need a tool at all? Pure knowledge questions, content already visible in context → answer directly, no tool call.\n");
