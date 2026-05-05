@@ -7,6 +7,7 @@ pub mod context;
 pub mod error_types;
 pub mod filehistory;
 pub mod mcp;
+pub mod normalize;
 pub mod permissions;
 pub mod prompt_caching;
 pub mod context_references;

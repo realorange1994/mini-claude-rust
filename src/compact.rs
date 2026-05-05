@@ -150,9 +150,12 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
     }
 }
 
-/// Estimate total tokens for all messages
+/// Estimate total tokens for all messages.
+/// Applies 4/3 padding factor (matching upstream's Math.ceil(totalTokens * 4/3))
+/// for conservative estimates that avoid over-filling the context window.
 pub fn estimate_total_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
+    let total: usize = messages.iter().map(estimate_message_tokens).sum();
+    (total as f64 * 4.0 / 3.0).ceil() as usize
 }
 
 // --- Context window tracking ---
@@ -3047,5 +3050,16 @@ Some trailing text"#;
         assert_eq!(find_safe_drop_boundary(&msgs, 0), 0); // start of list
         assert_eq!(find_safe_drop_boundary(&msgs, 1), 1);
         assert_eq!(find_safe_drop_boundary(&msgs, 2), 2); // end of list
+    }
+
+    #[test]
+    fn test_estimate_total_tokens_padding() {
+        // 4/3 padding factor: estimate_total_tokens should return ceil(total * 4/3)
+        // Single message: "Hello" = 5 chars / 4.0 = 1.25, ceil = 2, + 3 role = 5
+        // Total = 5, padded = ceil(5 * 4/3) = ceil(6.67) = 7
+        let messages = vec![
+            Message::new(MessageRole::User, MessageContent::Text("Hello".to_string())),
+        ];
+        assert_eq!(estimate_total_tokens(&messages), 7);
     }
 }

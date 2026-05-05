@@ -826,6 +826,33 @@ impl AgentLoop {
             }
         }
 
+        // Filter orphaned thinking-only assistant messages (prevents API 400 errors
+        // from compaction leaving orphaned thinking blocks without their text sibling).
+        // Filter trailing thinking from last assistant message.
+        messages = Self::filter_orphaned_thinking(messages);
+        messages = Self::filter_trailing_thinking(messages);
+
+        // Normalize API messages (sort tool input keys, collapse whitespace)
+        messages = crate::normalize::normalize_api_messages(&messages);
+
+        messages
+    }
+
+    /// Filter orphaned thinking-only assistant messages.
+    /// Prevents API 400 errors from compaction leaving orphaned thinking blocks
+    /// without their text/tool_use sibling.
+    fn filter_orphaned_thinking(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        // Go/Rust don't store thinking blocks in context, so this is a passthrough.
+        // Implemented for alignment with upstream and future-proofing.
+        messages
+    }
+
+    /// Filter trailing thinking from the last assistant message.
+    /// Upstream strips thinking from the last assistant message to prevent
+    /// signature binding issues when re-sending cached responses.
+    fn filter_trailing_thinking(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        // Go/Rust don't store thinking blocks in context, so this is a passthrough.
+        // Implemented for alignment with upstream and future-proofing.
         messages
     }
 
