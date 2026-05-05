@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
@@ -130,6 +131,17 @@ impl Tool for FileWriteTool {
         // Write file
         if let Err(e) = fs::write(&path, content) {
             return ToolResult::error(format!("Error writing file: {}", e));
+        }
+
+        // Update files_read so subsequent writes are allowed without re-reading
+        if let Some(files_read) = &self.files_read {
+            let path_str = normalize_file_path(&path.to_string_lossy());
+            let mtime = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let read_time = SystemTime::now();
+            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time });
         }
 
         ToolResult::ok(format!("Wrote {} chars to {}", content.len(), path.display()))

@@ -51,6 +51,7 @@ pub use web_search::WebSearchTool;
 use crate::config::Config;
 use serde_json;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
@@ -307,6 +308,19 @@ impl Registry {
                 Err(format!("Error: cannot check file status: {}", e))
             }
         }
+    }
+
+    /// Mark a file as having been written to, updating its mtime in the registry.
+    /// This is called after a successful write/edit so that subsequent writes
+    /// are allowed without requiring a re-read.
+    pub fn mark_file_written(&self, path: &Path) {
+        let normalized = normalize_file_path(&path.to_string_lossy());
+        let mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let read_time = SystemTime::now();
+        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time });
     }
 
     /// Clear the read-file tracking (e.g., on /clear)
