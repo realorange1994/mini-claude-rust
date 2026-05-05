@@ -308,7 +308,7 @@ impl AgentLoop {
             context,
             client,
             use_stream,
-            max_tool_chars: 8192,
+            max_tool_chars: 50000,
             max_turns,
             base_url,
             api_key,
@@ -445,7 +445,7 @@ impl AgentLoop {
             context,
             client,
             use_stream,
-            max_tool_chars: 8192,
+            max_tool_chars: 50000,
             max_turns,
             base_url,
             api_key,
@@ -2338,7 +2338,7 @@ impl AgentLoop {
     /// Truncate long tool output (keep first 80% and last 20%)
     #[allow(dead_code)]
     fn truncate_output(&self, output: &str, limit: usize) -> String {
-        let limit = if limit == 0 { 8192 } else { limit };
+        let limit = if limit == 0 { 50000 } else { limit };
         if output.len() <= limit {
             return output.to_string();
         }
@@ -2830,7 +2830,7 @@ impl AgentLoop {
             context: Arc::new(RwLock::new(context)),
             client,
             use_stream,
-            max_tool_chars: 8192,
+            max_tool_chars: 50000,
             max_turns,
             base_url,
             api_key,
