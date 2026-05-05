@@ -952,13 +952,14 @@ impl ConversationContext {
     /// Two improvements over the original:
     ///  1. Dedup: skips tool results already cleared to the placeholder string.
     ///  2. Whitelist: only clears results from compactable tools (read/exec/edit/grep/glob/web/write).
-    pub fn micro_compact_entries(&mut self, keep_recent: usize, placeholder: &str) -> usize {
+    pub fn micro_compact_entries(&mut self, keep_recent: usize, placeholder: &str, min_char_count: usize) -> usize {
         let keep_recent = if keep_recent == 0 { 5 } else { keep_recent };
         let placeholder = if placeholder.is_empty() {
             "[Old tool result content cleared]"
         } else {
             placeholder
         };
+        let min_char_count = if min_char_count == 0 { 2000 } else { min_char_count };
 
         // Pass 1: Build tool_use_id -> tool_name mapping from ToolUseBlocks messages.
         let mut tool_name_map: HashMap<String, String> = HashMap::new();
@@ -983,30 +984,50 @@ impl ConversationContext {
                     continue;
                 }
 
-                // Check each block: is it already cleared? is it a compactable tool?
+                // Check each block: is it already cleared? is it a compactable tool AND large enough?
                 let all_cleared = blocks.iter().all(|b| {
                     b.content.iter().any(|c| {
                         matches!(c, ToolResultContent::Text { text } if text == placeholder)
                     })
                 });
                 let has_compactable = blocks.iter().any(|b| {
-                    tool_name_map
-                        .get(&b.tool_use_id)
-                        .is_some_and(|name| is_compactable_tool(name))
+                    if let Some(name) = tool_name_map.get(&b.tool_use_id) {
+                        if is_compactable_tool(name) {
+                            // Only consider compactable if the result is large enough to justify clearing.
+                            // Small results (< min_char_count) are preserved to prevent amnesia.
+                            let total_chars: usize = b.content.iter().map(|c| {
+                                match c {
+                                    ToolResultContent::Text { text } => text.len(),
+                                    _ => 0,
+                                }
+                            }).sum();
+                            return total_chars >= min_char_count;
+                        }
+                    }
+                    false
                 });
 
-                // Skip if all blocks are already cleared, or none are compactable
+                // Skip if all blocks are already cleared, or none are compactable/large enough
                 if all_cleared || !has_compactable {
                     continue;
                 }
 
-                // Clear only compactable tool results; leave others untouched
+                // Clear only compactable tool results that are large enough; leave others untouched
                 for block in blocks.iter_mut() {
                     if let Some(name) = tool_name_map.get(&block.tool_use_id) {
                         if is_compactable_tool(name) {
-                            block.content = vec![ToolResultContent::Text {
-                                text: placeholder.to_string(),
-                            }];
+                            // Check size threshold: preserve small results to prevent amnesia
+                            let total_chars: usize = block.content.iter().map(|c| {
+                                match c {
+                                    ToolResultContent::Text { text } => text.len(),
+                                    _ => 0,
+                                }
+                            }).sum();
+                            if total_chars >= min_char_count {
+                                block.content = vec![ToolResultContent::Text {
+                                    text: placeholder.to_string(),
+                                }];
+                            }
                         }
                     }
                 }

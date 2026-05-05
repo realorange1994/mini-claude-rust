@@ -74,6 +74,7 @@ fn config_custom_values() {
         micro_compact_enabled: true,
         micro_compact_keep_recent: 5,
         micro_compact_placeholder: "[Old tool result content cleared]".to_string(),
+        micro_compact_min_char_count: 2000,
         post_compact_recover_files: true,
         post_compact_max_files: 5,
         post_compact_max_file_chars: 50_000,

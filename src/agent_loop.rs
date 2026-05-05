@@ -907,7 +907,7 @@ impl AgentLoop {
                 let keep_recent = self.config.micro_compact_keep_recent;
                 let placeholder = self.config.micro_compact_placeholder.clone();
                 let mut ctx = self.context.write().await;
-                let cleared = ctx.micro_compact_entries(keep_recent, &placeholder);
+                let cleared = ctx.micro_compact_entries(keep_recent, &placeholder, self.config.micro_compact_min_char_count);
                 if cleared > 0 {
                     agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
                     // NOTE: do NOT call tool_state_tracker.on_compaction() here.
