@@ -1,6 +1,6 @@
 use crate::compact::Compactor;
 use crate::config::Config;
-use crate::context::{ConversationContext, ConversationEntry, MessageContent, ToolUseBlock, ToolResultBlock, ToolResultContent};
+use crate::context::{ConversationContext, ConversationEntry, Message, MessageContent, MessageRole, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::auto_classifier::AutoModeClassifier;
@@ -2961,12 +2961,23 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let mut kept = vec![messages[0].clone()];
         kept.extend(messages[split..].to_vec());
 
-        let tokens_after = crate::compact::estimate_total_tokens(&kept);
+        // Build the new message set: compact boundary + kept messages.
+        // The boundary MUST be included before calling replace_messages,
+        // matching the pattern used by try_sm_compact (compact.rs:1456).
+        let boundary = Message::new(
+            MessageRole::System,
+            MessageContent::CompactBoundary {
+                trigger: crate::context::CompactTrigger::Manual,
+                pre_compact_tokens: tokens_before,
+            },
+        );
+        let mut new_messages = vec![boundary];
+        new_messages.extend(kept);
+
+        let tokens_after = crate::compact::estimate_total_tokens(&new_messages);
         let saved = tokens_before.saturating_sub(tokens_after);
 
-        // Add compact boundary marker
-        context.add_compact_boundary(crate::context::CompactTrigger::Manual, tokens_before);
-        context.replace_messages(kept);
+        context.replace_messages(new_messages);
         context.validate_tool_pairing();
         context.fix_role_alternation();
         // Mark all tracked items as stale (context has been compacted).
