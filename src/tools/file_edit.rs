@@ -171,7 +171,7 @@ impl Tool for FileEditTool {
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 let read_time = SystemTime::now();
-                files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time });
+                files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
             }
             return ToolResult::ok(format!("Successfully created {}", path.display()));
         }
@@ -300,7 +300,7 @@ impl Tool for FileEditTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time });
+            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
         }
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))

@@ -173,10 +173,15 @@ pub trait Tool: Send + Sync {
 }
 
 /// FileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).
+/// Also tracks the offset and limit used during read, for dedup detection (file_unchanged stub).
 #[derive(Clone)]
 pub struct FileReadInfo {
-    mtime: SystemTime,
-    read_time: SystemTime,
+    pub mtime: SystemTime,
+    pub read_time: SystemTime,
+    /// The offset used when reading (usize::MAX if from edit/write, not a read_file call).
+    pub read_offset: usize,
+    /// The limit used when reading (usize::MAX if from edit/write, not a read_file call).
+    pub read_limit: usize,
 }
 
 /// Registry collects tool instances and provides lookup
@@ -271,7 +276,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time });
+        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
     }
 
     /// Check if a file has been read before and hasn't been modified since
@@ -320,7 +325,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time });
+        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
     }
 
     /// Clear the read-file tracking (e.g., on /clear)

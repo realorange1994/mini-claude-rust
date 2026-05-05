@@ -119,6 +119,7 @@ impl Tool for FileReadTool {
             return ToolResult::error("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions.".to_string());
         }
 
+        // Read the file content
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Error reading file: {}", e)),
@@ -128,7 +129,7 @@ impl Tool for FileReadTool {
         let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
         let content = content.replace("\r\n", "\n");
         let mut lines: Vec<&str> = content.lines().collect();
-        
+
         // Remove trailing empty element
         if lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
@@ -148,6 +149,37 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
             .map(|v| if v <= 0 { total } else { v as usize })
             .unwrap_or(total); // default: read entire file (matching Claude Code official)
+
+        // Dedup: if we've already read this exact range and the file hasn't
+        // changed on disk, return a stub instead of re-sending the full content.
+        // The earlier Read tool_result is still in context — two full copies
+        // waste cache_creation tokens on every subsequent turn.
+        if let Some(files_read) = &self.files_read {
+            let path_str = normalize_file_path(&path.to_string_lossy());
+            let fr = files_read.read().unwrap();
+            if let Some(info) = fr.get(&path_str) {
+                // Only dedup entries from a prior Read (offset is always set by Read).
+                // Edit/Write store offset=usize::MAX — their entry reflects post-edit
+                // mtime, so deduping against it would wrongly point the model at the
+                // pre-edit Read content.
+                let is_from_read = info.read_offset != usize::MAX;
+                if is_from_read {
+                    let range_match = info.read_offset == offset && info.read_limit == limit;
+                    if range_match {
+                        if let Ok(meta) = fs::metadata(&path) {
+                            if let Ok(modified) = meta.modified() {
+                                if modified == info.mtime {
+                                    // File unchanged — return stub
+                                    return ToolResult::ok(format!(
+                                        "File unchanged since last read. The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if total == 0 {
             return ToolResult::ok(
@@ -191,7 +223,12 @@ impl Tool for FileReadTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time });
+            files_read.write().unwrap().insert(path_str, FileReadInfo {
+                mtime,
+                read_time,
+                read_offset: offset,
+                read_limit: limit,
+            });
         }
 
         ToolResult::ok(result.trim_end().to_string())
