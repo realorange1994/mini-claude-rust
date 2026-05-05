@@ -921,10 +921,12 @@ impl AgentLoop {
                         if recovered_paths.is_empty() {
                             self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
+                        // Phase 3: Keep recent messages — preserve with tool structure intact
+                        let mut ctx = self.context.write().await;
                         // Inject running agent status so model doesn't spawn duplicates
                         self.inject_running_agent_status();
-                        let snip_count = self.config.post_compact_history_snip_count;
-                        ctx.add_history_snip(snip_count, &recovered_paths);
+                        let keep_count = self.config.post_compact_history_snip_count;
+                        ctx.keep_recent_messages(keep_count);
                     }
                 } else if self.config.reactive_compact_threshold == 0 {
                     // Regular auto-compaction (token threshold based)
@@ -969,12 +971,12 @@ impl AgentLoop {
                         if recovered_paths.is_empty() {
                             self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
-                        // Phase 3: History snip — preserve recent messages verbatim
+                        // Phase 3: Keep recent messages — preserve with tool structure intact
                         let mut ctx = self.context.write().await;
                         // Inject running agent status so model doesn't spawn duplicates
                         self.inject_running_agent_status();
-                        let snip_count = self.config.post_compact_history_snip_count;
-                        ctx.add_history_snip(snip_count, &recovered_paths);
+                        let keep_count = self.config.post_compact_history_snip_count;
+                        ctx.keep_recent_messages(keep_count);
                     }
 
                     // Log summary to transcript if one was added
@@ -2825,6 +2827,46 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
         // Mark all tracked items as stale (partial compact removes tool results).
         self.tool_state_tracker.borrow_mut().on_compaction();
+
+        // Post-compact recovery: re-inject recently-read files.
+        // Use blocking I/O since force_partial_compact is called from sync context.
+        if self.config.post_compact_recover_files {
+            let registry = self.registry.blocking_read();
+            let max_files = if self.config.post_compact_max_files == 0 { 5 } else { self.config.post_compact_max_files };
+            let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+            let paths = registry.get_recently_read_files(max_files);
+            drop(registry);
+
+            let preserved_read_paths = Self::collect_read_tool_file_paths(&context);
+            let mut total_chars = 0;
+            for path in &paths {
+                let real_path = if std::path::Path::new(path).is_absolute() {
+                    path.clone()
+                } else {
+                    self.config.project_dir.join(path).to_string_lossy().to_string()
+                };
+                if Self::should_exclude_from_post_compact_restore(&real_path, &self.config.project_dir) { continue; }
+                if preserved_read_paths.contains(&real_path) { continue; }
+                if let Ok(data) = std::fs::read_to_string(&real_path) {
+                    let content = if total_chars + data.len() > max_file_chars {
+                        let remaining = max_file_chars - total_chars;
+                        if remaining < 200 { break; }
+                        let truncated: String = data.chars().take(remaining).collect();
+                        format!("{}\n... [truncated]", truncated)
+                    } else { data.clone() };
+                    let attachment = format!("[Post-compact file recovery: {}]\n```\n{}\n```", path, content);
+                    context.add_attachment(attachment);
+                    total_chars += data.len();
+                }
+            }
+        }
+
+        // Inject running agent status so model doesn't spawn duplicates
+        self.inject_running_agent_status();
+
+        // Keep recent messages — preserve with tool structure intact
+        let keep_count = self.config.post_compact_history_snip_count;
+        context.keep_recent_messages(keep_count);
 
         result
     }

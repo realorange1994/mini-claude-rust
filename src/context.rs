@@ -974,6 +974,110 @@ impl ConversationContext {
         cleared
     }
 
+    /// KeepRecentMessages preserves the most recent conversation entries verbatim
+    /// after compaction, keeping their original structure (including ToolUseBlocks
+    /// and ToolResultBlocks). This matches upstream's messagesToKeep mechanism
+    /// (sessionMemoryCompact.ts calculateMessagesToKeepIndex + adjustIndexToPreserveAPIInvariants).
+    ///
+    /// Unlike add_history_snip which converts entries to plain text (losing tool structure),
+    /// this method keeps entries as-is so the model can see actual tool_use/tool_result pairs,
+    /// preventing re-execution of commands it already ran.
+    ///
+    /// The method also adjusts the kept range backwards to include any assistant messages
+    /// whose tool_use blocks are referenced by tool_results in the kept range, ensuring
+    /// tool_use/tool_result pairing is never broken (matching upstream's
+    /// adjustIndexToPreserveAPIInvariants).
+    pub fn keep_recent_messages(&mut self, count: usize) {
+        let count = if count == 0 { 8 } else { count };
+
+        // Find the most recent CompactBoundary
+        let boundary_idx = match self.messages.iter().rposition(|m| m.is_compact_boundary()) {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        // Collect up to 'count' entries before the boundary (pre-compact messages)
+        let mut kept_indices: Vec<usize> = Vec::new();
+        for i in (0..boundary_idx).rev() {
+            if kept_indices.len() >= count {
+                break;
+            }
+            match &self.messages[i].content {
+                MessageContent::CompactBoundary { .. }
+                | MessageContent::Summary(_)
+                | MessageContent::Attachment(_) => continue,
+                _ => kept_indices.push(i),
+            }
+        }
+        if kept_indices.is_empty() {
+            return;
+        }
+        // Reverse so they're in chronological order
+        kept_indices.reverse();
+
+        // Adjust backwards to preserve tool_use/tool_result pairing.
+        // If any kept entry contains ToolResultBlocks, collect its tool_use_ids,
+        // then walk further backwards to find the assistant messages with matching
+        // ToolUseBlocks. This prevents orphaned tool_results that would cause API error 2013.
+        let needed_ids: Vec<String> = kept_indices.iter()
+            .filter_map(|&i| {
+                if let MessageContent::ToolResultBlocks(blocks) = &self.messages[i].content {
+                    Some(blocks.iter().map(|b| b.tool_use_id.clone()))
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+
+        if !needed_ids.is_empty() {
+            // Check which tool_use_ids are already present in the kept range
+            let already_present: std::collections::HashSet<String> = kept_indices.iter()
+                .filter_map(|&i| {
+                    if let MessageContent::ToolUseBlocks(blocks) = &self.messages[i].content {
+                        Some(blocks.iter().map(|b| b.id.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .collect();
+
+            let missing_ids: std::collections::HashSet<String> = needed_ids.into_iter()
+                .filter(|id| !already_present.contains(id))
+                .collect();
+
+            if !missing_ids.is_empty() {
+                // Walk backwards through pre-boundary entries to find assistant messages
+                // containing the missing tool_use blocks
+                let mut additional_indices: Vec<usize> = Vec::new();
+                let min_idx = kept_indices.first().copied().unwrap_or(0);
+                for i in (0..min_idx).rev() {
+                    if self.messages[i].role != MessageRole::Assistant {
+                        continue;
+                    }
+                    if let MessageContent::ToolUseBlocks(blocks) = &self.messages[i].content {
+                        let has_match = blocks.iter().any(|b| missing_ids.contains(&b.id));
+                        if has_match {
+                            additional_indices.push(i);
+                        }
+                    }
+                }
+                // Insert additional indices in chronological order before the kept range
+                additional_indices.reverse();
+                let mut combined = additional_indices;
+                combined.extend(kept_indices);
+                kept_indices = combined;
+            }
+        }
+
+        // Clone the kept messages and append them after the boundary+summary
+        let kept_messages: Vec<Message> = kept_indices.iter()
+            .map(|&i| self.messages[i].clone())
+            .collect();
+        self.messages.extend(kept_messages);
+    }
+
     /// AddHistorySnip preserves the most recent conversation entries verbatim
     /// after compaction. Entries are added as user-role text messages with a
     /// [history-snip] prefix. skip_paths contains file paths recovered by
