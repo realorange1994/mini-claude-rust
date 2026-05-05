@@ -120,7 +120,7 @@ impl Tool for FileReadTool {
         // even for large files (matching upstream behavior).
         let has_explicit_offset = params.contains_key("offset");
         let has_explicit_limit = params.contains_key("limit");
-        let is_partial_request = has_explicit_offset || has_explicit_limit;
+        let is_partial_request = has_explicit_offset && has_explicit_limit;
 
         let offset = params
             .get("offset")

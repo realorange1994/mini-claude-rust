@@ -648,16 +648,11 @@ impl ConversationContext {
                 let first = self.messages[..1].to_vec();
                 let recent = self.messages[self.messages.len() - keep..].to_vec();
 
-                // Merge and ensure role alternation -- remove consecutive same-role entries
-                let mut merged: Vec<Message> = Vec::with_capacity(first.len() + recent.len());
-                for entry in first.into_iter().chain(recent) {
-                    if merged.last().is_none_or(|last| last.role != entry.role) {
-                        merged.push(entry);
-                    }
-                    // Skip entries with same role as last kept entry
-                }
-
-                self.messages = merged;
+                // Keep ALL entries and let fix_role_alternation handle same-role merging.
+                // Previously, same-role entries were silently skipped here, causing content loss
+                // and the "re-executes historical instructions" bug (important user instructions
+                // in Summary/Attachment/Text entries were permanently dropped).
+                self.messages = first.into_iter().chain(recent).collect();
 
                 // After truncation, validate tool pairing and fix alternation
                 self.validate_tool_pairing();
