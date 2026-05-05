@@ -2716,6 +2716,59 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         sb.trim_end().to_string()
     }
 
+    /// Synchronous version of build_post_compact_tools_announcement for non-async contexts.
+    fn build_post_compact_tools_announcement_sync(&self) -> String {
+        let registry = self.registry.blocking_read();
+        let all_tools = registry.all_tools();
+
+        let mut native_tools = Vec::new();
+        let mut mcp_tools = Vec::new();
+        let mut skill_tools = Vec::new();
+
+        for t in &all_tools {
+            let entry = format!("- **{}**: {}", t.name(), t.description());
+            match t.name() {
+                "mcp_call_tool" | "mcp_server_status" => mcp_tools.push(entry),
+                "search_skills" | "read_skill" | "list_skills" => skill_tools.push(entry),
+                _ => native_tools.push(entry),
+            }
+        }
+        drop(registry);
+
+        if native_tools.is_empty() && mcp_tools.is_empty() && skill_tools.is_empty() {
+            return String::new();
+        }
+
+        let mut sb = String::from("## Tools Available After Compaction\n\nThe following tools are available. Use them as needed.\n\n");
+
+        if !native_tools.is_empty() {
+            sb.push_str("### Core Tools\n");
+            for t in &native_tools {
+                sb.push_str(t);
+                sb.push('\n');
+            }
+            sb.push('\n');
+        }
+        if !mcp_tools.is_empty() {
+            sb.push_str("### MCP Tools\n");
+            for t in &mcp_tools {
+                sb.push_str(t);
+                sb.push('\n');
+            }
+            sb.push('\n');
+        }
+        if !skill_tools.is_empty() {
+            sb.push_str("### Skill Tools\n");
+            for t in &skill_tools {
+                sb.push_str(t);
+                sb.push('\n');
+            }
+            sb.push('\n');
+        }
+
+        sb.trim_end().to_string()
+    }
+
     /// Build a re-announcement of MCP servers and tools after compaction.
     fn build_post_compact_mcp_announcement(mgr: &crate::mcp::Manager) -> String {
         let servers = mgr.list_servers();
@@ -3044,6 +3097,42 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
             if files_recovered > 0 {
                 agent_emit!("[post-compact] Recovered {} files ({} chars)", files_recovered, total_chars);
+            }
+        }
+
+        // --- Tools re-announcement ---
+        // After compaction the model loses all tool-use history. Re-announce the
+        // full tool inventory so the model knows what capabilities are available.
+        // This matches the auto-compact path (agent_loop.rs:2629-2665).
+        {
+            let tools_attachment = self.build_post_compact_tools_announcement_sync();
+            if !tools_attachment.is_empty() {
+                let mut ctx_mut = self.context.blocking_write();
+                ctx_mut.add_attachment(tools_attachment);
+                agent_emit!("[post-compact] Re-announced tool inventory");
+            }
+        }
+
+        // --- MCP tools re-announcement ---
+        // Re-announce available MCP servers and their tools after compaction.
+        if let Some(ref mgr) = self.config.mcp_manager {
+            let mcp_attachment = Self::build_post_compact_mcp_announcement(mgr);
+            if !mcp_attachment.is_empty() {
+                let mut ctx_mut = self.context.blocking_write();
+                ctx_mut.add_attachment(mcp_attachment);
+                agent_emit!("[post-compact] Re-announced MCP tools");
+            }
+        }
+
+        // --- Agent listing re-announcement ---
+        // Re-announce active background sub-agents after compaction so the model
+        // doesn't lose track of running tasks.
+        if let Some(ref store) = self.agent_task_store {
+            let agent_attachment = Self::build_post_compact_agent_announcement(store);
+            if !agent_attachment.is_empty() {
+                let mut ctx_mut = self.context.blocking_write();
+                ctx_mut.add_attachment(agent_attachment);
+                agent_emit!("[post-compact] Re-announced background agents");
             }
         }
 

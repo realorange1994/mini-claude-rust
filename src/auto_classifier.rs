@@ -246,7 +246,9 @@ fn split_shell_commands(cmd: &str) -> Vec<String> {
             continue;
         }
         if c == b')' {
-            depth -= 1;
+            if depth > 0 {
+                depth -= 1;
+            }
             current.push(c as char);
             i += 1;
             continue;
