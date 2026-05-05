@@ -406,12 +406,14 @@ fn extract_removal_paths(command: &str) -> Vec<String> {
 
 /// Strip surrounding single or double quotes from a string.
 fn strip_quotes(s: &str) -> String {
-    if s.len() >= 2 {
-        let bytes = s.as_bytes();
-        if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() >= 2 {
+        let first = chars[0];
+        let last = chars[chars.len() - 1];
+        if (first == '"' && last == '"')
+            || (first == '\'' && last == '\'')
         {
-            return s[1..s.len() - 1].to_string();
+            return chars[1..chars.len() - 1].iter().collect();
         }
     }
     s.to_string()

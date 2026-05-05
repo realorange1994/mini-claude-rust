@@ -831,11 +831,13 @@ fn strip_trailing_punctuation(value: &str) -> String {
 
 /// Strip surrounding quotes from a value.
 fn strip_quotes(value: &str) -> String {
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"') ||
-           (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'') {
-            return value[1..value.len()-1].to_string();
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() >= 2 {
+        let first = chars[0];
+        let last = chars[chars.len() - 1];
+        if (first == '"' && last == '"')
+            || (first == '\'' && last == '\'') {
+            return chars[1..chars.len()-1].iter().collect();
         }
     }
     value.to_string()
