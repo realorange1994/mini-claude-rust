@@ -25,6 +25,12 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// Tool annotated with its source server name
+pub struct ToolWithServer {
+    pub tool: Tool,
+    pub server: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToolResultContent {
@@ -124,6 +130,21 @@ impl Manager {
             }
             None => "not found".to_string(),
         }
+    }
+
+    /// List all tools annotated with their source server name.
+    pub fn all_tools_with_server(&self) -> Vec<ToolWithServer> {
+        let clients = self.clients.read().unwrap();
+        let mut result = Vec::new();
+        for (server_name, client) in clients.iter() {
+            for tool in client.tools() {
+                result.push(ToolWithServer {
+                    tool: tool.clone(),
+                    server: server_name.clone(),
+                });
+            }
+        }
+        result
     }
 
     /// Call a tool by name, searching across all servers.
