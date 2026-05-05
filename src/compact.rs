@@ -543,7 +543,7 @@ const DETAILED_ANALYSIS_INSTRUCTION_BASE: &str = r#"Before providing your final 
 
 /// Detailed analysis instruction for partial compaction (PARTIAL variant).
 #[allow(dead_code)]
-const DETAILED_ANALYSIS_INSTRUCTION_PARTIAL: &str = r#" = r#"Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+const DETAILED_ANALYSIS_INSTRUCTION_PARTIAL: &str = r#"Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Analyze the recent messages chronologically. For each section thoroughly identify:
    - The user's explicit requests and intents
