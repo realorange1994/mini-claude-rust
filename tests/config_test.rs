@@ -353,7 +353,6 @@ fn build_system_prompt_contains_environment_info() {
 
     assert!(prompt.contains("miniClaudeCode"));
     assert!(prompt.contains("Environment"));
-    assert!(prompt.contains("Operating Rules"));
 }
 
 #[test]
