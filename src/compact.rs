@@ -487,7 +487,14 @@ fn strip_image_content(messages: &mut Vec<Message>) {
 /// Run all 4 passes of pre-pruning on messages.
 pub fn prune_tool_results(messages: &mut Vec<Message>) {
     dedup_tool_results(messages);
-    summarize_old_tool_results(messages);
+    // NOTE: summarize_old_tool_results removed — it replaced tool result content
+    // with one-line summaries before the LLM compaction call, meaning the LLM
+    // never saw the full content and couldn't generate an accurate summary.
+    // This was the root cause of "micro-compact memory loss" where tool results
+    // were permanently lost. Upstream avoids this by using cache_edits to delete
+    // tool results server-side without modifying local messages, and uses a
+    // system prompt section ("summarize_tool_results") instructing the model to
+    // write down important information before results are cleared.
     truncate_large_tool_args(messages);
     strip_image_content(messages);
 }
