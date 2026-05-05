@@ -113,6 +113,18 @@ impl Tool for FileEditTool {
                         "Error: file has not been read yet. Read it first before editing it.".to_string()
                     );
                 }
+
+                // Partial-view check: if the user read only a portion (with
+                // offset/limit), they must do a fresh full read before editing.
+                // This prevents the model from editing based on incomplete content.
+                let is_partial = info.read_offset != usize::MAX
+                    && (info.read_offset != 1 || info.read_limit != usize::MAX);
+                if is_partial {
+                    drop(fr);
+                    return ToolResult::error(
+                        "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing.".to_string()
+                    );
+                }
             }
         }
 
