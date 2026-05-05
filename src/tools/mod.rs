@@ -360,14 +360,28 @@ impl Registry {
 }
 
 /// Normalize a file path for consistent comparison.
-/// Always lowercases on ALL platforms — the LLM may send paths with different
-/// casing than the actual filesystem (e.g. `src/MyFile.rs` vs `src/myfile.rs`).
-/// Without unconditional lowercasing, the read-registry lookup fails on
-/// case-sensitive filesystems (Linux/macOS), causing the "file has not been
-/// read yet" infinite loop.
+/// - Converts backslashes to forward slashes
+/// - Cleans `.` and `..` components via path component iteration
+/// - Lowercases on ALL platforms — the LLM may send paths with different
+///   casing than the actual filesystem (e.g. `src/MyFile.rs` vs `src/myfile.rs`).
+///   Without unconditional lowercasing, the read-registry lookup fails on
+///   case-sensitive filesystems (Linux/macOS), causing the "file has not been
+///   read yet" infinite loop.
 pub(crate) fn normalize_file_path(path: &str) -> String {
-    let p = path.replace('\\', "/");
-    p.to_lowercase()
+    let with_forward_slashes = path.replace('\\', "/");
+    let path = std::path::Path::new(&with_forward_slashes);
+    let mut cleaned = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => { /* skip "." */ }
+            std::path::Component::ParentDir => {
+                cleaned.pop();
+            }
+            _ => cleaned.push(component),
+        }
+    }
+    let result = cleaned.to_string_lossy().replace('\\', "/");
+    result.to_lowercase()
 }
 
 impl Default for Registry {
