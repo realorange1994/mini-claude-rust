@@ -1649,18 +1649,38 @@ impl AgentLoop {
                                 &self.base_url,
                             ).await;
                         } else if context_errors == 2 {
-                            let mut ctx = self.context.write().await;
-                            ctx.truncate_history();
-                            self.tool_state_tracker.borrow_mut().on_compaction();
+                            let pre_tokens = {
+                                let ctx = self.context.read().await;
+                                crate::compact::estimate_total_tokens(ctx.messages())
+                            };
+                            {
+                                let mut ctx = self.context.write().await;
+                                ctx.truncate_history();
+                                self.tool_state_tracker.borrow_mut().on_compaction();
+                            }
+                            self.inject_truncation_continuation(pre_tokens);
                         } else if context_errors == 3 {
-                            let mut ctx = self.context.write().await;
-                            ctx.aggressive_truncate_history();
-                            self.tool_state_tracker.borrow_mut().on_compaction();
+                            let pre_tokens = {
+                                let ctx = self.context.read().await;
+                                crate::compact::estimate_total_tokens(ctx.messages())
+                            };
+                            {
+                                let mut ctx = self.context.write().await;
+                                ctx.aggressive_truncate_history();
+                                self.tool_state_tracker.borrow_mut().on_compaction();
+                            }
+                            self.inject_truncation_continuation(pre_tokens);
                         } else {
-                            // Last resort: minimum history (Go: MinimumHistory)
-                            let mut ctx = self.context.write().await;
-                            ctx.minimum_history();
-                            self.tool_state_tracker.borrow_mut().on_compaction();
+                            let pre_tokens = {
+                                let ctx = self.context.read().await;
+                                crate::compact::estimate_total_tokens(ctx.messages())
+                            };
+                            {
+                                let mut ctx = self.context.write().await;
+                                ctx.minimum_history();
+                                self.tool_state_tracker.borrow_mut().on_compaction();
+                            }
+                            self.inject_truncation_continuation(pre_tokens);
                         }
                         continue;
                     }
@@ -3491,6 +3511,50 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             );
             context.add_attachment(status_line);
         }
+    }
+
+    /// Injects a CompactBoundary + structured summary after truncation-based
+    /// context recovery. Without this, the model receives truncated context with
+    /// no directive to continue, causing it to re-execute old instructions.
+    /// Matches the boundary+summary pattern used by force_compact and LLM-compact.
+    fn inject_truncation_continuation(&self, pre_tokens: usize) {
+        let mut context = self.context.blocking_write();
+
+        context.add_compact_boundary(crate::context::CompactTrigger::Auto, pre_tokens);
+
+        // Build structured summary matching upstream's getCompactUserSummaryMessage format.
+        let mut summary_lines = vec![
+            "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.".to_string(),
+            format!("\n[compact: {} tokens compressed]\n", pre_tokens),
+        ];
+
+        let conclusions = self.tool_state_tracker.borrow().get_conclusions();
+        if !conclusions.is_empty() {
+            summary_lines.push("## Completed Work\n".to_string());
+            for c in &conclusions {
+                summary_lines.push(format!("- {}\n", c));
+            }
+            summary_lines.push("\n".to_string());
+        }
+
+        summary_lines.push("## Current Work\n".to_string());
+        summary_lines.push("(compact truncated the conversation — recent messages are preserved verbatim below)\n".to_string());
+
+        let tp = self.transcript_path();
+        if !tp.is_empty() {
+            summary_lines.push(format!(
+                "\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}\n",
+                tp
+            ));
+        }
+
+        summary_lines.push("\nRecent messages are preserved verbatim.\n\n".to_string());
+        summary_lines.push(
+            "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.".to_string(),
+        );
+
+        let summary_content = summary_lines.join("");
+        context.add_summary(summary_content);
     }
 }
 
