@@ -262,8 +262,10 @@ impl Registry {
 
     /// Mark a file as having been read, storing its current mtime and the read timestamp
     pub fn mark_file_read(&self, path: &str) {
-        let normalized = normalize_file_path(path);
-        let mtime = std::fs::metadata(expand_path(path))
+        // Expand before normalizing so that ~/foo and /home/user/foo map to the same key.
+        let expanded = expand_path(path);
+        let normalized = normalize_file_path(&expanded.to_string_lossy());
+        let mtime = std::fs::metadata(&expanded)
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -274,11 +276,11 @@ impl Registry {
     /// Check if a file has been read before and hasn't been modified since
     /// Returns Ok(()) if safe to edit, or Err(error_message) if not
     pub fn check_file_stale(&self, path: &str) -> Result<(), String> {
-        let normalized = normalize_file_path(path);
-        let fp = expand_path(path);
+        let expanded = expand_path(path);
+        let normalized = normalize_file_path(&expanded.to_string_lossy());
 
         // New file creation: file doesn't exist yet, allow without read
-        if !fp.exists() {
+        if !expanded.exists() {
             return Ok(());
         }
 
@@ -288,7 +290,7 @@ impl Registry {
 
         let stored = stored_info.ok_or("Error: file has not been read yet. Read it first with read_file before editing.".to_string())?;
 
-        match std::fs::metadata(&fp) {
+        match std::fs::metadata(&expanded) {
             Ok(meta) => {
                 let current_mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 if current_mtime == stored.mtime {
