@@ -2356,6 +2356,97 @@ impl AgentLoop {
             &output[last_end..])
     }
 
+/// Returns true if the file should NOT be re-injected after compaction.
+/// Excludes CLAUDE.md (already in system prompt) and plan files (.claude/plan/*.md).
+/// Matches upstream's shouldExcludeFromPostCompactRestore.
+fn should_exclude_from_post_compact_restore(filename: &str, project_dir: &Path) -> bool {
+    let path = Path::new(filename);
+
+    // Exclude CLAUDE.md — already loaded into system prompt
+    if let Some(name) = path.file_name() {
+        if name.eq_ignore_ascii_case("CLAUDE.md") {
+            return true;
+        }
+    }
+
+    // Exclude plan files under .claude/plan/
+    let plan_dir = project_dir.join(".claude").join("plan");
+    if plan_dir.is_dir() {
+        if let Ok(canonical_file) = std::fs::canonicalize(path) {
+            if let Ok(canonical_plan) = std::fs::canonicalize(&plan_dir) {
+                if canonical_file.starts_with(&canonical_plan) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Walks the preserved message entries (those after the most recent CompactBoundary)
+/// and collects file paths from read_file tool_use blocks. Files whose tool_result
+/// is a file_unchanged stub are excluded — the stub points at an earlier full read
+/// that may have been compacted away, so we want the recovery to re-inject the
+/// real content. Matches upstream's collectReadToolFilePaths.
+fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::HashSet<String> {
+    use crate::context::{MessageContent, MessageRole};
+
+    let messages = ctx.messages();
+
+    // Find entries after the most recent CompactBoundaryContent
+    let boundary_idx = messages.iter().rposition(|m| m.is_compact_boundary());
+    let boundary_idx = match boundary_idx {
+        Some(idx) => idx,
+        None => return std::collections::HashSet::new(),
+    };
+
+    let preserved = &messages[boundary_idx + 1..];
+
+    // Step 1: collect tool_use_ids whose tool_result is a file_unchanged stub
+    let mut stub_tool_use_ids = std::collections::HashSet::new();
+    for msg in preserved {
+        if msg.role != MessageRole::User {
+            continue;
+        }
+        if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
+            for block in blocks {
+                for c in &block.content {
+                    let ToolResultContent::Text { text } = c;
+                    if text.starts_with("File unchanged since last read.") {
+                        stub_tool_use_ids.insert(block.tool_use_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: collect file paths from read_file tool_use blocks, skipping stubs
+    let mut paths = std::collections::HashSet::new();
+    for msg in preserved {
+        if msg.role != MessageRole::Assistant {
+            continue;
+        }
+        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+            for block in blocks {
+                if block.name != "read_file" {
+                    continue;
+                }
+                if stub_tool_use_ids.contains(&block.id) {
+                    continue;
+                }
+                if let Some(serde_json::Value::String(fp)) = block.input.get("file_path") {
+                    if !fp.is_empty() {
+                        paths.insert(fp.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    paths
+}
+
     /// Post-compact recovery re-injects critical context after compaction.
     /// This prevents the model from losing awareness of files it was working on
     /// and skills it was using, reducing wasted turns re-reading them.
@@ -2381,6 +2472,14 @@ impl AgentLoop {
             self.config.post_compact_max_file_chars
         };
 
+        // Collect file paths already visible in preserved messages (after boundary).
+        // These are files whose read results survived compaction, so re-injecting
+        // them would be redundant. Matches upstream's collectReadToolFilePaths.
+        let preserved_read_paths = {
+            let ctx = self.context.read().await;
+            Self::collect_read_tool_file_paths(&ctx)
+        };
+
         let paths = registry.get_recently_read_files(max_files);
         drop(registry);
 
@@ -2395,6 +2494,16 @@ impl AgentLoop {
             } else {
                 self.config.project_dir.join(path).to_string_lossy().to_string()
             };
+
+            // Skip plan files and memory files (CLAUDE.md, etc.)
+            if Self::should_exclude_from_post_compact_restore(&real_path, &self.config.project_dir) {
+                continue;
+            }
+
+            // Skip files already visible in the preserved message tail
+            if preserved_read_paths.contains(&real_path) {
+                continue;
+            }
 
             if let Ok(data) = std::fs::read_to_string(&real_path) {
                 let content = if total_chars + data.len() > max_file_chars {
