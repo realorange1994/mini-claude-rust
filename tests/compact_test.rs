@@ -135,8 +135,10 @@ fn estimate_total_multiple_messages() {
         Message::new(MessageRole::Assistant, MessageContent::Text("Hi there".to_string())),
     ];
     let total = estimate_total_tokens(&messages);
+    // estimate_total_tokens applies 4/3 padding, so it's ceil(sum * 4/3)
+    // not equal to raw sum of individual estimates
     let individual = estimate_message_tokens(&messages[0]) + estimate_message_tokens(&messages[1]);
-    assert_eq!(total, individual);
+    assert_eq!(total, ((individual as f64 * 4.0 / 3.0).ceil() as usize));
 }
 
 // ─── find_round_boundaries ───
