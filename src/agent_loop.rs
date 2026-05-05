@@ -2805,7 +2805,69 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         // Inject running agent status so model doesn't spawn duplicates
         self.inject_running_agent_status();
 
-        let entries_after = context.len();
+        // Drop context write lock before async recovery
+        drop(context);
+
+        // Post-compact recovery: re-inject recently-read files so the model
+        // can still edit them without hitting "file has not been read" errors.
+        // This matches Go's PostCompactRecovery and upstream's
+        // createPostCompactFileAttachments.
+        if self.config.post_compact_recover_files {
+            let registry = self.registry.blocking_read();
+            let max_files = if self.config.post_compact_max_files == 0 { 5 } else { self.config.post_compact_max_files };
+            let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+            let paths = registry.get_recently_read_files(max_files);
+            drop(registry);
+
+            let mut total_chars = 0;
+            let mut files_recovered = 0;
+            let mut paths_to_remark = Vec::new();
+            for path in &paths {
+                let real_path = if std::path::Path::new(path).is_absolute() {
+                    path.clone()
+                } else {
+                    self.config.project_dir.join(path).to_string_lossy().to_string()
+                };
+
+                if Self::should_exclude_from_post_compact_restore(&real_path, &self.config.project_dir) {
+                    continue;
+                }
+
+                if let Ok(data) = std::fs::read_to_string(&real_path) {
+                    let content = if total_chars + data.len() > max_file_chars {
+                        let remaining = max_file_chars - total_chars;
+                        if remaining < 200 { break; }
+                        let truncated: String = data.chars().take(remaining).collect();
+                        format!("{}\n... [truncated]", truncated)
+                    } else {
+                        data.clone()
+                    };
+
+                    let attachment = format!(
+                        "[Post-compact file recovery: {}]\n```\n{}\n```",
+                        path, content
+                    );
+                    {
+                        let mut ctx_mut = self.context.blocking_write();
+                        ctx_mut.add_attachment(attachment);
+                    }
+                    total_chars += data.len();
+                    files_recovered += 1;
+                    paths_to_remark.push(path.clone());
+                }
+            }
+
+            // Re-mark files as read so edit/write checks still work
+            for path in paths_to_remark {
+                self.registry.blocking_read().mark_file_read(&path);
+            }
+
+            if files_recovered > 0 {
+                agent_emit!("[post-compact] Recovered {} files ({} chars)", files_recovered, total_chars);
+            }
+        }
+
+        let entries_after = self.context.blocking_read().len();
 
         crate::compact::CompactStats {
             phase: crate::compact::CompactPhase::Truncated,
