@@ -119,14 +119,25 @@ impl Tool for FileReadTool {
             return ToolResult::error("Error: file too large (>256 KB). Use offset and limit parameters to read specific portions.".to_string());
         }
 
-        // Read the file content
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        // Read the file content with automatic encoding detection
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
             Err(e) => return ToolResult::error(format!("Error reading file: {}", e)),
         };
 
-        // Strip UTF-8 BOM (matching official Claude Code behavior)
-        let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+        let content = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            // UTF-16 LE BOM — decode to UTF-8
+            let u16s: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16s)
+        } else {
+            // UTF-8 (or ASCII)
+            let s = String::from_utf8_lossy(&bytes).into_owned();
+            // Strip UTF-8 BOM (matching official Claude Code behavior)
+            s.strip_prefix('\u{FEFF}').unwrap_or(&s).to_string()
+        };
         let content = content.replace("\r\n", "\n");
         let mut lines: Vec<&str> = content.lines().collect();
 

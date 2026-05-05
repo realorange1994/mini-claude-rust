@@ -230,8 +230,8 @@ Usage:
             );
         }
 
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let (content, is_utf16le) = match read_file_with_encoding(&path) {
+            Ok(result) => result,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return ToolResult::error(format!("Error: file not found: {}", path.display()))
             }
@@ -295,45 +295,50 @@ Usage:
             ));
         }
 
-        // When deleting a line (newStr is empty), also strip a trailing \n
-        // that follows the oldString in the file (matching upstream).
-        // E.g. deleting "  let x = 1;" from "  let x = 1;\n" should remove the orphan \n too.
-        // Save pre-replacement content_norm for preserve_quote_style (needs original match location)
-        let pre_replace_content = content_norm.clone();
-        let result = if new_str_norm.is_empty() && !old_str_norm.ends_with('\n') {
+        // Find actual matched text in normalized file content for quote style detection.
+        // This must happen BEFORE replacement so old_str_norm still exists in content_norm.
+        let styled_new_str = style_replacement_quotes(&content_norm, &old_str, &new_str, &old_str_norm);
+
+        // Apply replacement with styled new string (matching upstream: style first, replace once)
+        let content_norm = if new_str_norm.is_empty() && !old_str_norm.ends_with('\n') {
+            // When deleting a line (newStr is empty), also strip a trailing \n
+            // that follows the oldString in the file (matching upstream).
             let old_with_lf = format!("{}\n", old_str_norm);
             if replace_all {
-                content_norm.replace(&old_with_lf, &new_str_norm)
+                content_norm.replace(&old_with_lf, &styled_new_str)
             } else if let Some(idx) = content_norm.find(&old_with_lf) {
                 let mut r = content_norm[..idx].to_string();
-                r.push_str(&new_str_norm);
+                r.push_str(&styled_new_str);
                 r.push_str(&content_norm[idx + old_with_lf.len()..]);
                 r
             } else {
                 if replace_all {
-                    content_norm.replace(&old_str_norm, &new_str_norm)
+                    content_norm.replace(&old_str_norm, &styled_new_str)
                 } else {
-                    content_norm.replacen(&old_str_norm, &new_str_norm, 1)
+                    content_norm.replacen(&old_str_norm, &styled_new_str, 1)
                 }
             }
         } else if replace_all {
-            content_norm.replace(&old_str_norm, &new_str_norm)
+            content_norm.replace(&old_str_norm, &styled_new_str)
         } else {
-            content_norm.replacen(&old_str_norm, &new_str_norm, 1)
+            content_norm.replacen(&old_str_norm, &styled_new_str, 1)
         };
-
-        // Preserve original quote style — need pre-replacement content to find
-        // where old_str_norm was actually located (it no longer exists in the result)
-        let result = preserve_quote_style(&pre_replace_content, &result, &old_str, &new_str, &old_str_norm);
 
         // Restore CRLF
         let result = if has_crlf {
-            restore_crlf(&result)
+            restore_crlf(&content_norm)
         } else {
-            result
+            content_norm
         };
 
-        if let Err(e) = fs::write(&path, &result) {
+        // Write file (preserve original encoding)
+        let result_for_write = result.clone();
+        let out = if is_utf16le {
+            encode_utf16le(&result_for_write)
+        } else {
+            result_for_write.into_bytes()
+        };
+        if let Err(e) = fs::write(&path, &out) {
             return ToolResult::error(format!("Error writing file: {}", e));
         }
 
@@ -360,24 +365,22 @@ fn normalize_quotes(s: &str) -> String {
      .replace('\u{2019}', "'")   // right single curly quote
 }
 
-/// Preserves original quote style in the result.
-/// Matching upstream's logic:
-/// 1. If old_str === old_str_norm (no normalization happened), return result as-is.
-/// 2. If normalization happened, check if the ACTUAL matched text in the file
-///    (found in pre_replace content) had curly quotes. If so, apply the same
-///    curly quote style to new_str, then replace new_str_norm in the result
-///    with the styled version.
-fn preserve_quote_style(pre_replace: &str, result: &str, old_str: &str, new_str: &str, old_str_norm: &str) -> String {
-    // If no normalization was needed, return result as-is
+/// Determines the styled replacement string, preserving curly quote style from the file.
+/// Matching upstream's preserveQuoteStyle(oldString, actualOldString, newString):
+/// 1. If old_str == old_str_norm (no quote normalization happened), return new_str as-is.
+/// 2. Find the actual matched text in the file (using old_str_norm position in content_norm).
+/// 3. If actual matched text has curly quotes, apply the same style to new_str.
+/// Returns only the styled new_str — the caller uses it for the replacement.
+fn style_replacement_quotes(content_norm: &str, old_str: &str, new_str: &str, old_str_norm: &str) -> String {
+    // If no normalization was needed, return new_str as-is
     if old_str == old_str_norm {
-        return result.to_string();
+        return new_str.to_string();
     }
 
-    // Find the actual matched text in the pre-replacement content
-    // (old_str_norm still exists there before the replacement was applied)
-    let actual_matched = match pre_replace.find(old_str_norm) {
-        Some(idx) => &pre_replace[idx..idx + old_str_norm.len()],
-        None => return result.to_string(),
+    // Find the actual matched text in the normalized content
+    let actual_matched = match content_norm.find(old_str_norm) {
+        Some(idx) => &content_norm[idx..idx + old_str_norm.len()],
+        None => return new_str.to_string(),
     };
 
     // Check if the actual matched text has curly quotes
@@ -385,37 +388,20 @@ fn preserve_quote_style(pre_replace: &str, result: &str, old_str: &str, new_str:
     let has_curly_single = actual_matched.contains('\u{2018}') || actual_matched.contains('\u{2019}');
 
     if !has_curly_double && !has_curly_single {
-        return result.to_string();
+        return new_str.to_string();
     }
 
-    // Apply curly quote style to new_str
-    let styled_new = {
-        let mut out = new_str.to_string();
-        if has_curly_double {
-            out = curly_to_straight_double(&out);
-            out = straight_to_curly_double(&out);
-        }
-        if has_curly_single {
-            out = curly_to_straight_single(&out);
-            out = straight_to_curly_single(&out);
-        }
-        out
-    };
-
-    // Replace the first occurrence of the normalized new_str with the styled version
-    // in the result. The result was built by replacing old_str_norm with new_str_norm,
-    // so new_str_norm should be findable at the replacement site.
-    let new_str_norm = normalize_quotes(new_str);
-    if let Some(idx) = result.find(&new_str_norm) {
-        let mut final_result = String::with_capacity(result.len());
-        final_result.push_str(&result[..idx]);
-        final_result.push_str(&styled_new);
-        final_result.push_str(&result[idx + new_str_norm.len()..]);
-        final_result
-    } else {
-        // Fallback: couldn't find the normalized new string, return result as-is
-        result.to_string()
+    // Apply curly quote style to new_str (matching upstream's preserveQuoteStyle)
+    let mut result = new_str.to_string();
+    if has_curly_double {
+        result = curly_to_straight_double(&result);
+        result = straight_to_curly_double(&result);
     }
+    if has_curly_single {
+        result = curly_to_straight_single(&result);
+        result = straight_to_curly_single(&result);
+    }
+    result
 }
 
 /// Converts curly double quotes to straight double quotes.
@@ -528,4 +514,37 @@ fn desanitize(s: &str) -> String {
         result = result.replace(from, to);
     }
     result
+}
+
+/// Reads a file with automatic UTF-16 LE BOM detection (matching upstream).
+/// Returns (content_as_utf8, is_utf16le).
+fn read_file_with_encoding(path: &std::path::Path) -> std::io::Result<(String, bool)> {
+    let bytes = fs::read(path)?;
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16 LE BOM detected — decode to UTF-8
+        let u16s: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        let s = String::from_utf16_lossy(&u16s);
+        Ok((s, true))
+    } else {
+        // UTF-8 (or ASCII) — use standard read
+        Ok((String::from_utf8_lossy(&bytes).into_owned(), false))
+    }
+}
+
+/// Encodes a UTF-8 string as UTF-16 LE with BOM prefix.
+/// Used to preserve the original file encoding when writing back.
+fn encode_utf16le(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + s.len() * 2);
+    // BOM
+    out.push(0xFF);
+    out.push(0xFE);
+    // Encode each char as UTF-16 LE
+    for c in s.encode_utf16() {
+        out.push(c as u8);
+        out.push((c >> 8) as u8);
+    }
+    out
 }
