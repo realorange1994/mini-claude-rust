@@ -848,9 +848,20 @@ pub fn redact_sensitive_text(text: &str) -> String {
             let after_colon = trimmed[1..].trim_start();
             if after_colon.starts_with('"') {
                 if let Some(end_offset) = find_closing_quote(&after_colon[1..]) {
+                    // value_start points at the colon (:) in the original string.
                     let value_start = start + json_key.len()
                         + (after_key.len() - after_key.trim_start().len());
-                    let value_end = value_start + 1 + end_offset; // opening quote + end_offset of closing quote
+                    // after_colon points at the opening quote.
+                    // Compute after_colon's position in the original string:
+                    //   after_key starts at (start + json_key.len())
+                    //   after_colon is offset from after_key by:
+                    //     +1 (skip the colon in trimmed[1..])
+                    //     +whitespace (trimmed[1..].trim_start())
+                    let ws_after_colon = trimmed[1..].len() - trimmed[1..].trim_start().len();
+                    let after_colon_pos = start + json_key.len()
+                        + (after_key.len() - after_key.trim_start().len()) + 1 + ws_after_colon;
+                    // Closing quote position = after_colon_pos + 1 (skip opening quote) + end_offset
+                    let value_end = after_colon_pos + 1 + end_offset;
                     let replacement = ": \"[REDACTED]\"";
                     result.replace_range(value_start..=value_end, replacement);
                     // Advance past the replacement to avoid re-matching the same key
@@ -2727,6 +2738,15 @@ mod tests {
             assert!(output.contains("[REDACTED]"), "Failed to redact key: {}", key);
             assert!(!output.contains("myvalue"), "Value leaked for key: {}", key);
         }
+    }
+
+    #[test]
+    fn test_redact_preserves_adjacent_content() {
+        // Regression test: off-by-one in value_end calculation could corrupt
+        // content after the redacted value (e.g. trailing "3" or closing quote).
+        let input = r#"{"api_key": "sk-123", "name": "test"}"#;
+        let output = redact_sensitive_text(input);
+        assert_eq!(output, r#"{"api_key": "[REDACTED]", "name": "test"}"#);
     }
 
     // --- Feature A2: Compactor last_summary field ---
