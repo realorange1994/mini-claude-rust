@@ -736,12 +736,50 @@ impl ConversationContext {
             }
         });
 
-        // Pass 4 (REMOVED): Previously removed tool_use blocks without matching results.
-        // Matching Go's agent_loop.go: this was counterproductive because when the API
-        // returns 2013, it's because a tool_result doesn't match a tool_use. Removing
-        // the tool_use block makes the orphaned tool_result even more orphaned, worsening
-        // the mismatch. Instead, we keep tool_use blocks intact and only remove orphaned
-        // results. The API handles tool_use without results gracefully.
+        // Pass 4: Insert synthetic tool_results for tool_use blocks without matching results.
+        // After compaction, a tool_use block may survive in the kept tail while its
+        // tool_result was in the summarized portion. The API requires every tool_use
+        // to have a corresponding tool_result — without one, it returns error 2013.
+        // Insert a synthetic error result right after the assistant message containing
+        // the unpaired tool_use. This matches upstream's ensureToolResultPairing.
+        let missing_ids: Vec<String> = call_ids.iter()
+            .filter(|id| !result_ids.contains(*id))
+            .cloned()
+            .collect();
+        if !missing_ids.is_empty() {
+            let missing_set: std::collections::HashSet<String> = missing_ids.into_iter().collect();
+            let placeholder = "[Tool result missing due to internal error]";
+            let mut new_messages: Vec<Message> = Vec::with_capacity(self.messages.len() + missing_set.len());
+            let mut remaining_missing = missing_set;
+            for msg in self.messages.drain(..) {
+                let is_assistant = msg.role == MessageRole::Assistant;
+                new_messages.push(msg);
+                if is_assistant {
+                    if let Some(last) = new_messages.last() {
+                        if let MessageContent::ToolUseBlocks(blocks) = &last.content {
+                            let mut synth_results: Vec<ToolResultBlock> = Vec::new();
+                            for block in blocks {
+                                if remaining_missing.contains(&block.id) {
+                                    synth_results.push(ToolResultBlock {
+                                        tool_use_id: block.id.clone(),
+                                        content: vec![ToolResultContent::Text { text: placeholder.to_string() }],
+                                        is_error: true,
+                                    });
+                                    remaining_missing.remove(&block.id);
+                                }
+                            }
+                            if !synth_results.is_empty() {
+                                new_messages.push(Message::new(
+                                    MessageRole::User,
+                                    MessageContent::ToolResultBlocks(synth_results),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            self.messages = new_messages;
+        }
     }
 
     /// Ensures strict user/assistant alternation by merging consecutive
