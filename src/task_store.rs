@@ -120,41 +120,41 @@ impl TaskStore {
             pid: None,
             evict_after: None,
         };
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.insert(task_id.clone(), Arc::new(Mutex::new(task)));
         task_id
     }
 
     /// Set the PID for a task (must be called right after spawning the process).
     pub fn set_pid(&self, id: &str, pid: u32) {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(task_arc) = tasks.get(id) {
-            let mut task = task_arc.lock().unwrap();
+            let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
             task.pid = Some(pid);
         }
     }
 
     /// Update the output file path for a task.
     pub fn update_output_file(&self, id: &str, output_file: String) {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(task_arc) = tasks.get(id) {
-            let mut task = task_arc.lock().unwrap();
+            let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
             task.output_file = Some(output_file);
         }
     }
 
     /// Get a clone of the shared Arc<Mutex<TaskState>> for a task.
     pub fn get_task(&self, id: &str) -> Option<Arc<Mutex<TaskState>>> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.get(id).cloned()
     }
 
     /// Check if a task is in a terminal state (completed, failed, killed).
     pub fn is_terminal(&self, id: &str) -> bool {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks
             .get(id)
-            .map(|t| t.lock().unwrap().is_terminal())
+            .map(|t| t.lock().unwrap_or_else(|e| e.into_inner()).is_terminal())
             .unwrap_or(true) // unknown tasks are treated as terminal
     }
 
@@ -162,12 +162,12 @@ impl TaskStore {
     /// Returns Ok(()) if the task was found and killed, or Err with a message.
     pub fn kill_task(&self, id: &str) -> Result<(), String> {
         let task_arc = {
-            let tasks = self.tasks.lock().unwrap();
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             tasks.get(id).cloned()
         };
 
         let task_arc = task_arc.ok_or_else(|| format!("Background task {} not found", id))?;
-        let mut task = task_arc.lock().unwrap();
+        let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
 
         // Guard: if already terminal, don't overwrite
         if task.is_terminal() {
@@ -185,9 +185,9 @@ impl TaskStore {
 
     /// Mark a task as completed.
     pub fn complete_task(&self, id: &str, result: &str) {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(task_arc) = tasks.get(id) {
-            let mut task = task_arc.lock().unwrap();
+            let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
             if !task.is_terminal() {
                 task.complete(result);
             }
@@ -196,9 +196,9 @@ impl TaskStore {
 
     /// Mark a task as failed.
     pub fn fail_task(&self, id: &str, error: &str) {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(task_arc) = tasks.get(id) {
-            let mut task = task_arc.lock().unwrap();
+            let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
             if !task.is_terminal() {
                 task.fail(error);
             }
@@ -212,9 +212,9 @@ impl TaskStore {
         let mut to_delete_files: Vec<String> = Vec::new();
 
         {
-            let tasks = self.tasks.lock().unwrap();
+            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             for (id, task_arc) in tasks.iter() {
-                let task = task_arc.lock().unwrap();
+                let task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(evict_after) = task.evict_after {
                     if Instant::now() >= evict_after {
                         to_remove.push(id.clone());
@@ -233,7 +233,7 @@ impl TaskStore {
 
         // Remove from store
         if !to_remove.is_empty() {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             for id in &to_remove {
                 tasks.remove(id);
             }
@@ -307,7 +307,7 @@ mod tests {
         let task = store.get_task(&id);
         assert!(task.is_some());
         let task = task.unwrap();
-        let task = task.lock().unwrap();
+        let task = task.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task.status, TaskStatus::Running);
         assert_eq!(task.task_type, "bash_background");
     }
@@ -326,7 +326,7 @@ mod tests {
 
         // After kill, task should be in Killed state
         let task = store.get_task(&id).unwrap();
-        let task = task.lock().unwrap();
+        let task = task.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task.status, TaskStatus::Killed);
     }
 
@@ -345,7 +345,7 @@ mod tests {
         assert!(result.is_ok());
 
         let task = store.get_task(&id).unwrap();
-        let task = task.lock().unwrap();
+        let task = task.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task.status, TaskStatus::Killed);
         assert_eq!(task.pid, Some(999999));
     }
@@ -360,7 +360,7 @@ mod tests {
 
         store.complete_task(&id, "success");
         let task = store.get_task(&id).unwrap();
-        let task = task.lock().unwrap();
+        let task = task.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task.status, TaskStatus::Completed);
         assert!(task.is_terminal());
         assert!(task.evict_after.is_some());
@@ -373,7 +373,7 @@ mod tests {
 
         store.fail_task(&id2, "exit code 1");
         let task2 = store.get_task(&id2).unwrap();
-        let task2 = task2.lock().unwrap();
+        let task2 = task2.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task2.status, TaskStatus::Failed);
         assert!(task2.is_terminal());
     }
@@ -399,9 +399,9 @@ mod tests {
 
         // Manually set evict_after to past for testing
         {
-            let tasks = store.tasks.lock().unwrap();
+            let tasks = store.tasks.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(task_arc) = tasks.get(&id) {
-                let mut task = task_arc.lock().unwrap();
+                let mut task = task_arc.lock().unwrap_or_else(|e| e.into_inner());
                 task.evict_after = Some(Instant::now() - Duration::from_secs(1));
             }
         }
@@ -467,7 +467,7 @@ mod tests {
         // Complete after kill should NOT change status (guard)
         store.complete_task(&id, "done");
         let task = store.get_task(&id).unwrap();
-        let task = task.lock().unwrap();
+        let task = task.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(task.status, TaskStatus::Killed); // still killed, not completed
     }
 }

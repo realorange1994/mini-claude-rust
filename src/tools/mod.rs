@@ -205,31 +205,31 @@ impl Registry {
 
     pub fn register<T: Tool + 'static>(&self, tool: T) {
         let name = tool.name().to_string();
-        let mut tools = self.tools.write().unwrap();
+        let mut tools = self.tools.write().unwrap_or_else(|e| e.into_inner());
         tools.insert(name, Arc::new(tool));
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        let tools = self.tools.read().unwrap();
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
         tools.get(name).cloned()
     }
 
     pub fn all_tools(&self) -> Vec<Arc<dyn Tool>> {
-        let tools = self.tools.read().unwrap();
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
         tools.values().cloned().collect()
     }
 
     /// Register a tool directly from an Arc (used by sub-agent registry filtering)
     pub fn register_tool_from_arc(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        let mut tools = self.tools.write().unwrap();
+        let mut tools = self.tools.write().unwrap_or_else(|e| e.into_inner());
         tools.insert(name, tool);
     }
 
     /// Set the shared tools list for ToolSearchTool.
     /// Called during registration of ToolSearchTool.
     pub fn set_tools_list(&self, list: Arc<RwLock<Vec<Arc<dyn Tool>>>>) {
-        let mut guard = self.tools_list.write().unwrap();
+        let mut guard = self.tools_list.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(list);
     }
 
@@ -238,10 +238,10 @@ impl Registry {
     /// For sub-agents with a filtered registry, also call this to make
     /// ToolSearchTool return only the filtered set.
     pub fn finalize_tool_search(&self) {
-        let list_guard = self.tools_list.read().unwrap();
+        let list_guard = self.tools_list.read().unwrap_or_else(|e| e.into_inner());
         if let Some(list) = list_guard.as_ref() {
             let tools = self.all_tools();
-            *list.write().unwrap() = tools;
+            *list.write().unwrap_or_else(|e| e.into_inner()) = tools;
         }
     }
 
@@ -253,8 +253,8 @@ impl Registry {
         // Copy the tools_list Arc reference so the cloned ToolSearchTool
         // in the child shares the same list as ToolSearchTool in the parent.
         {
-            let parent_list = self.tools_list.read().unwrap();
-            let mut child_list = child.tools_list.write().unwrap();
+            let parent_list = self.tools_list.read().unwrap_or_else(|e| e.into_inner());
+            let mut child_list = child.tools_list.write().unwrap_or_else(|e| e.into_inner());
             *child_list = parent_list.clone();
         }
         // Register all tools from parent into child
@@ -276,7 +276,7 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
     }
 
     /// Check if a file has been read before and hasn't been modified since
@@ -290,7 +290,7 @@ impl Registry {
             return Ok(());
         }
 
-        let guard = self.files_read.read().unwrap();
+        let guard = self.files_read.read().unwrap_or_else(|e| e.into_inner());
         let stored_info = guard.get(&normalized).cloned();
         drop(guard);
 
@@ -325,12 +325,12 @@ impl Registry {
             .and_then(|m| m.modified().ok())
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let read_time = SystemTime::now();
-        self.files_read.write().unwrap().insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).insert(normalized, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
     }
 
     /// Clear the read-file tracking (e.g., on /clear)
     pub fn clear_files_read(&self) {
-        self.files_read.write().unwrap().clear();
+        self.files_read.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Returns a handle to the files_read map for tools that need
@@ -343,7 +343,7 @@ impl Registry {
     /// Returns up to max_files paths. Used by post-compact recovery to re-inject
     /// file content after compaction.
     pub fn get_recently_read_files(&self, max_files: usize) -> Vec<String> {
-        let guard = self.files_read.read().unwrap();
+        let guard = self.files_read.read().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<_> = guard.iter()
             .map(|(path, info)| (path.clone(), info.read_time))
             .collect();

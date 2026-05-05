@@ -85,7 +85,7 @@ impl Tool for FileWriteTool {
         if let Some(files_read) = &self.files_read {
             let path_str = normalize_file_path(&path.to_string_lossy());
             if path.exists() {
-                let fr = files_read.read().unwrap();
+                let fr = files_read.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(info) = fr.get(&path_str) {
                     // File was read — check for concurrent modification
                     if let Ok(meta) = fs::metadata(&path) {
@@ -151,7 +151,7 @@ impl Tool for FileWriteTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
         }
 
         ToolResult::ok(format!("Wrote {} chars to {}", content.len(), path.display()))

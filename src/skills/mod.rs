@@ -76,9 +76,9 @@ impl Loader {
 
     /// Refresh the skill index
     pub fn refresh(&mut self) {
-        let mut cache = self.cache.write().unwrap();
-        let mut skill_index = self.skill_index.write().unwrap();
-        let mut file_modtimes = self.file_modtimes.write().unwrap();
+        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut skill_index = self.skill_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut file_modtimes = self.file_modtimes.write().unwrap_or_else(|e| e.into_inner());
 
         cache.clear();
         skill_index.clear();
@@ -153,19 +153,19 @@ impl Loader {
 
     /// Load a skill's SKILL.md content
     pub fn load_skill(&self, name: &str) -> Option<String> {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
         cache.get(name).cloned()
     }
 
     /// List all skills
     pub fn list_skills(&self) -> Vec<SkillInfo> {
-        let index = self.skill_index.read().unwrap();
+        let index = self.skill_index.read().unwrap_or_else(|e| e.into_inner());
         index.values().cloned().collect()
     }
 
     /// Get always-on skills
     pub fn get_always_skills(&self) -> Vec<SkillInfo> {
-        let index = self.skill_index.read().unwrap();
+        let index = self.skill_index.read().unwrap_or_else(|e| e.into_inner());
         index.values()
             .filter(|s| s.always && s.available)
             .cloned()
@@ -178,7 +178,7 @@ impl Loader {
             return String::new();
         }
 
-        let skill_index = self.skill_index.read().unwrap();
+        let skill_index = self.skill_index.read().unwrap_or_else(|e| e.into_inner());
 
         let mut output = String::from("\n## Active Skills\n\n");
         for name in skill_names {
@@ -232,9 +232,9 @@ impl Clone for Loader {
         Self {
             workspace: self.workspace.clone(),
             builtin_dir: self.builtin_dir.clone(),
-            cache: RwLock::new(self.cache.read().unwrap().clone()),
-            skill_index: RwLock::new(self.skill_index.read().unwrap().clone()),
-            file_modtimes: RwLock::new(self.file_modtimes.read().unwrap().clone()),
+            cache: RwLock::new(self.cache.read().unwrap_or_else(|e| e.into_inner()).clone()),
+            skill_index: RwLock::new(self.skill_index.read().unwrap_or_else(|e| e.into_inner()).clone()),
+            file_modtimes: RwLock::new(self.file_modtimes.read().unwrap_or_else(|e| e.into_inner()).clone()),
         }
     }
 }
@@ -242,7 +242,7 @@ impl Clone for Loader {
 /// Check if any skill files have changed and refresh if needed
 impl Loader {
     pub fn refresh_if_changed(&mut self) -> bool {
-        let file_modtimes = self.file_modtimes.read().unwrap();
+        let file_modtimes = self.file_modtimes.read().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
 
         // Check for modtime changes

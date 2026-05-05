@@ -188,7 +188,7 @@ impl FileHistory {
             }
         }
 
-        let mut store = self.snapshots.write().unwrap();
+        let mut store = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         *store = map;
     }
 
@@ -239,7 +239,7 @@ impl FileHistory {
         let content = fs::read_to_string(path)?;
         let checksum = format!("{:x}", simple_hash(&content));
 
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = snapshots.entry(path.to_path_buf()).or_insert_with(Vec::new);
 
         // Don't snapshot if content hasn't changed
@@ -280,7 +280,7 @@ impl FileHistory {
         let content = fs::read_to_string(path)?;
         let checksum = format!("{:x}", simple_hash(&content));
 
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = snapshots.entry(path.to_path_buf()).or_insert_with(Vec::new);
 
         if let Some(last) = file_snapshots.last() {
@@ -323,7 +323,7 @@ impl FileHistory {
     pub fn checkout(&self, path: &Path, version: usize) -> std::io::Result<Option<String>> {
         let target_content;
         {
-            let snapshots = self.snapshots.read().unwrap();
+            let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
             let file_snapshots = match snapshots.get(path) {
                 Some(f) => f,
                 None => return Ok(None),
@@ -350,7 +350,7 @@ impl FileHistory {
             return Ok(None);
         }
 
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get_mut(path) {
             Some(f) => f,
             None => return Ok(None),
@@ -408,7 +408,7 @@ impl FileHistory {
         };
 
         {
-            let mut snapshots = self.snapshots.write().unwrap();
+            let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
             if let Some(file_snapshots) = snapshots.get_mut(path) {
                 file_snapshots.push(restore_snapshot.clone());
             }
@@ -429,7 +429,7 @@ impl FileHistory {
         if message.is_empty() {
             return false;
         }
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get_mut(path) {
             Some(f) if !f.is_empty() => f,
             _ => return false,
@@ -465,7 +465,7 @@ impl FileHistory {
 
     /// Add a tag to the current (latest non-deleted) snapshot of a file
     pub fn add_tag(&self, path: &Path, tag: &str) -> bool {
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get_mut(path) {
             Some(f) if !f.is_empty() => f,
             _ => return false,
@@ -492,7 +492,7 @@ impl FileHistory {
     /// Search for a tag across all non-deleted snapshots for a file.
     /// Returns (version, description, content_size) for each match.
     pub fn search_tag(&self, path: &Path, tag: &str) -> Vec<(usize, String, usize)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get(path) {
             Some(f) => f,
             None => return Vec::new(),
@@ -513,7 +513,7 @@ impl FileHistory {
     /// version is 1-indexed (among non-deleted). Returns true if tag was found and removed.
     pub fn remove_tag(&self, path: &Path, version: usize, tag: &str) -> bool {
         let tag_pattern = format!("[{}]", tag);
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get_mut(path) {
             Some(f) if !f.is_empty() => f,
             _ => return false,
@@ -556,7 +556,7 @@ impl FileHistory {
     /// Search for versions by tag name across all tracked files.
     /// Returns (file_path, version, description) for each match.
     pub fn search_tag_all(&self, tag: &str) -> Vec<(PathBuf, usize, String)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let mut results = Vec::new();
         for (path, file_snapshots) in snapshots.iter() {
             let mut ver = 0;
@@ -572,7 +572,7 @@ impl FileHistory {
     }
 
     pub fn list_tags_internal(&self, path: &Path, tag_filter: Option<&str>) -> Vec<(usize, String)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get(path) {
             Some(f) => f,
             None => return Vec::new(),
@@ -600,7 +600,7 @@ impl FileHistory {
     /// Compute a line-by-line diff between two versions of a file
     /// version numbers are 1-indexed
     pub fn diff(&self, path: &Path, from_version: usize, to_version: usize) -> Option<DiffResult> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = snapshots.get(path)?;
         let active: Vec<&FileSnapshot> = file_snapshots.iter().filter(|s| !s.deleted).collect();
 
@@ -623,7 +623,7 @@ impl FileHistory {
 
     /// Search for versions where text was added, removed, or changed
     pub fn search(&self, path: &Path, pattern: &str, mode: SearchMode, ignore_case: bool) -> Vec<(usize, String)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = match snapshots.get(path) {
             Some(f) => f,
             None => return Vec::new(),
@@ -679,7 +679,7 @@ impl FileHistory {
 
     /// Get a summary of all files changed, optionally filtered by time
     pub fn get_summary(&self, since: Option<DateTime<Utc>>) -> Vec<(PathBuf, Vec<FileSnapshot>)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let mut result: Vec<(PathBuf, Vec<FileSnapshot>)> = Vec::new();
 
         for (path, snaps) in snapshots.iter() {
@@ -705,7 +705,7 @@ impl FileHistory {
 
     /// Get a flat timeline of all changes across all files, optionally filtered by time
     pub fn get_timeline(&self, since: Option<DateTime<Utc>>) -> Vec<(DateTime<Utc>, PathBuf, usize, String)> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<(DateTime<Utc>, PathBuf, usize, String)> = Vec::new();
 
         for (path, snaps) in snapshots.iter() {
@@ -737,7 +737,7 @@ impl FileHistory {
     /// - "last2" → 2 versions back from current
     /// - "tagname" → version with matching tag in description
     pub fn resolve_version(&self, path: &Path, spec: &str) -> Option<usize> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         let file_snapshots = snapshots.get(path)?;
 
         // Build non-deleted view -- this is what users see as "v1, v2, v3..."
@@ -781,42 +781,42 @@ impl FileHistory {
     // ─── Basic accessors ───
 
     pub fn count(&self, path: &Path) -> usize {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         snapshots.get(path).map(|s| s.iter().filter(|s| !s.deleted).count()).unwrap_or(0)
     }
 
     pub fn get_snapshots(&self, path: &Path) -> Vec<FileSnapshot> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         snapshots.get(path)
             .map(|s| s.iter().filter(|s| !s.deleted).cloned().collect())
             .unwrap_or_default()
     }
 
     pub fn list_all_files(&self) -> Vec<PathBuf> {
-        let snapshots = self.snapshots.read().unwrap();
+        let snapshots = self.snapshots.read().unwrap_or_else(|e| e.into_inner());
         snapshots.keys().cloned().collect()
     }
 
     pub fn clear(&self, path: &Path) {
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         snapshots.remove(path);
     }
 
     pub fn clear_all(&self) {
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         snapshots.clear();
     }
 
     /// Clear history for all tracked files under a directory (for rmrf)
     pub fn clear_under_dir(&self, dir: &Path) {
-        let mut snapshots = self.snapshots.write().unwrap();
+        let mut snapshots = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         snapshots.retain(|path, _| !path.starts_with(dir));
     }
 
     // ─── Internal helpers ───
 
     fn trim_snapshots(&self, path: &Path) {
-        let mut store = self.snapshots.write().unwrap();
+        let mut store = self.snapshots.write().unwrap_or_else(|e| e.into_inner());
         if let Some(file_snapshots) = store.get_mut(path) {
             let now = Utc::now();
             let min_keep = 5;
@@ -850,7 +850,7 @@ impl Default for FileHistory {
 impl Clone for FileHistory {
     fn clone(&self) -> Self {
         Self {
-            snapshots: RwLock::new(self.snapshots.read().unwrap().clone()),
+            snapshots: RwLock::new(self.snapshots.read().unwrap_or_else(|e| e.into_inner()).clone()),
             max_snapshots: self.max_snapshots,
             max_age: self.max_age,
             snapshots_dir: self.snapshots_dir.clone(),

@@ -36,7 +36,7 @@ pub struct SessionMemory {
 
 impl std::fmt::Debug for SessionMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("SessionMemory")
             .field("entries_count", &guard.entries.len())
             .field("project_dir", &guard.project_dir)
@@ -86,14 +86,14 @@ impl SessionMemory {
     where
         F: Fn() + Send + Sync + 'static,
     {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.on_add = Some(Arc::new(callback));
     }
 
     /// Adds a new memory entry and marks the memory as dirty.
     /// If an entry with the same category+content exists, its timestamp is updated.
     pub fn add_note(&self, category: &str, content: &str, source: &str) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = chrono::Utc::now().to_rfc3339();
 
         // Deduplicate: if same category+content exists, update timestamp
@@ -133,7 +133,7 @@ impl SessionMemory {
 
     /// Returns all memory entries, sorted by category then timestamp (newest first within each category).
     pub fn get_notes(&self) -> Vec<MemoryEntry> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = guard.entries.clone();
         result.sort_by(|a, b| {
             match a.category.cmp(&b.category) {
@@ -146,7 +146,7 @@ impl SessionMemory {
 
     /// Returns memory entries whose content or category contains the query (case-insensitive).
     pub fn search_notes(&self, query: &str) -> Vec<MemoryEntry> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let lower = query.to_lowercase();
         guard
             .entries
@@ -162,7 +162,7 @@ impl SessionMemory {
     /// Formats memory entries for injection into the system prompt.
     /// Returns an empty string if there are no entries.
     pub fn format_for_prompt(&self) -> String {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if guard.entries.is_empty() {
             return String::new();
         }
@@ -196,7 +196,7 @@ impl SessionMemory {
 
     /// Returns true if there are no memory entries.
     pub fn is_empty(&self) -> bool {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.entries.is_empty()
     }
 
@@ -225,21 +225,21 @@ impl SessionMemory {
             let _ = Self::flush_to_disk_inner(&inner);
         });
 
-        let mut guard = self.flush_handle.lock().unwrap();
+        let mut guard = self.flush_handle.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(handle);
     }
 
     /// Signals the background flush thread to stop and waits for the final flush.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        let mut guard = self.flush_handle.lock().unwrap();
+        let mut guard = self.flush_handle.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(handle) = guard.take() {
             let _ = handle.join();
         }
     }
 
     fn flush_to_disk_inner(inner: &Mutex<SessionMemoryInner>) -> Result<(), String> {
-        let mut guard = inner.lock().unwrap();
+        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
         if !guard.dirty {
             return Ok(());
         }

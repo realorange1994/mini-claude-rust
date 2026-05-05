@@ -335,7 +335,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
 
     ctrlc::set_handler(move || {
         let now = std::time::Instant::now();
-        let mut last = last_ctrlc_clone.lock().unwrap();
+        let mut last = last_ctrlc_clone.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check if this is a double press within 2 seconds
         if let Some(last_time) = *last {
@@ -361,7 +361,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
 
     loop {
         print!("\n> ");
-        stdout.flush().unwrap();
+        let _ = stdout.flush();
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {

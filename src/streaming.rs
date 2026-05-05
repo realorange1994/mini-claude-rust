@@ -103,7 +103,7 @@ impl CollectHandler {
     pub fn handle(&self, chunk: StreamChunk) {
         match chunk.chunk_type {
             ChunkType::Text => {
-                let mut text = self.text.write().unwrap();
+                let mut text = self.text.write().unwrap_or_else(|e| e.into_inner());
                 let content_lower = chunk.content.to_lowercase();
 
                 // Detect model echoing tool syntax as text (2-of-3 structural markers)
@@ -115,14 +115,14 @@ impl CollectHandler {
                     || content_lower.contains(r#""name": ""#);
 
                 if (has_type && has_id) || (has_type && has_name) || (has_id && has_name) {
-                    let mut flag = self.tool_use_as_text.write().unwrap();
+                    let mut flag = self.tool_use_as_text.write().unwrap_or_else(|e| e.into_inner());
                     *flag = true;
                 } else {
                     text.push_str(&chunk.content);
                 }
             }
             ChunkType::ToolCall => {
-                let mut calls = self.tool_calls.write().unwrap();
+                let mut calls = self.tool_calls.write().unwrap_or_else(|e| e.into_inner());
                 calls.push(ToolCallInfo {
                     id: chunk.id.unwrap_or_default(),
                     name: chunk.name.unwrap_or_default(),
@@ -130,18 +130,18 @@ impl CollectHandler {
                 });
             }
             ChunkType::ToolArgument => {
-                let mut calls = self.tool_calls.write().unwrap();
+                let mut calls = self.tool_calls.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(last) = calls.last_mut() {
                     last.arguments.push_str(&chunk.content);
                 }
             }
             ChunkType::Thinking => {
-                let mut thinking = self.thinking.write().unwrap();
+                let mut thinking = self.thinking.write().unwrap_or_else(|e| e.into_inner());
                 thinking.push_str(&chunk.content);
             }
             ChunkType::Usage => {
                 if let Some(u) = chunk.usage {
-                    let mut usage = self.usage.write().unwrap();
+                    let mut usage = self.usage.write().unwrap_or_else(|e| e.into_inner());
                     *usage = Some(u);
                 }
             }
@@ -156,46 +156,46 @@ impl CollectHandler {
 
     /// Get the assembled text (falls back to thinking when text is empty)
     pub fn full_response(&self) -> String {
-        let text = self.text.read().unwrap();
+        let text = self.text.read().unwrap_or_else(|e| e.into_inner());
         if !text.is_empty() {
             return text.clone();
         }
-        let thinking = self.thinking.read().unwrap();
+        let thinking = self.thinking.read().unwrap_or_else(|e| e.into_inner());
         thinking.clone()
     }
 
     /// Get the thinking content
     pub fn thinking(&self) -> String {
-        let thinking = self.thinking.read().unwrap();
+        let thinking = self.thinking.read().unwrap_or_else(|e| e.into_inner());
         thinking.clone()
     }
 
     /// Check if model echoed tool syntax as text
     pub fn is_tool_use_as_text(&self) -> bool {
-        *self.tool_use_as_text.read().unwrap()
+        *self.tool_use_as_text.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get tool calls
     pub fn tool_calls(&self) -> Vec<ToolCallInfo> {
-        self.tool_calls.read().unwrap().clone()
+        self.tool_calls.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Set the finish reason from the stream
     pub fn set_finish_reason(&self, reason: String) {
-        let mut fr = self.finish_reason.write().unwrap();
+        let mut fr = self.finish_reason.write().unwrap_or_else(|e| e.into_inner());
         *fr = Some(reason);
     }
 
     /// Get the finish reason
     pub fn finish_reason(&self) -> Option<String> {
-        self.finish_reason.read().unwrap().clone()
+        self.finish_reason.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Check if there's a partial (incomplete) tool call being accumulated.
     /// A tool call is partial if it has an id/name but no arguments yet completed
     /// (the stream cut off mid-tool-call, so args may be incomplete JSON).
     pub fn has_partial_tool_call(&self) -> bool {
-        let calls = self.tool_calls.read().unwrap();
+        let calls = self.tool_calls.read().unwrap_or_else(|e| e.into_inner());
         // Last tool call has no arguments -- stream cut off during tool_use block.
         // Clone the last element while holding the read lock to avoid a race where
         // another task clears tool_calls between the is_empty check and last().
@@ -205,7 +205,7 @@ impl CollectHandler {
     /// Check if any tool call has truncated (invalid JSON) arguments.
     /// Matching Hermes: if JSON parse fails, the tool args were cut off mid-stream.
     pub fn has_truncated_tool_args(&self) -> bool {
-        let calls = self.tool_calls.read().unwrap();
+        let calls = self.tool_calls.read().unwrap_or_else(|e| e.into_inner());
         for call in calls.iter() {
             if !call.arguments.is_empty() {
                 if serde_json::from_str::<serde_json::Value>(&call.arguments).is_err() {
@@ -219,7 +219,7 @@ impl CollectHandler {
     /// Clear the last partial tool call and any trailing arguments.
     /// Used before retry to avoid duplicating tool_call entries on reconnect.
     pub fn clear_partial_tool_call(&self) {
-        let mut calls = self.tool_calls.write().unwrap();
+        let mut calls = self.tool_calls.write().unwrap_or_else(|e| e.into_inner());
         if !calls.is_empty() {
             calls.pop();
         }
@@ -228,7 +228,7 @@ impl CollectHandler {
     /// Clear all pending text that was already streamed to the user.
     /// Used when retry cannot recover text deltas (text-only case).
     pub fn clear_text(&self) {
-        let mut text = self.text.write().unwrap();
+        let mut text = self.text.write().unwrap_or_else(|e| e.into_inner());
         text.clear();
     }
 
@@ -236,20 +236,20 @@ impl CollectHandler {
     /// Used before stream retries where the API will send a completely
     /// new response -- old collected data would have mismatched IDs.
     pub fn clear_all(&self) {
-        let mut text = self.text.write().unwrap();
+        let mut text = self.text.write().unwrap_or_else(|e| e.into_inner());
         text.clear();
         drop(text);
-        let mut calls = self.tool_calls.write().unwrap();
+        let mut calls = self.tool_calls.write().unwrap_or_else(|e| e.into_inner());
         calls.clear();
         drop(calls);
-        let mut thinking = self.thinking.write().unwrap();
+        let mut thinking = self.thinking.write().unwrap_or_else(|e| e.into_inner());
         thinking.clear();
     }
 
     /// Get usage info
     #[allow(dead_code)]
     pub fn usage(&self) -> Option<Usage> {
-        self.usage.read().unwrap().clone()
+        self.usage.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -565,36 +565,36 @@ impl TerminalHandler {
     pub fn handle(&self, chunk: StreamChunk) {
         match chunk.chunk_type {
             ChunkType::Thinking => {
-                let mut buf = self.thinking_buf.write().unwrap();
+                let mut buf = self.thinking_buf.write().unwrap_or_else(|e| e.into_inner());
                 buf.push_str(&chunk.content);
             }
             ChunkType::ToolCall => {
-                let mut seen = self.seen_tool_call.write().unwrap();
+                let mut seen = self.seen_tool_call.write().unwrap_or_else(|e| e.into_inner());
                 *seen = true;
                 drop(seen);
 
                 // Show buffered thinking before tool call
                 {
-                    let buf = self.thinking_buf.read().unwrap();
+                    let buf = self.thinking_buf.read().unwrap_or_else(|e| e.into_inner());
                     if !buf.is_empty() {
                         let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
                         eprintln!("\n[THINK] {}", preview);
                         drop(buf);
-                        let mut printed = self.thinking_printed.write().unwrap();
+                        let mut printed = self.thinking_printed.write().unwrap_or_else(|e| e.into_inner());
                         *printed = true;
                     }
                 }
-                let mut buf = self.thinking_buf.write().unwrap();
+                let mut buf = self.thinking_buf.write().unwrap_or_else(|e| e.into_inner());
                 buf.clear();
                 drop(buf);
 
-                let mut name = self.cur_tool_name.write().unwrap();
+                let mut name = self.cur_tool_name.write().unwrap_or_else(|e| e.into_inner());
                 *name = chunk.name.unwrap_or_default();
-                let mut args = self.cur_tool_args.write().unwrap();
+                let mut args = self.cur_tool_args.write().unwrap_or_else(|e| e.into_inner());
                 args.clear();
             }
             ChunkType::ToolArgument => {
-                let mut args = self.cur_tool_args.write().unwrap();
+                let mut args = self.cur_tool_args.write().unwrap_or_else(|e| e.into_inner());
                 args.push_str(&chunk.content);
             }
             ChunkType::BlockStop => {
@@ -605,7 +605,7 @@ impl TerminalHandler {
                 self.flush_tool_call();
                 // Close any open ANSI dim styling at end of stream
                 {
-                    let mut dim = self.think_dim_active.write().unwrap();
+                    let mut dim = self.think_dim_active.write().unwrap_or_else(|e| e.into_inner());
                     if *dim {
                         eprint!("{}", ANSI_RESET);
                         *dim = false;
@@ -613,18 +613,18 @@ impl TerminalHandler {
                 }
                 // Reset think filter state for next stream
                 {
-                    let mut state = self.think_filter_state.write().unwrap();
+                    let mut state = self.think_filter_state.write().unwrap_or_else(|e| e.into_inner());
                     *state = ThinkFilterState::Normal;
-                    let mut buf = self.think_filter_buf.write().unwrap();
+                    let mut buf = self.think_filter_buf.write().unwrap_or_else(|e| e.into_inner());
                     buf.clear();
                 }
                 // Flush buffered thinking if no tool call was seen and not already printed
-                let seen = self.seen_tool_call.read().unwrap();
-                let printed = self.thinking_printed.read().unwrap();
+                let seen = self.seen_tool_call.read().unwrap_or_else(|e| e.into_inner());
+                let printed = self.thinking_printed.read().unwrap_or_else(|e| e.into_inner());
                 if !*seen && !*printed {
                     drop(seen);
                     drop(printed);
-                    let buf = self.thinking_buf.read().unwrap();
+                    let buf = self.thinking_buf.read().unwrap_or_else(|e| e.into_inner());
                     if !buf.is_empty() {
                         let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
                         eprintln!("\n[THINK] {}", preview);
@@ -636,15 +636,15 @@ impl TerminalHandler {
                 self.flush_tool_call();
                 // Flush buffered thinking if any (thinking arrives before text in stream)
                 {
-                    let buf = self.thinking_buf.read().unwrap();
+                    let buf = self.thinking_buf.read().unwrap_or_else(|e| e.into_inner());
                     if !buf.is_empty() {
                         let preview = truncate_at(buf.lines().next().unwrap_or(""), 120);
                         eprintln!("\n[THINK] {}", preview);
                         drop(buf);
-                        let mut buf = self.thinking_buf.write().unwrap();
+                        let mut buf = self.thinking_buf.write().unwrap_or_else(|e| e.into_inner());
                         buf.clear();
                         drop(buf);
-                        let mut printed = self.thinking_printed.write().unwrap();
+                        let mut printed = self.thinking_printed.write().unwrap_or_else(|e| e.into_inner());
                         *printed = true;
                     }
                 }
@@ -659,9 +659,9 @@ impl TerminalHandler {
     /// Thinking content is wrapped with ANSI dim codes; tag markers are stripped.
     /// False-alarm recovery correctly replays buffered characters.
     fn filter_and_print(&self, text: &str) {
-        let mut state = self.think_filter_state.write().unwrap();
-        let mut buf = self.think_filter_buf.write().unwrap();
-        let mut dim = self.think_dim_active.write().unwrap();
+        let mut state = self.think_filter_state.write().unwrap_or_else(|e| e.into_inner());
+        let mut buf = self.think_filter_buf.write().unwrap_or_else(|e| e.into_inner());
+        let mut dim = self.think_dim_active.write().unwrap_or_else(|e| e.into_inner());
 
         for c in text.chars() {
             let (new_state, actions) = state.process(c, &mut buf);
@@ -756,7 +756,7 @@ impl TerminalHandler {
 
     fn flush_tool_call(&self) {
         let name = {
-            let n = self.cur_tool_name.read().unwrap();
+            let n = self.cur_tool_name.read().unwrap_or_else(|e| e.into_inner());
             if n.is_empty() {
                 return;
             }
@@ -764,7 +764,7 @@ impl TerminalHandler {
         };
 
         let args = {
-            let a = self.cur_tool_args.read().unwrap();
+            let a = self.cur_tool_args.read().unwrap_or_else(|e| e.into_inner());
             a.clone()
         };
 
@@ -776,9 +776,9 @@ impl TerminalHandler {
             eprintln!("  [{}]", name);
         }
 
-        let mut n = self.cur_tool_name.write().unwrap();
+        let mut n = self.cur_tool_name.write().unwrap_or_else(|e| e.into_inner());
         *n = String::new();
-        let mut a = self.cur_tool_args.write().unwrap();
+        let mut a = self.cur_tool_args.write().unwrap_or_else(|e| e.into_inner());
         a.clear();
     }
 }
@@ -814,8 +814,8 @@ impl StallDetector {
     /// - Medium contexts (>50K tokens): stall=300s, startup=600s
     /// - Default (<=50K tokens, remote): stall=300s, startup=600s
     pub fn configure(&self, is_local: bool, context_tokens: usize) {
-        let mut stall = self.stall_timeout.write().unwrap();
-        let mut startup = self.startup_timeout.write().unwrap();
+        let mut stall = self.stall_timeout.write().unwrap_or_else(|e| e.into_inner());
+        let mut startup = self.startup_timeout.write().unwrap_or_else(|e| e.into_inner());
         if is_local {
             // Local providers: shorter startup to detect provider hangs faster
             *stall = Duration::from_secs(300);
@@ -833,17 +833,17 @@ impl StallDetector {
 
     /// Reset timer on successful event
     pub fn reset(&self) {
-        let mut last = self.last_event.write().unwrap();
+        let mut last = self.last_event.write().unwrap_or_else(|e| e.into_inner());
         *last = Instant::now();
-        let mut count = self.stall_count.write().unwrap();
+        let mut count = self.stall_count.write().unwrap_or_else(|e| e.into_inner());
         *count = 0;
     }
 
     /// Check if stalled. Returns Some(duration) if stalled.
     #[allow(dead_code)]
     pub fn check_stall(&self) -> Option<Duration> {
-        let last = *self.last_event.read().unwrap();
-        let stall = self.stall_timeout.read().unwrap();
+        let last = *self.last_event.read().unwrap_or_else(|e| e.into_inner());
+        let stall = self.stall_timeout.read().unwrap_or_else(|e| e.into_inner());
         let elapsed = last.elapsed();
         if elapsed > *stall {
             Some(elapsed)
@@ -855,7 +855,7 @@ impl StallDetector {
     /// Increment stall count and return count
     #[allow(dead_code)]
     pub fn increment_stall(&self) -> usize {
-        let mut count = self.stall_count.write().unwrap();
+        let mut count = self.stall_count.write().unwrap_or_else(|e| e.into_inner());
         *count += 1;
         *count
     }
@@ -863,9 +863,9 @@ impl StallDetector {
     /// Get stall timeout based on whether first event has been received
     #[allow(dead_code)]
     pub fn timeout(&self) -> Duration {
-        let last = *self.last_event.read().unwrap();
-        let startup = self.startup_timeout.read().unwrap();
-        let stall = self.stall_timeout.read().unwrap();
+        let last = *self.last_event.read().unwrap_or_else(|e| e.into_inner());
+        let startup = self.startup_timeout.read().unwrap_or_else(|e| e.into_inner());
+        let stall = self.stall_timeout.read().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() < *startup {
             // Use startup timeout until first event
             *startup

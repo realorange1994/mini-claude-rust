@@ -99,7 +99,7 @@ Usage:
         if let Some(files_read) = &self.files_read {
             let path_str = normalize_file_path(&path.to_string_lossy());
             if path.exists() {
-                let fr = files_read.read().unwrap();
+                let fr = files_read.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(info) = fr.get(&path_str) {
                     if let Ok(meta) = fs::metadata(&path) {
                         if let Ok(modified) = meta.modified() {
@@ -186,7 +186,7 @@ Usage:
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 let read_time = SystemTime::now();
-                files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+                files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
             }
             return ToolResult::ok(format!("Successfully created {}", path.display()));
         }
@@ -315,7 +315,7 @@ Usage:
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap().insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo { mtime, read_time, read_offset: usize::MAX, read_limit: usize::MAX });
         }
 
         ToolResult::ok(format!("Successfully edited {}", path.display()))

@@ -156,7 +156,7 @@ impl Tool for FileReadTool {
         // waste cache_creation tokens on every subsequent turn.
         if let Some(files_read) = &self.files_read {
             let path_str = normalize_file_path(&path.to_string_lossy());
-            let fr = files_read.read().unwrap();
+            let fr = files_read.read().unwrap_or_else(|e| e.into_inner());
             if let Some(info) = fr.get(&path_str) {
                 // Only dedup entries from a prior Read (offset is always set by Read).
                 // Edit/Write store offset=usize::MAX — their entry reflects post-edit
@@ -223,7 +223,7 @@ impl Tool for FileReadTool {
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let read_time = SystemTime::now();
-            files_read.write().unwrap().insert(path_str, FileReadInfo {
+            files_read.write().unwrap_or_else(|e| e.into_inner()).insert(path_str, FileReadInfo {
                 mtime,
                 read_time,
                 read_offset: offset,
