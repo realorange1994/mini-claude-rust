@@ -841,7 +841,7 @@ const COMPACT_USER_PROMPT_ITERATIVE: &str = r#"Below is the previous summary fol
 Previous Summary:
 {previous_summary}
 
-Write your analysis in <analysis> tags, then the updated summary in <summary> tags with the same 9-field structure."#;
+Write your analysis in <analysis> tags, then the updated summary in <summary> tags with the same structure as the previous summary."#;
 
 // --- Sensitive info redaction (A3) ---
 
