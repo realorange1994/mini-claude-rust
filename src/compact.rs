@@ -365,6 +365,11 @@ fn dedup_tool_results(messages: &mut Vec<Message>) {
     for msg in messages.iter_mut() {
         if let MessageContent::ToolResultBlocks(blocks) = &mut msg.content {
             for block in blocks.iter_mut() {
+                // Skip error results — they contain important debugging info
+                if block.is_error {
+                    continue;
+                }
+
                 // Build the combined text content for hashing
                 let combined: String = block
                     .content
@@ -579,6 +584,51 @@ pub fn prune_tool_results(messages: &mut Vec<Message>) {
     // write down important information before results are cleared.
     truncate_large_tool_args(messages);
     strip_image_content(messages);
+}
+
+/// SelectiveClear: clear tool results for read-only tools (read_file, grep, glob,
+/// web_fetch, web_search, list_dir) while preserving exec, git, write, and other
+/// tools. This saves the most tokens while keeping critical debugging info intact.
+pub fn selective_clear_read_only_tools(messages: &mut Vec<Message>, placeholder: &str) {
+    // Build tool_use_id -> tool_name mapping
+    let mut tool_name_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for msg in messages.iter() {
+        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+            for block in blocks {
+                if !block.id.is_empty() {
+                    tool_name_map.insert(block.id.clone(), block.name.clone());
+                }
+            }
+        }
+    }
+
+    for msg in messages.iter_mut() {
+        if let MessageContent::ToolResultBlocks(blocks) = &mut msg.content {
+            for block in blocks.iter_mut() {
+                // Skip error results
+                if block.is_error {
+                    continue;
+                }
+                if let Some(name) = tool_name_map.get(&block.tool_use_id) {
+                    if is_read_only_tool(name) {
+                        block.content = vec![ToolResultContent::Text {
+                            text: placeholder.to_string(),
+                        }];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read-only tools whose results can be safely cleared during selective compaction
+/// without losing write/exec side-effect information.
+fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file" | "grep" | "glob" | "web_fetch" | "web_search" | "list_dir"
+    )
 }
 
 // --- LLM-driven compaction ---
@@ -2180,11 +2230,11 @@ impl Compactor {
                 }
             }
             CompactPhase::SelectiveClear => {
-                if messages.len() > 4 {
-                    let first = messages[..1].to_vec();
-                    let recent = messages[messages.len() - 3..].to_vec();
-                    context.replace_messages([first, recent].concat());
-                }
+                // Selectively clear read-only tool results (read_file, grep, glob, etc.)
+                // while keeping all messages intact. This saves tokens without losing context.
+                let mut msgs = context.messages().to_vec();
+                selective_clear_read_only_tools(&mut msgs, "[read-only tool result cleared]");
+                context.replace_messages(msgs);
             }
             CompactPhase::Aggressive => {
                 context.minimum_history();

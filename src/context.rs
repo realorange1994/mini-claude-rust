@@ -1021,6 +1021,10 @@ impl ConversationContext {
                     })
                 });
                 let has_compactable = blocks.iter().any(|b| {
+                    // Preserve error results — they contain important debugging info
+                    if b.is_error {
+                        return false;
+                    }
                     if let Some(name) = tool_name_map.get(&b.tool_use_id) {
                         if is_compactable_tool(name) {
                             // Only consider compactable if the result is large enough to justify clearing.
@@ -1044,6 +1048,10 @@ impl ConversationContext {
 
                 // Clear only compactable tool results that are large enough; leave others untouched
                 for block in blocks.iter_mut() {
+                    // Preserve error results — they contain important debugging info
+                    if block.is_error {
+                        continue;
+                    }
                     if let Some(name) = tool_name_map.get(&block.tool_use_id) {
                         if is_compactable_tool(name) {
                             // Check size threshold: preserve small results to prevent amnesia
