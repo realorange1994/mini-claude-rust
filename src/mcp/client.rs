@@ -9,6 +9,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// Timeout for individual stdio MCP requests (seconds).
+/// If the MCP server doesn't respond within this time, the request is aborted
+/// to prevent permanently blocking the agent loop.
+const MCP_STDIO_TIMEOUT_SECS: u64 = 120;
+
 // ─── JSON-RPC Types ───
 
 #[derive(Debug, Serialize)]

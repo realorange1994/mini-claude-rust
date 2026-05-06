@@ -160,8 +160,14 @@ fn main() -> Result<()> {
     // Register all tools
     let registry = tools::Registry::new();
     tools::register_builtin_tools(&registry);
-    tools::register_mcp_and_skills(&registry, &cfg);
     tools::register_memory_tools(&registry, &session_memory_arc);
+
+    // Initialize TaskStore for bash background tasks.
+    // Created early so MCP tools can use it for timeout-to-background.
+    let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
+
+    // Register MCP and skills (needs task_store for timeout-to-background)
+    tools::register_mcp_and_skills(&registry, &cfg, &task_store);
 
     // Initialize TodoList for TodoWrite tool
     let todo_list = Arc::new(miniclaudecode_rust::context::TodoList::new());
@@ -171,10 +177,8 @@ fn main() -> Result<()> {
     let work_task_store = work_task::WorkTaskStore::new_shared();
     tools::register_task_tools(&registry, &work_task_store);
 
-    // Initialize TaskStore for bash background tasks.
     // Create a shared notification channel so both main and resume sessions
     // can send task completion notifications to the parent agent loop.
-    let task_store = miniclaudecode_rust::task_store::TaskStore::new_shared();
     let (notification_tx, notification_rx) = tokio::sync::mpsc::unbounded_channel();
     let notification_tx_arc = Arc::new(notification_tx);
     tools::register_bash_task_tools_with_tx(&registry, task_store.clone(), Arc::clone(&notification_tx_arc));
@@ -243,7 +247,7 @@ fn main() -> Result<()> {
         // Create a new registry for the resumed session
         let resume_registry = tools::Registry::new();
         tools::register_builtin_tools(&resume_registry);
-        tools::register_mcp_and_skills(&resume_registry, &cfg);
+        tools::register_mcp_and_skills(&resume_registry, &cfg, &task_store);
         tools::register_memory_tools(&resume_registry, &session_memory_arc);
         tools::register_task_tools(&resume_registry, &work_task_store);
         tools::register_bash_task_tools_with_tx(&resume_registry, task_store.clone(), Arc::clone(&notification_tx_arc));
@@ -312,11 +316,11 @@ fn main() -> Result<()> {
     }
 
     // Interactive REPL
-    run_interactive(agent_with_notif, work_task_store, agent_task_store, todo_list);
+    run_interactive(agent_with_notif, work_task_store, agent_task_store, todo_list, task_store);
     Ok(())
 }
 
-fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore, agent_task_store: miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore, todo_list: Arc<miniclaudecode_rust::context::TodoList>) {
+fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task::SharedWorkTaskStore, agent_task_store: miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore, todo_list: Arc<miniclaudecode_rust::context::TodoList>, task_store: miniclaudecode_rust::task_store::SharedTaskStore) {
     // Get transcript filename for resume hint (strip .jsonl extension)
     let transcript_stem = agent.transcript_filename().trim_end_matches(".jsonl");
 
@@ -514,7 +518,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         agent.close();
                         let registry = tools::Registry::new();
                         tools::register_builtin_tools(&registry);
-                        tools::register_mcp_and_skills(&registry, &agent.config);
+                        tools::register_mcp_and_skills(&registry, &agent.config, &task_store);
                         if let Some(ref sm) = agent.config.session_memory {
                             tools::register_memory_tools(&registry, sm);
                         }

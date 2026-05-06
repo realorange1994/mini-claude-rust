@@ -105,6 +105,28 @@ impl TaskStore {
         Arc::new(Self::new())
     }
 
+    /// Register a new background task with a custom task type. Returns the task ID.
+    pub fn register_bg_task(
+        &self,
+        task_type: &str,
+        description: String,
+        output_file: String,
+    ) -> String {
+        let task_id = generate_bash_task_id();
+        let task = TaskState {
+            id: task_id.clone(),
+            task_type: task_type.to_string(),
+            status: TaskStatus::Running,
+            description,
+            output_file: Some(output_file),
+            pid: None,
+            evict_after: None,
+        };
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        tasks.insert(task_id.clone(), Arc::new(Mutex::new(task)));
+        task_id
+    }
+
     /// Register a new background bash task. Returns the task ID.
     pub fn register_bash_bg_task(
         &self,
