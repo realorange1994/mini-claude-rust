@@ -17,6 +17,20 @@ use crate::context::{
 };
 use crate::session_memory::SessionMemory;
 
+/// Creates a compact boundary Message with a unique UUID.
+/// Used by the transcript, session storage, and QueryEngine to reference
+/// specific compaction events.
+pub fn make_compact_boundary_message(trigger: CompactTrigger, pre_compact_tokens: usize) -> Message {
+    Message::new(
+        MessageRole::System,
+        MessageContent::CompactBoundary {
+            trigger,
+            pre_compact_tokens,
+            uuid: uuid::Uuid::new_v4().to_string(),
+        },
+    )
+}
+
 /// Direction for partial compaction.
 /// - `UpTo`: Compact everything before the pivot index (keeps recent context)
 /// - `From`: Compact everything after the pivot index (keeps early + recent context)
@@ -1323,6 +1337,12 @@ async fn do_compact_llm_call(
         "system".to_string(),
         serde_json::json!([{"type": "text", "text": COMPACT_SYSTEM_PROMPT}]),
     );
+    // Disable extended thinking during compaction to prevent wasting output
+    // tokens on thinking blocks. The summary needs all available tokens.
+    payload.insert(
+        "thinking".to_string(),
+        serde_json::json!({"type": "disabled"}),
+    );
 
     // Append the summary prompt as the final user message after the conversation history
     let mut all_messages = api_messages;
@@ -1364,13 +1384,7 @@ async fn do_compact_llm_call(
         .ok_or_else(|| anyhow::anyhow!("No summary text in compact response"))?;
 
     // Build the compaction result
-    let boundary = Message::new(
-        MessageRole::System,
-        MessageContent::CompactBoundary {
-            trigger,
-            pre_compact_tokens,
-        },
-    );
+    let boundary = make_compact_boundary_message(trigger, pre_compact_tokens);
 
     // Match upstream's getCompactUserSummaryMessage: add transcript path
     // for detail recovery and recentMessagesPreserved notice.
@@ -1537,13 +1551,7 @@ pub fn try_sm_compact(
     eprintln!("[sm-compact] Using session memory as summary (skipping LLM API call)");
 
     // Build the compact boundary marker
-    let boundary = Message::new(
-        MessageRole::System,
-        MessageContent::CompactBoundary {
-            trigger,
-            pre_compact_tokens: tokens_before,
-        },
-    );
+    let boundary = make_compact_boundary_message(trigger, tokens_before);
 
     // Format the session memory as a summary message
     // Match upstream's getCompactUserSummaryMessage: add transcript path
@@ -1714,13 +1722,7 @@ pub fn partial_compact(
             if last_keep_start <= pivot {
                 // Nothing to summarize -- keep everything
                 return PartialCompactionResult {
-                    boundary: Message::new(
-                        MessageRole::System,
-                        MessageContent::CompactBoundary {
-                            trigger: CompactTrigger::Manual,
-                            pre_compact_tokens: tokens_before,
-                        },
-                    ),
+                    boundary: make_compact_boundary_message(CompactTrigger::Manual, tokens_before),
                     summary: Message::new(MessageRole::User, MessageContent::Summary(
                         format!("[No messages to summarize, {} tokens]", tokens_before),
                     )),
@@ -1751,13 +1753,7 @@ pub fn partial_compact(
     );
 
     // Build the result
-    let boundary = Message::new(
-        MessageRole::System,
-        MessageContent::CompactBoundary {
-            trigger: CompactTrigger::Manual,
-            pre_compact_tokens: tokens_before,
-        },
-    );
+    let boundary = make_compact_boundary_message(CompactTrigger::Manual, tokens_before);
 
     // Match upstream's getCompactUserSummaryMessage: add transcript path
     // for detail recovery and recentMessagesPreserved notice.

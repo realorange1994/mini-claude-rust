@@ -147,6 +147,28 @@ impl Manager {
         result
     }
 
+    /// Get usage instructions for a specific MCP server.
+    pub fn get_server_instructions(&self, name: &str) -> String {
+        let clients = self.clients.read().unwrap();
+        match clients.get(name) {
+            Some(client) => client.instructions(),
+            None => String::new(),
+        }
+    }
+
+    /// Get all MCP server instructions as a map[serverName]instructions.
+    pub fn all_server_instructions(&self) -> HashMap<String, String> {
+        let clients = self.clients.read().unwrap();
+        let mut result = HashMap::new();
+        for (name, client) in clients.iter() {
+            let instr = client.instructions();
+            if !instr.is_empty() {
+                result.insert(name.clone(), instr);
+            }
+        }
+        result
+    }
+
     /// Call a tool by name, searching across all servers.
     /// Releases the client map lock before doing I/O to avoid blocking other operations.
     pub fn call_tool(&self, name: &str, args: HashMap<String, serde_json::Value>) -> Result<ToolResult, String> {

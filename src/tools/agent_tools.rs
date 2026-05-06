@@ -178,6 +178,10 @@ impl Tool for AgentGetTool {
             None => return ToolResult::error(format!("Agent '{}' not found", agent_id)),
         };
 
+        // Mark task as notified so post-compact recovery knows the model
+        // has already seen this agent's results.
+        task.set_notified();
+
         let elapsed = task.start_time.elapsed();
         let duration_str = if elapsed.as_secs() < 60 {
             format!("{}s", elapsed.as_secs())

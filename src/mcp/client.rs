@@ -84,6 +84,8 @@ pub struct Client {
 
     /// Discovered tools
     tools: Mutex<Vec<Tool>>,
+    /// Instructions from the MCP server's initialize response
+    instructions: Mutex<String>,
     running: Mutex<bool>,
 
     /// HTTP client for remote servers
@@ -113,6 +115,7 @@ impl Client {
             url: String::new(),
             headers: HashMap::new(),
             tools: Mutex::new(Vec::new()),
+            instructions: Mutex::new(String::new()),
             running: Mutex::new(false),
             http_client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
@@ -135,6 +138,7 @@ impl Client {
             url: url.to_string(),
             headers: headers.clone(),
             tools: Mutex::new(Vec::new()),
+            instructions: Mutex::new(String::new()),
             running: Mutex::new(false),
             http_client: reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(60))
@@ -219,7 +223,21 @@ impl Client {
             "clientInfo": {"name": "miniclaudecode", "version": "0.1.0"}
         });
 
-        self.request_stdio("initialize", Some(params))?;
+        let resp = self.request_stdio("initialize", Some(params))?;
+
+        // Parse instructions from the initialize response
+        #[derive(Deserialize)]
+        struct InitResult {
+            #[serde(default)]
+            instructions: Option<String>,
+        }
+        if let Ok(result) = serde_json::from_value::<InitResult>(resp) {
+            if let Some(instr) = result.instructions {
+                if !instr.is_empty() {
+                    *self.instructions.lock().unwrap() = instr;
+                }
+            }
+        }
 
         // Send initialized notification
         let notif = JsonRpcNotification {
@@ -238,7 +256,22 @@ impl Client {
             "clientInfo": {"name": "miniclaudecode", "version": "0.1.0"}
         });
 
-        self.request_remote("initialize", Some(params))?;
+        let resp = self.request_remote("initialize", Some(params))?;
+
+        // Parse instructions from the initialize response
+        #[derive(Deserialize)]
+        struct InitResult {
+            #[serde(default)]
+            instructions: Option<String>,
+        }
+        if let Ok(result) = serde_json::from_value::<InitResult>(resp) {
+            if let Some(instr) = result.instructions {
+                if !instr.is_empty() {
+                    *self.instructions.lock().unwrap() = instr;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -277,6 +310,11 @@ impl Client {
     /// Get discovered tools
     pub fn tools(&self) -> Vec<Tool> {
         self.tools.lock().unwrap().clone()
+    }
+
+    /// Get server instructions from the initialize response
+    pub fn instructions(&self) -> String {
+        self.instructions.lock().unwrap().clone()
     }
 
     // ─── Tool invocation ───

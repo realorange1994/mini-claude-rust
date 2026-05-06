@@ -3173,6 +3173,9 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 .push(&tws.tool);
         }
 
+        // Get per-server instructions
+        let server_instructions = mgr.all_server_instructions();
+
         let mut sb = String::from(
             "## MCP Servers After Compaction\n\n\
              The following MCP servers are connected. Use list_mcp_tools to discover their tools, or call mcp_call_tool directly.\n\n",
@@ -3196,6 +3199,12 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                     tool.description.clone()
                 };
                 sb.push_str(&format!("  - {}: {}\n", tool.name, desc));
+            }
+            // Inject per-server instructions if available
+            if let Some(instr) = server_instructions.get(server) {
+                if !instr.is_empty() {
+                    sb.push_str(&format!("\n  **Usage instructions for {}:**\n  {}\n", server, instr));
+                }
             }
         }
 
@@ -3446,12 +3455,9 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         // The boundary MUST be included before calling replace_messages,
         // matching the pattern used by try_sm_compact (compact.rs:1456).
         // The summary MUST follow the boundary so BuildMessages resets at the boundary.
-        let boundary = Message::new(
-            MessageRole::System,
-            MessageContent::CompactBoundary {
-                trigger: crate::context::CompactTrigger::Manual,
-                pre_compact_tokens: tokens_before,
-            },
+        let boundary = crate::compact::make_compact_boundary_message(
+            crate::context::CompactTrigger::Manual,
+            tokens_before,
         );
 
         // Build a structured summary matching upstream's getCompactUserSummaryMessage format.

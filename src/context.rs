@@ -204,6 +204,9 @@ pub enum MessageContent {
     CompactBoundary {
         trigger: CompactTrigger,
         pre_compact_tokens: usize,
+        /// UUID uniquely identifies this compact boundary. Used by the transcript,
+        /// session storage, and QueryEngine to reference specific compaction events.
+        uuid: String,
     },
     /// Summary of compressed conversation history (role: user)
     /// This is injected after compaction to preserve semantic continuity
@@ -260,7 +263,7 @@ impl Message {
                     .collect();
                 parts.join(" ")
             }
-            MessageContent::CompactBoundary { trigger, pre_compact_tokens } => {
+            MessageContent::CompactBoundary { trigger, pre_compact_tokens, .. } => {
                 format!("[compact boundary: {}, {} tokens]", trigger, pre_compact_tokens)
             }
             MessageContent::Attachment(a) => a.clone(),
@@ -579,11 +582,13 @@ impl ConversationContext {
 
     /// Add a compact boundary marker
     pub fn add_compact_boundary(&mut self, trigger: CompactTrigger, pre_compact_tokens: usize) {
+        let uuid = uuid::Uuid::new_v4().to_string();
         self.messages.push(Message::new(
             MessageRole::System,
             MessageContent::CompactBoundary {
                 trigger,
                 pre_compact_tokens,
+                uuid,
             },
         ));
     }
