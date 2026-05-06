@@ -779,8 +779,8 @@ impl AutoModeClassifier {
                 return format!("fileops:{}:{}", op, path);
             }
         }
-        // For file ops, cache by tool+path
-        if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+        // For file tools, cache by tool+path
+        if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
             return format!("{}:{}", tool_name, path);
         }
         // Generic: tool name only (coarser caching)
@@ -883,12 +883,12 @@ fn format_action_for_classifier(
             }
         }
         "write_file" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                 return format!("Tool: write_file\nPath: {}", path);
             }
         }
         "edit_file" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                 let old_str = input.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
                 let preview = if old_str.len() > 100 {
                     format!("{}...", &old_str[..old_str.floor_char_boundary(100)])
@@ -899,7 +899,7 @@ fn format_action_for_classifier(
             }
         }
         "multi_edit" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                 return format!("Tool: multi_edit\nPath: {}", path);
             }
         }

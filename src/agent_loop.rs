@@ -1198,11 +1198,8 @@ impl AgentLoop {
 
                                     // Capture path for post-execution snapshot before params is moved
                                     // Also captures read_file path for mark_file_read tracking.
-                                    // NOTE: The LLM sends "file_path" per the tool schema, but after
-                                    // remap_file_path it becomes "path". We must check BOTH keys
-                                    // because remap hasn't happened yet at this point.
                                     let snapshot_path = if tool_name == "write_file" || tool_name == "edit_file" || tool_name == "multi_edit" || tool_name == "read_file" {
-                                        params.get("file_path").or(params.get("path")).and_then(|v| v.as_str()).map(|p| expand_path(p))
+                                        params.get("file_path").and_then(|v| v.as_str()).map(|p| expand_path(p))
                                     } else {
                                         None
                                     };
@@ -1228,7 +1225,7 @@ impl AgentLoop {
                                     // Capture fileops delete info before params is moved
                                     let fileops_delete_info = if tool_name == "fileops" {
                                         let op = params.get("operation").and_then(|v| v.as_str());
-                                        let path = params.get("file_path").or(params.get("path")).and_then(|v| v.as_str()).map(|p| expand_path(p));
+                                        let path = params.get("path").and_then(|v| v.as_str()).map(|p| expand_path(p));
                                         match (op, path) {
                                             (Some("rm"), Some(p)) => Some(("rm", p)),
                                             (Some("rmrf"), Some(p)) => Some(("rmrf", p)),
@@ -1257,10 +1254,21 @@ impl AgentLoop {
                                         // Path traversal protection: file tools must stay within project directory
         let path_tools = ["read_file", "write_file", "edit_file", "multi_edit", "fileops", "list_dir", "glob", "grep"];
         if path_tools.contains(&tool_name.as_str()) {
-            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                if !path.is_empty() {
-                    if let Err(e) = crate::tools::is_path_allowed(path) {
-                        return ToolResult::error(e);
+            // Core file tools use file_path; fileops/list_dir/glob/grep use path
+            if ["read_file", "write_file", "edit_file", "multi_edit"].contains(&tool_name.as_str()) {
+                if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        if let Err(e) = crate::tools::is_path_allowed(path) {
+                            return ToolResult::error(e);
+                        }
+                    }
+                }
+            } else {
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    if !path.is_empty() {
+                        if let Err(e) = crate::tools::is_path_allowed(path) {
+                            return ToolResult::error(e);
+                        }
                     }
                 }
             }
@@ -1307,8 +1315,7 @@ impl AgentLoop {
                                                 let schema = t.input_schema();
                                                 let mut coerced = params;
                                                 let coercion_result = crate::tools::coercion::coerce_arguments(&schema, &mut coerced);
-                                                // Remap official parameter names to internal names
-                                                crate::tools::coercion::remap_file_path(&mut coerced);
+                                                // Remap directory parameter to internal name
                                                 crate::tools::coercion::remap_dir_param(&mut coerced);
                                                 if !coercion_result.warnings.is_empty() {
                                                     for w in &coercion_result.warnings {

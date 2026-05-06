@@ -79,7 +79,7 @@ pub fn format_tool_input_compact(tool_name: &str, input: &HashMap<String, serde_
             }
         }
         "write_file" | "edit_file" | "read_file" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
                 return path.to_string();
             }
         }
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_format_tool_input_compact_file_path() {
         let mut input = HashMap::new();
-        input.insert("path".to_string(), serde_json::json!("src/main.rs"));
+        input.insert("file_path".to_string(), serde_json::json!("src/main.rs"));
         assert_eq!(
             format_tool_input_compact("read_file", &input),
             "src/main.rs"

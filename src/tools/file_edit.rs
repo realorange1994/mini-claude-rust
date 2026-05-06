@@ -82,12 +82,9 @@ Usage:
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
-        let path = params.get("file_path")
-            .and_then(|v| v.as_str())
-            .or_else(|| params.get("path").and_then(|v| v.as_str()));
-        let path = match path {
+        let path = match params.get("file_path").and_then(|v| v.as_str()) {
             Some(p) => expand_path(p),
-            None => return ToolResult::error("Error: path is required"),
+            None => return ToolResult::error("Error: file_path is required"),
         };
 
         // SECURITY: Block UNC paths before any filesystem I/O to prevent NTLM credential leaks.
