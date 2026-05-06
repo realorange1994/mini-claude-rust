@@ -79,6 +79,14 @@ impl Tool for TaskCreateTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let subject = params
             .get("subject")
@@ -162,6 +170,14 @@ impl Tool for TaskListTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -256,6 +272,14 @@ impl Tool for TaskGetTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let task_id = params
             .get("task_id")
@@ -303,6 +327,8 @@ impl Tool for TaskGetTool {
             }
         }
     }
+
+
 }
 
 // ─── TaskUpdateTool ────────────────────────────────────────────────────────
@@ -389,6 +415,14 @@ impl Tool for TaskUpdateTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let task_id = params
             .get("task_id")
@@ -470,6 +504,8 @@ impl Tool for TaskUpdateTool {
             Err(e) => ToolResult::error(format!("Failed to update task: {}", e)),
         }
     }
+
+
 }
 
 /// Coerce a scalar value (number or string) to an array, or pass through if already array.
@@ -561,6 +597,14 @@ impl Tool for TaskStopTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let task_id = params
             .get("task_id")
@@ -576,4 +620,6 @@ impl Tool for TaskStopTool {
             Err(e) => ToolResult::error(e),
         }
     }
+
+
 }

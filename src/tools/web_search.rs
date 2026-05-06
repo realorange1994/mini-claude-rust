@@ -93,6 +93,14 @@ impl Tool for WebSearchTool {
             Err(e) => ToolResult::error(format!("Search error: {}", e)),
         }
     }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly, crate::tools::ToolCapability::Network]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 }
 
 #[derive(Debug)]

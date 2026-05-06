@@ -56,6 +56,13 @@ impl Tool for FileHistoryTool {
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
     }
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -193,7 +200,11 @@ impl Tool for FileHistoryTool {
             ToolResult::ok(output)
         }
     }
+
+
+
 }
+
 
 pub struct FileHistoryReadTool {
     history: Arc<FileHistory>,
@@ -244,6 +255,14 @@ impl Tool for FileHistoryReadTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -306,7 +325,11 @@ impl Tool for FileHistoryReadTool {
 
         ToolResult::ok(output)
     }
+
+
+
 }
+
 
 pub struct FileHistoryGrepTool {
     history: Arc<FileHistory>,
@@ -360,6 +383,14 @@ impl Tool for FileHistoryGrepTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -476,7 +507,11 @@ impl Tool for FileHistoryGrepTool {
             ToolResult::ok(format!("Found {} matches:\n{}", total_matches, output))
         }
     }
+
+
+
 }
+
 
 pub struct FileRestoreTool {
     history: Arc<FileHistory>,
@@ -514,6 +549,14 @@ impl Tool for FileRestoreTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -542,7 +585,11 @@ impl Tool for FileRestoreTool {
             Err(e) => ToolResult::error(format!("Error restoring file: {}", e)),
         }
     }
+
+
+
 }
+
 
 pub struct FileRewindTool {
     history: Arc<FileHistory>,
@@ -585,6 +632,14 @@ impl Tool for FileRewindTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -624,7 +679,11 @@ impl Tool for FileRewindTool {
             Err(e) => ToolResult::error(format!("Error rewinding file: {}", e)),
         }
     }
+
+
+
 }
+
 
 // ─── P0: file_history_diff ───
 
@@ -679,6 +738,14 @@ impl Tool for FileHistoryDiffTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -854,7 +921,11 @@ impl Tool for FileHistoryDiffTool {
             }
         }
     }
+
+
+
 }
+
 
 // ─── P1: file_history_search (added/removed/changed) ───
 
@@ -907,6 +978,14 @@ impl Tool for FileHistorySearchTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -948,7 +1027,11 @@ impl Tool for FileHistorySearchTool {
 
         ToolResult::ok(output)
     }
+
+
+
 }
+
 
 // ─── P1: file_history_summary ───
 
@@ -988,6 +1071,14 @@ impl Tool for FileHistorySummaryTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let since = params.get("since").and_then(|v| v.as_str())
             .and_then(|s| parse_duration(s));
@@ -1025,7 +1116,11 @@ impl Tool for FileHistorySummaryTool {
 
         ToolResult::ok(output)
     }
+
+
+
 }
+
 
 // ─── P1: file_history_timeline ───
 
@@ -1070,6 +1165,14 @@ impl Tool for FileHistoryTimelineTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let since = params.get("since").and_then(|v| v.as_str())
             .and_then(|s| parse_duration(s));
@@ -1100,7 +1203,11 @@ impl Tool for FileHistoryTimelineTool {
 
         ToolResult::ok(output)
     }
+
+
+
 }
+
 
 // ─── P2: file_history_tag ───
 
@@ -1152,6 +1259,14 @@ impl Tool for FileHistoryTagTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -1251,7 +1366,11 @@ impl Tool for FileHistoryTagTool {
             }
         }
     }
+
+
+
 }
+
 
 // ─── Annotate ───
 
@@ -1299,6 +1418,14 @@ impl Tool for FileHistoryAnnotateTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -1332,7 +1459,11 @@ impl Tool for FileHistoryAnnotateTool {
             ToolResult::error(format!("No history for: {}", full_path.display()))
         }
     }
+
+
+
 }
+
 
 // ─── Batch operations ───
 
@@ -1380,6 +1511,14 @@ impl Tool for FileHistoryBatchTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -1482,7 +1621,11 @@ impl Tool for FileHistoryBatchTool {
         output.push_str("Use file_history --path <file> for full version list of a single file.");
         ToolResult::ok(output)
     }
+
+
+
 }
+
 
 // ─── P3: unified file_history_checkout ───
 
@@ -1524,6 +1667,14 @@ impl Tool for FileHistoryCheckoutTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -1574,7 +1725,11 @@ impl Tool for FileHistoryCheckoutTool {
             Err(e) => ToolResult::error(format!("Error checking out file: {}", e)),
         }
     }
+
+
+
 }
+
 
 // ─── Helper: parse time duration strings ───
 

@@ -80,6 +80,14 @@ impl Tool for TerminalTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ExecutesCode, crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Classifier
+    }
+
     fn execute(&self, #[allow(unused_variables)] params: HashMap<String, Value>) -> ToolResult {
         #[cfg(target_os = "windows")]
         {

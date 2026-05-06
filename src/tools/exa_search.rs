@@ -66,6 +66,14 @@ impl Tool for ExaSearchTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly, crate::tools::ToolCapability::Network]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let query = match params.get("query").and_then(|v| v.as_str()) {
             Some(q) => q,

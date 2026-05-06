@@ -60,6 +60,14 @@ impl Tool for ListDirTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = params
             .get("path")
@@ -88,6 +96,8 @@ impl Tool for ListDirTool {
             list_dir_simple(&dir, max_entries)
         }
     }
+
+
 }
 
 fn list_dir_simple(dir: &std::path::Path, max_entries: usize) -> ToolResult {

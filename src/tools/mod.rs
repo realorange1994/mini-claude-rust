@@ -33,8 +33,10 @@ pub mod todo_write;
 pub mod send_message;
 pub mod ask_user_question;
 mod path_safety;
+mod capabilities;
 
 pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};
+pub use capabilities::{ToolCapability, ApprovalRequirement, SafetyLevel, ToolProfile};
 use dunce;
 
 // Re-export tool structs for integration tests
@@ -174,6 +176,23 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> serde_json::Map<String, serde_json::Value>;
     fn check_permissions(&self, params: &HashMap<String, serde_json::Value>) -> Option<ToolResult>;
     fn execute(&self, params: HashMap<String, serde_json::Value>) -> ToolResult;
+
+    /// Declares the capabilities this tool has.
+    /// Default: read-only and auto-approved. Override to declare actual capabilities.
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    /// Declares the approval requirement for this tool.
+    /// Default: auto-approved (safe read-only tool).
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Auto
+    }
+
+    /// Convenience: safety level derived from capabilities.
+    fn safety_level(&self) -> SafetyLevel {
+        SafetyLevel::from_capabilities(&self.capabilities())
+    }
 }
 
 /// FileReadInfo tracks both the file's mtime (for staleness checks) and when it was read (for recency sorting).

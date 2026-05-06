@@ -1046,6 +1046,14 @@ impl Tool for ExecTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ExecutesCode, crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Classifier
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         // Check for background execution request
         let run_in_background = params
@@ -1361,6 +1369,14 @@ impl Tool for TaskStopTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let task_id = params
             .get("task_id")
@@ -1439,6 +1455,14 @@ impl Tool for TaskOutputTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

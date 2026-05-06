@@ -548,6 +548,14 @@ impl Tool for GitTool {
         check_git_flags_permission(operation, &effective_flags)
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ExecutesCode, crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Classifier
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let operation = match params.get("operation").and_then(|v| v.as_str()) {
             Some(op) => op,

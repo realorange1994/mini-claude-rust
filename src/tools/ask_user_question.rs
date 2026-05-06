@@ -191,4 +191,12 @@ impl Tool for AskUserQuestionTool {
 
         ToolResult::ok(sb)
     }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 }

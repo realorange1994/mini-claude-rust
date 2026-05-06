@@ -1644,6 +1644,8 @@ impl AgentLoop {
                         let mut ctx = self.context.write().await;
                         ctx.validate_tool_pairing();
                         ctx.fix_role_alternation();
+                        // Inject a recovery hint so the model produces properly sequenced tool calls
+                        ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
                         continue;
                     }
 
@@ -1888,6 +1890,8 @@ impl AgentLoop {
                             let mut ctx = self.context.write().await;
                             ctx.validate_tool_pairing();
                             ctx.fix_role_alternation();
+                            // Inject a recovery hint so the model produces properly sequenced tool calls
+                            ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
                         }
                         // Rebuild messages from repaired context so the fix takes effect on retry
                         let rebuilt = self.entries_to_messages_async().await;
@@ -2113,6 +2117,11 @@ impl AgentLoop {
                             let mut ctx = self.context.write().await;
                             ctx.validate_tool_pairing();
                             ctx.fix_role_alternation();
+                        }
+                        // Inject a recovery hint so the model produces properly sequenced tool calls
+                        {
+                            let mut ctx = self.context.write().await;
+                            ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
                         }
                         // Rebuild messages from repaired context and retry
                         current_messages = self.entries_to_messages_async().await;

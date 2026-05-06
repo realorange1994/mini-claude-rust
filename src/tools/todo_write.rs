@@ -154,4 +154,12 @@ impl Tool for TodoWriteTool {
         // to track progress and proceed with the current task.
         ToolResult::ok("Todos have been successfully. Ensure that you use the todo list to track your progress. Please proceed with the current tasks as applicable")
     }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 }

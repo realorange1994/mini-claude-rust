@@ -71,6 +71,14 @@ impl Tool for FileReadTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let path = match params.get("file_path").and_then(|v| v.as_str()) {
             Some(p) => expand_path(p),
@@ -280,6 +288,8 @@ impl Tool for FileReadTool {
 
         ToolResult::ok(result.trim_end().to_string())
     }
+
+
 }
 
 /// Checks if a file extension is a binary format that should be rejected.

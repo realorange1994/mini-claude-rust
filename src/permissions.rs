@@ -1,6 +1,6 @@
 use crate::auto_classifier::{AutoModeClassifier, is_auto_allowlisted};
 use crate::context::ConversationContext;
-use crate::tools::ToolResult;
+use crate::tools::{Tool, ToolResult, ApprovalRequirement};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -297,28 +297,38 @@ impl PermissionGate {
             return Some(denial);
         }
 
-        // When should_avoid_prompts is true (sub-agents), dangerous tools are
-        // auto-denied and non-dangerous tools are auto-allowed. This prevents
-        // sub-agents from ever blocking on an interactive user prompt.
+        // When should_avoid_prompts is true (sub-agents), tools that require user
+        // approval are auto-denied. Read-only and auto-approved tools pass through.
+        // This prevents sub-agents from ever blocking on an interactive user prompt.
         if self.should_avoid_prompts() {
-            let dangerous_tools = ["exec", "write_file", "edit_file", "multi_edit", "fileops"];
-            let tool_name = tool.name();
-            if dangerous_tools.contains(&tool_name) {
-                // For exec, still allow safe commands
-                if tool_name == "exec" {
-                    if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                        if self.is_safe_command(cmd) {
-                            return None; // Safe command, allow
+            match tool.approval_requirement() {
+                ApprovalRequirement::Required => {
+                    // Cannot prompt user in sub-agent context, deny
+                    return Some(ToolResult::error(format!(
+                        "Permission denied: {} requires user approval and sub-agents cannot prompt for it.",
+                        tool.name()
+                    )));
+                }
+                ApprovalRequirement::Classifier => {
+                    // For exec, still allow safe read-only commands
+                    if tool.name() == "exec" {
+                        if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                            if self.is_safe_command(cmd) {
+                                return None;
+                            }
                         }
                     }
+                    // Other classifier tools need classifier or are denied
+                    return Some(ToolResult::error(format!(
+                        "Permission denied: {} requires classifier evaluation and sub-agents cannot provide it.",
+                        tool.name()
+                    )));
                 }
-                return Some(ToolResult::error(format!(
-                    "Permission denied: {} is a dangerous tool and sub-agents cannot prompt for approval.",
-                    tool_name
-                )));
+                ApprovalRequirement::Auto => {
+                    // Auto-approved tools pass through
+                    return None;
+                }
             }
-            // Non-dangerous tool: auto-allow
-            return None;
         }
 
         match self.config.permission_mode {
@@ -332,19 +342,12 @@ impl PermissionGate {
                 self.check_auto_mode(tool, &params)
             }
             PermissionMode::Plan => {
-                // Only read-only tools in plan mode
-                let name = tool.name();
-                let read_only_tools = [
-                    "read_file", "grep", "glob", "list_dir", "git",
-                    "system", "process", "terminal", "web_search",
-                    "web_search_scraper", "web_fetch", "runtime_info", "list_mcp_tools",
-                    "mcp_server_status", "list_skills",
-                ];
-
-                if !read_only_tools.contains(&name) {
+                // Plan mode: only auto-approved tools allowed. Tools that require
+                // classifier evaluation or user approval are blocked.
+                if tool.approval_requirement() != ApprovalRequirement::Auto {
                     return Some(ToolResult::error(format!(
-                        "Permission denied: {} is not allowed in PLAN mode (read-only)",
-                        name
+                        "Permission denied: {} is not allowed in PLAN mode (auto-approved tools only)",
+                        tool.name()
                     )));
                 }
                 None
@@ -355,25 +358,34 @@ impl PermissionGate {
                     return Some(ToolResult::error(denial));
                 }
 
-                // Layer 2: Dangerous tools
-                let dangerous_tools = ["exec", "write_file", "edit_file", "multi_edit", "fileops"];
-                let tool_name = tool.name();
-                let is_dangerous = dangerous_tools.contains(&tool_name);
-
-                if is_dangerous {
-                    if tool_name == "exec" {
-                        if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                            if self.is_safe_command(cmd) {
-                                return None; // Safe command, allow without asking
+                // Use approval_requirement() to decide behavior
+                match tool.approval_requirement() {
+                    ApprovalRequirement::Auto => {
+                        // Auto-approved tools pass through
+                        return None;
+                    }
+                    ApprovalRequirement::Required => {
+                        // Always prompt user for approval
+                        if !self.ask_user(tool.name(), &params, None) {
+                            return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                        }
+                        return None;
+                    }
+                    ApprovalRequirement::Classifier => {
+                        // Classifier tools: check for safe exec commands, otherwise prompt
+                        if tool.name() == "exec" {
+                            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                                if self.is_safe_command(cmd) {
+                                    return None;
+                                }
                             }
                         }
-                    }
-                    if !self.ask_user(tool_name, &params, None) {
-                        return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                        if !self.ask_user(tool.name(), &params, None) {
+                            return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                        }
+                        return None;
                     }
                 }
-
-                None
             }
         }
     }
@@ -391,7 +403,10 @@ impl PermissionGate {
     }
 
     /// Auto mode permission check using the classifier.
-    /// Safe tools are auto-allowed. Other tools are evaluated by the LLM classifier.
+    /// Uses the tool's approval_requirement() to decide the path:
+    /// - Auto: auto-allow
+    /// - Required: block (cannot prompt user in auto mode without classifier)
+    /// - Classifier: evaluate via LLM classifier (with whitelist fallback)
     /// After consecutive denials exceeding the limit, falls back to interactive prompt.
     /// When classifier is nil/disabled: auto-allow (legacy behavior).
     fn check_auto_mode(
@@ -401,9 +416,27 @@ impl PermissionGate {
     ) -> Option<ToolResult> {
         let tool_name = tool.name();
 
-        // Fast path: whitelisted tools are always allowed
+        // Fast path: tools marked Auto are always allowed without classifier
+        if tool.approval_requirement() == ApprovalRequirement::Auto {
+            self.denial_count.store(0, Ordering::SeqCst);
+            return None;
+        }
+
+        // Fast path: tools marked Required cannot be auto-allowed without classifier.
+        // Fall through to legacy whitelist for exec/git safe-command checks.
+        if tool.approval_requirement() == ApprovalRequirement::Required {
+            // Only allow if matches legacy whitelist (e.g., safe exec commands)
+            if !is_auto_allowlisted(tool_name, params) {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: {} requires user approval in auto mode.",
+                    tool_name
+                )));
+            }
+        }
+
+        // Classifier path: for Classifier and non-Required tools, check legacy whitelist
+        // This handles safe exec commands, git read-only ops, etc.
         if is_auto_allowlisted(tool_name, params) {
-            // Log what was auto-allowed so the decision is visible in traces
             let desc = match tool_name {
                 "exec" => {
                     let cmd = params.get("command")

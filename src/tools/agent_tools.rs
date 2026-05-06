@@ -46,6 +46,14 @@ impl Tool for AgentListTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let status_filter = params
             .get("status")
@@ -209,6 +217,14 @@ impl Tool for AgentGetTool {
 
         ToolResult::ok(output)
     }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly, crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 }
 
 // ─── AgentKillTool ──────────────────────────────────────────────────────────
@@ -277,6 +293,14 @@ impl Tool for AgentKillTool {
                 agent_id
             ))
         }
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly, crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Required
     }
 }
 

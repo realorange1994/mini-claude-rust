@@ -143,6 +143,14 @@ impl Tool for GrepTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let pattern = match params.get("pattern").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -255,6 +263,8 @@ impl Tool for GrepTool {
             head_limit, offset, ctx_combined as usize, count_matches, max_depth,
         )
     }
+
+
 }
 
 /// Split glob on commas and whitespace, respecting brace groups.

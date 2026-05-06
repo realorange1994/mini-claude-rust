@@ -45,6 +45,14 @@ impl Tool for RuntimeInfoTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, _params: HashMap<String, Value>) -> ToolResult {
         let mut output = String::new();
 
@@ -82,6 +90,8 @@ impl Tool for RuntimeInfoTool {
 
         ToolResult::ok(output.trim().to_string())
     }
+
+
 }
 
 fn rust_version() -> String {

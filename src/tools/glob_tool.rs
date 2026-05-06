@@ -72,6 +72,14 @@ impl Tool for GlobTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let pattern = match params.get("pattern").and_then(|v| v.as_str()) {
             Some(p) => p,
@@ -185,6 +193,8 @@ impl Tool for GlobTool {
 
         ToolResult::ok(lines.join("\n"))
     }
+
+
 }
 
 

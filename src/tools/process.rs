@@ -72,6 +72,14 @@ impl Tool for ProcessTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::Subprocess]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Classifier
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let operation = match params.get("operation").and_then(|v| v.as_str()) {
             Some(op) => op,

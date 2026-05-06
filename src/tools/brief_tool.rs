@@ -50,6 +50,14 @@ impl Tool for BriefTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         // Validate task parameter exists and is non-empty
         let task = match params.get("task") {
@@ -79,6 +87,8 @@ impl Tool for BriefTool {
 
         ToolResult::ok(principles)
     }
+
+
 }
 
 #[cfg(test)]

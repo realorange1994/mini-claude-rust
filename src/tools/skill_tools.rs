@@ -47,6 +47,14 @@ impl Tool for ReadSkillTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let name = match params.get("name").and_then(|v| v.as_str()) {
             Some(n) => n,
@@ -58,6 +66,8 @@ impl Tool for ReadSkillTool {
             None => ToolResult::error(format!("Error: Skill not found: {}", name)),
         }
     }
+
+
 }
 
 // ─── ListSkillsTool ───
@@ -91,6 +101,14 @@ impl Tool for ListSkillsTool {
 
     fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
         None
+    }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
     }
 
     fn execute(&self, _params: HashMap<String, Value>) -> ToolResult {
@@ -130,6 +148,8 @@ impl Tool for ListSkillsTool {
 
         ToolResult::ok(output.trim().to_string())
     }
+
+
 }
 
 // ─── SearchSkillTool ───
@@ -172,6 +192,14 @@ impl Tool for SearchSkillTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let query = match params.get("query").and_then(|v| v.as_str()) {
             Some(q) if !q.trim().is_empty() => q.trim().to_string(),
@@ -211,6 +239,8 @@ impl Tool for SearchSkillTool {
         // Format results within budget
         format_results(&scored, &query)
     }
+
+
 }
 
 /// Score a skill against query terms (lightweight relevance scoring)

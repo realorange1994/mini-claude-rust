@@ -62,6 +62,14 @@ impl Tool for MemoryAddTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let category = match params.get("category").and_then(|v| v.as_str()) {
             Some(c) => c,
@@ -75,6 +83,8 @@ impl Tool for MemoryAddTool {
         self.memory.add_note(category, content, "assistant");
         ToolResult::ok(format!("Saved to memory [{}]: {}", category, content))
     }
+
+
 }
 
 /// MemorySearchTool — searches session memory for relevant notes.
@@ -125,6 +135,14 @@ impl Tool for MemorySearchTool {
         None
     }
 
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
+
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
         let query = match params.get("query").and_then(|v| v.as_str()) {
             Some(q) => q,
@@ -142,4 +160,6 @@ impl Tool for MemorySearchTool {
         }
         ToolResult::ok(output.trim_end().to_string())
     }
+
+
 }

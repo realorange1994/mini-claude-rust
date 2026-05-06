@@ -76,6 +76,14 @@ impl Tool for WebFetchTool {
 
         fetch_url(url, extract_mode)
     }
+
+    fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
+        vec![crate::tools::ToolCapability::ReadOnly, crate::tools::ToolCapability::Network]
+    }
+
+    fn approval_requirement(&self) -> crate::tools::ApprovalRequirement {
+        crate::tools::ApprovalRequirement::Auto
+    }
 }
 
 fn fetch_url(url: &str, extract_mode: &str) -> ToolResult {
