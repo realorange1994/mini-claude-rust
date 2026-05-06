@@ -200,8 +200,20 @@ impl PermissionGate {
             }
         }
 
-        // Check path parameter for file tools (write_file, edit_file, multi_edit, fileops)
-        if ["write_file", "edit_file", "multi_edit", "fileops"].contains(&tool_name) {
+        // Check path parameter for file tools (write_file, edit_file, multi_edit use file_path; fileops uses path)
+        if ["write_file", "edit_file", "multi_edit"].contains(&tool_name) {
+            if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
+                let path_lower = path.to_lowercase();
+                for pattern in denied_patterns {
+                    if path_lower.contains(&pattern.to_lowercase()) {
+                        return Some(format!(
+                            "Permission denied: matches denied pattern '{}'",
+                            pattern
+                        ));
+                    }
+                }
+            }
+        } else if tool_name == "fileops" {
             if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                 let path_lower = path.to_lowercase();
                 for pattern in denied_patterns {
@@ -236,7 +248,14 @@ impl PermissionGate {
                     format!("[{}]", tool_name)
                 }
             }
-            "write_file" | "edit_file" | "multi_edit" | "fileops" => {
+            "write_file" | "edit_file" | "multi_edit" => {
+                if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
+                    format!("[{}] {}", tool_name, path)
+                } else {
+                    format!("[{}]", tool_name)
+                }
+            }
+            "fileops" => {
                 if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                     format!("[{}] {}", tool_name, path)
                 } else {
