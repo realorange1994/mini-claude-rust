@@ -37,6 +37,7 @@ pub struct AutoModeClassifier {
 /// Note: "git" is handled separately with operation-level granularity.
 pub const AUTO_MODE_SAFE_TOOLS: &[&str] = &[
     "read_file",
+    "write_file", // creating new files is low-risk; overwriting handled by CheckFileStale
     "glob",
     "grep",
     "list_dir",
