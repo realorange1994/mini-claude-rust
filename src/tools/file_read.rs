@@ -112,6 +112,20 @@ impl Tool for FileReadTool {
             }
         }
 
+        // Magic bytes detection: detect binary formats by file header signatures.
+        // Catches renamed binaries (e.g., malware disguised as .txt).
+        if metadata.len() >= 4 {
+            if let Ok(mut file) = std::fs::File::open(&path) {
+                use std::io::Read;
+                let mut header = [0u8; 512];
+                if let Ok(n) = file.read(&mut header) {
+                    if n >= 4 && is_binary_magic(&header[..n]) {
+                        return ToolResult::error("Error: binary file detected (magic bytes mismatch)".to_string());
+                    }
+                }
+            }
+        }
+
         // Parse offset/limit early so we can skip the size check for partial reads.
         // If the user specified offset and/or limit, they're reading a portion — allow it
         // even for large files (matching upstream behavior).
@@ -291,6 +305,93 @@ fn is_binary_extension(ext: &str) -> bool {
         | "pdf" | "docx" | "xlsx" | "pptx"
         | "woff" | "woff2" | "eot" | "ttf"
     )
+}
+
+/// Checks file header magic bytes to detect binary files regardless of extension.
+/// Catches renamed/misleading files (e.g., malware disguised as .txt).
+fn is_binary_magic(header: &[u8]) -> bool {
+    if header.is_empty() {
+        return false;
+    }
+
+    // 2-byte signatures
+    if header.len() >= 2 {
+        // PE/EXE/DLL: 4d 5a ("MZ")
+        if header[0] == b'M' && header[1] == b'Z' { return true; }
+        // GZIP: 1f 8b
+        if header[0] == 0x1f && header[1] == 0x8b { return true; }
+        // BZIP2: 42 5a ("BZ")
+        if header[0] == b'B' && header[1] == b'Z' { return true; }
+        // MP3 without ID3: ff fb or ff f3 or ff f2
+        if header[0] == 0xff && matches!(header[1], 0xfb | 0xf3 | 0xf2) { return true; }
+    }
+
+    // 3-byte signatures
+    if header.len() >= 3 {
+        // MP3 ID3v2: 49 44 33 ("ID3")
+        if header[0] == b'I' && header[1] == b'D' && header[2] == b'3' { return true; }
+        // JPEG: ff d8 ff
+        if header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff { return true; }
+    }
+
+    // Need at least 4 bytes for most signatures
+    if header.len() < 4 { return false; }
+
+    // ELF executable: 7f 45 4c 46
+    if header[0] == 0x7f && header[1] == b'E' && header[2] == b'L' && header[3] == b'F' { return true; }
+
+    // PDF: 25 50 44 46 ("%PDF")
+    if header[0] == b'%' && header[1] == b'P' && header[2] == b'D' && header[3] == b'F' { return true; }
+
+    // PNG: 89 50 4e 47 0d 0a 1a 0a
+    if header[0] == 0x89 && header[1] == b'P' && header[2] == b'N' && header[3] == b'G' { return true; }
+
+    // GIF: 47 49 46 38 ("GIF8")
+    if header[0] == b'G' && header[1] == b'I' && header[2] == b'F' && header[3] == b'8' { return true; }
+
+    // ZIP/JAR/DOCX/XLSX/PPTX/ODT/APK: 50 4b 03 04 or 50 4b 05 06 or 50 4b 07 08
+    if header[0] == b'P' && header[1] == b'K' {
+        if (header[2] == 0x03 && header[3] == 0x04) ||
+            (header[2] == 0x05 && header[3] == 0x06) ||
+            (header[2] == 0x07 && header[3] == 0x08) {
+            return true;
+        }
+    }
+
+    if header.len() < 6 { return false; }
+
+    // XZ: fd 37 7a 58 5a 00
+    if header[0] == 0xfd && header[1] == b'7' && header[2] == b'z' && header[3] == b'X' && header[4] == b'Z' && header[5] == 0x00 { return true; }
+
+    // 7Z: 37 7a bc af 27 1c
+    if header[0] == b'7' && header[1] == b'z' && header[2] == 0xbc && header[3] == 0xaf && header[4] == 0x27 && header[5] == 0x1c { return true; }
+
+    if header.len() < 8 { return false; }
+
+    // WebP: 52 49 46 46 ... 57 45 42 50 ("RIFF....WEBP")
+    if header[0] == b'R' && header[1] == b'I' && header[2] == b'F' && header[3] == b'F' &&
+        header[8] == b'W' && header[9] == b'E' && header[10] == b'B' && header[11] == b'P' { return true; }
+
+    // WAV: 52 49 46 46 ... 57 41 56 45 ("RIFF....WAVE")
+    if header[0] == b'R' && header[1] == b'I' && header[2] == b'F' && header[3] == b'F' &&
+        header[8] == b'W' && header[9] == b'A' && header[10] == b'V' && header[11] == b'E' { return true; }
+
+    // MP4/M4A/QuickTime: 00 00 00 XX 66 74 79 70
+    if header[4] == b'f' && header[5] == b't' && header[6] == b'y' && header[7] == b'p' { return true; }
+
+    // Java .class: ca fe ba be
+    if header[0] == 0xca && header[1] == 0xfe && header[2] == 0xba && header[3] == 0xbe { return true; }
+
+    // Wasm: 00 61 73 6d ("\0asm")
+    if header[0] == 0x00 && header[1] == b'a' && header[2] == b's' && header[3] == b'm' { return true; }
+
+    // Python .pyc: 0d 0d 0d 0a
+    if header[0] == 0x0d && header[1] == 0x0d && header[2] == 0x0d && header[3] == 0x0a { return true; }
+
+    // Lua bytecode: 1b 4c 75 61 ("\033Lua")
+    if header[0] == 0x1b && header[1] == b'L' && header[2] == b'u' && header[3] == b'a' { return true; }
+
+    false
 }
 
 /// Checks if a path is a special device file that should be blocked from reading.
