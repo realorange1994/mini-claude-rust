@@ -81,6 +81,9 @@ pub struct StreamResult {
     /// True when text was already streamed to the terminal before a failure.
     /// Used by the agent loop to avoid re-delivering text on retry.
     pub text_already_streamed: bool,
+    /// The delta state at the time the stream ended — tracks what content
+    /// was already delivered so the caller can make smart retry decisions.
+    pub deltas_state: DeltasState,
 }
 
 /// Detect transient errors that are safe to retry (matching hermes-agent patterns).
@@ -1191,8 +1194,8 @@ pub async fn process_sse_events(
 
 /// Tracks what content was already streamed to the user, used to decide
 /// whether a retry is safe or would cause text duplication.
-#[derive(Debug, Clone)]
-enum DeltasState {
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeltasState {
     /// No deltas sent yet -- clean retry is safe
     None,
     /// Text was already streamed -- retry would duplicate text
@@ -1244,6 +1247,7 @@ fn partial_result(collect: &CollectHandler, completed: bool, deltas_state: &Delt
         completed,
         finish_reason: collect.finish_reason(),
         text_already_streamed,
+        deltas_state: deltas_state.clone(),
     })
 }
 

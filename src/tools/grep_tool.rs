@@ -38,9 +38,11 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents using regex in a codebase. Uses ripgrep (rg) if available, otherwise falls back to Go regexp. \
+        "Search file contents using regex in a codebase. \
+        ALWAYS use grep for content search. NEVER invoke grep or rg via exec. \
+        Uses ripgrep (rg) if available, otherwise falls back to built-in regex. \
         Supports glob and language type filters, context lines, and output modes. \
-        For advanced ripgrep features (multiline, PCRE2, JSON output, etc.) use the exec tool to call rg directly."
+        For advanced ripgrep features (multiline, PCRE2, etc.) use the exec tool with caution."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {

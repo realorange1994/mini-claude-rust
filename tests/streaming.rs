@@ -1403,6 +1403,7 @@ fn stream_result_completed_true() {
         completed: true,
         finish_reason: fr,
         text_already_streamed: false,
+        deltas_state: miniclaudecode_rust::streaming::DeltasState::None,
     };
 
     assert!(result.completed);
@@ -1428,6 +1429,7 @@ fn stream_result_completed_false_has_partial() {
         completed: false,
         finish_reason: h.finish_reason(),
         text_already_streamed: false,
+        deltas_state: miniclaudecode_rust::streaming::DeltasState::None,
     };
 
     assert!(!result.completed);

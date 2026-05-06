@@ -432,7 +432,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                     if let Some(mode) = parts.get(1) {
                         let mode_lower = mode.to_lowercase();
                         match mode_lower.as_str() {
-                            "ask" | "auto" | "plan" => {
+                            "ask" | "auto" | "bypass" | "plan" => {
                                 agent.config.permission_mode = PermissionMode::from_str(&mode_lower);
                                 println!("Mode changed to: {}", mode_lower);
                             }
@@ -442,7 +442,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         }
                     } else {
                         println!("Current mode: {}", agent.config.permission_mode);
-                        println!("Usage: /mode [ask|auto|plan]");
+                        println!("Usage: /mode [ask|auto|bypass|plan]");
                     }
                     continue;
                 }
@@ -490,7 +490,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                     println!("  /compact -- Force context compaction");
                     println!("  /partialcompact [up_to|from] [pivot] -- Partial compact, optionally direction and pivot index");
                     println!("  /clear   -- Clear conversation history");
-                    println!("  /mode    -- Switch permission mode (ask|auto|plan)");
+                    println!("  /mode    -- Switch permission mode (ask|auto|bypass|plan)");
                     println!("  /resume  -- Resume a previous session");
                     println!("  /tools   -- List available tools");
                     println!("  /agents  -- Manage background agents (/agents help for details)");

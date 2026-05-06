@@ -13,7 +13,7 @@ use regex::Regex;
 
 use crate::context::{
     CompactTrigger, ConversationContext, Message, MessageContent, MessageRole,
-    ToolResultContent,
+    ToolResultContent, ToolUseBlock, ToolResultBlock,
 };
 use crate::session_memory::SessionMemory;
 
@@ -156,6 +156,85 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
 pub fn estimate_total_tokens(messages: &[Message]) -> usize {
     let total: usize = messages.iter().map(estimate_message_tokens).sum();
     (total as f64 * 4.0 / 3.0).ceil() as usize
+}
+
+/// Truncate a string to max_len, appending "..." if truncated.
+fn truncate_preview(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+/// Generate a detailed summary of conversation entries, matching Go's entriesToSummaryText.
+/// Produces per-message previews (user, assistant, tool calls, tool results), counts
+/// turns and tool calls, and lists files mentioned.
+fn entries_to_summary_text(messages: &[Message]) -> String {
+    let mut details = String::new();
+    let mut turn_count = 0;
+    let mut tool_call_count = 0;
+    let mut files_mentioned: Vec<String> = Vec::new();
+
+    for msg in messages {
+        match &msg.content {
+            MessageContent::Text(text) => {
+                if msg.role == MessageRole::User {
+                    turn_count += 1;
+                    let preview = truncate_preview(text, 200);
+                    details.push_str(&format!("User: {}\n", preview));
+                } else if msg.role == MessageRole::Assistant {
+                    let preview = truncate_preview(text, 200);
+                    details.push_str(&format!("Assistant: {}\n", preview));
+                }
+            }
+            MessageContent::ToolUseBlocks(blocks) => {
+                for block in blocks {
+                    tool_call_count += 1;
+                    // Extract file paths from tool call input
+                    if let Some(path) = block.input.get("path")
+                        .or_else(|| block.input.get("file_path"))
+                        .and_then(|v| v.as_str())
+                    {
+                        files_mentioned.push(path.to_string());
+                    }
+                    details.push_str(&format!("[tool call: {}]\n", block.name));
+                }
+            }
+            MessageContent::ToolResultBlocks(blocks) => {
+                for block in blocks {
+                    for content in &block.content {
+                        if let ToolResultContent::Text { text } = content {
+                            let lines = text.lines().count();
+                            let preview = truncate_preview(text, 100);
+                            details.push_str(&format!(
+                                "[tool result: {} lines] {}\n",
+                                lines.saturating_add(1),
+                                preview
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Deduplicate files mentioned
+    files_mentioned.sort();
+    files_mentioned.dedup();
+
+    let mut summary = String::new();
+    summary.push_str(&format!(
+        "Summary of {} conversation turns with {} tool calls.\n",
+        turn_count, tool_call_count
+    ));
+    if !files_mentioned.is_empty() {
+        summary.push_str(&format!("Files mentioned: {}\n", files_mentioned.join(", ")));
+    }
+    summary.push_str("---\n");
+    summary.push_str(&details);
+    summary
 }
 
 // --- Context window tracking ---
@@ -1556,26 +1635,8 @@ pub fn partial_compact(
     let summary_tokens = estimate_total_tokens(&summary_range);
     let summary_msg_count = summary_range.len();
 
-    // Count tool calls in the summary range for more informative summary
-    let mut tool_calls: Vec<String> = Vec::new();
-    for msg in &summary_range {
-        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
-            for block in blocks {
-                tool_calls.push(block.name.clone());
-            }
-        }
-    }
-
-    let tool_summary = if tool_calls.is_empty() {
-        String::new()
-    } else {
-        format!("\nTool calls made: {}", tool_calls.join(", "))
-    };
-
-    let summary_text = format!(
-        "[Partial compact ({}): {} messages, ~{} tokens compressed{}] ",
-        direction, summary_msg_count, summary_tokens, tool_summary
-    );
+    // Generate detailed summary matching Go's entriesToSummaryText
+    let summary_text = entries_to_summary_text(&summary_range);
 
     eprintln!(
         "[partial-compact {}] Summarized {} messages ({} tokens), keeping {} messages",

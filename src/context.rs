@@ -302,9 +302,15 @@ pub type ConversationEntry = Message;
 /// are "fresh" (content still in context); items with lower epoch are "stale"
 /// (compaction cleared them, re-read is OK).
 #[derive(Debug)]
+pub struct FileState {
+    pub epoch: usize,
+    pub mtime_ms: i64, // mtimeMs when the file was read
+}
+
+#[derive(Debug)]
 pub struct ToolStateTracker {
     compaction_epoch: usize,
-    read_files: HashMap<String, usize>, // path -> epoch when read
+    read_files: HashMap<String, FileState>, // path -> (epoch, mtime) when read
     search_queries: HashMap<String, usize>, // pattern -> epoch when searched
     conclusions: Vec<String>,
 }
@@ -319,11 +325,17 @@ impl ToolStateTracker {
         }
     }
 
-    /// Mark a file as read at the current epoch.
+    /// Mark a file as read at the current epoch, recording the mtime.
     pub fn record_file_read(&mut self, path: &str) {
         let abs = std::fs::canonicalize(path)
             .unwrap_or_else(|_| std::path::PathBuf::from(path));
-        self.read_files.insert(abs.display().to_string(), self.compaction_epoch);
+        let mtime_ms = std::fs::metadata(abs.as_path())
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.read_files.insert(abs.display().to_string(), FileState { epoch: self.compaction_epoch, mtime_ms });
     }
 
     /// Record a successful grep/glob search pattern at the current epoch.
@@ -352,7 +364,13 @@ impl ToolStateTracker {
     pub fn mark_file_fresh(&mut self, path: &str) {
         let abs = std::fs::canonicalize(path)
             .unwrap_or_else(|_| std::path::PathBuf::from(path));
-        self.read_files.insert(abs.display().to_string(), self.compaction_epoch);
+        let mtime_ms = std::fs::metadata(abs.as_path())
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.read_files.insert(abs.display().to_string(), FileState { epoch: self.compaction_epoch, mtime_ms });
     }
 
     /// Clear all recorded conclusions. Called after compaction when no files were
@@ -374,9 +392,21 @@ impl ToolStateTracker {
 
         let mut fresh_files: Vec<&String> = Vec::new();
         let mut stale_files: Vec<&String> = Vec::new();
-        for (f, e) in &self.read_files {
-            if *e == self.compaction_epoch {
+        let mut modified_files: Vec<String> = Vec::new();
+        for (f, state) in &self.read_files {
+            if state.epoch == self.compaction_epoch {
                 fresh_files.push(f);
+                // Check if file was modified externally since we read it
+                if let Ok(meta) = std::fs::metadata(f) {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            let current_mtime_ms = duration.as_millis() as i64;
+                            if state.mtime_ms != 0 && current_mtime_ms != state.mtime_ms {
+                                modified_files.push(f.clone());
+                            }
+                        }
+                    }
+                }
             } else {
                 stale_files.push(f);
             }
@@ -389,6 +419,9 @@ impl ToolStateTracker {
             for f in &fresh_files {
                 sb.push_str("  - ");
                 sb.push_str(f);
+                if modified_files.contains(&(**f).clone()) {
+                    sb.push_str(" (MODIFIED since last read — re-read if needed)");
+                }
                 sb.push('\n');
             }
         }
@@ -476,8 +509,10 @@ const COMPACTABLE_TOOLS: &[&str] = &[
     "multi_edit",
     "grep",
     "glob",
+    "list_dir",     // matching Go compactableToolNames
     "web_fetch",
     "web_search",
+    "exa_search",   // web search variant
 ];
 
 fn is_compactable_tool(name: &str) -> bool {

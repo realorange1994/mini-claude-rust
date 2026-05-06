@@ -584,6 +584,7 @@ pub fn build_system_prompt(
         PermissionMode::Ask => "In ASK mode, potentially dangerous operations will require user confirmation.",
         PermissionMode::Auto => "In AUTO mode, all operations are auto-approved (use with caution).",
         PermissionMode::Plan => "In PLAN mode, only read-only operations are allowed. Write operations are blocked.",
+        PermissionMode::Bypass => "In BYPASS mode, all tools are allowed directly without any permission checks.",
     };
     prompt.push_str(&format!("## Current Permission Mode: {}\n{}\n", mode_upper, mode_desc));
 

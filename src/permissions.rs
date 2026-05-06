@@ -13,11 +13,13 @@ pub enum PermissionMode {
     Ask,
     Auto,
     Plan,
+    Bypass,
 }
 
 impl PermissionMode {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
+            "bypass" => PermissionMode::Bypass,
             "auto" => PermissionMode::Auto,
             "plan" => PermissionMode::Plan,
             _ => PermissionMode::Ask,
@@ -29,6 +31,7 @@ impl PermissionMode {
             PermissionMode::Ask => "ask",
             PermissionMode::Auto => "auto",
             PermissionMode::Plan => "plan",
+            PermissionMode::Bypass => "bypass",
         }
     }
 }
@@ -290,6 +293,11 @@ impl PermissionGate {
         }
 
         match self.config.permission_mode {
+            PermissionMode::Bypass => {
+                // Allow all tools directly without classifier evaluation.
+                // Tool's own security check still runs unconditionally.
+                None
+            }
             PermissionMode::Auto => {
                 // Use auto mode classifier (if available) or fall back to allow-all
                 self.check_auto_mode(tool, &params)

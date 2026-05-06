@@ -5,7 +5,7 @@ use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
 use crate::auto_classifier::AutoModeClassifier;
 use crate::skills::SkillTracker;
-use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo};
+use crate::streaming::{CollectHandler, TerminalHandler, StallDetector, process_sse_events, ToolCallInfo, DeltasState};
 use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
 use crate::error_types::{classify_error, is_context_length_error};
 use crate::rate_limit::RateLimitState;
@@ -229,6 +229,10 @@ pub struct AgentLoop {
     /// Cumulative token usage across all turns (for accurate sub-agent reporting).
     total_input_tokens: std::sync::atomic::AtomicI64,
     total_output_tokens: std::sync::atomic::AtomicI64,
+    /// Tracks what was streamed in the last attempt, used for smart retry decisions.
+    /// When a transient error occurs and text was already delivered, we fall back
+    /// to non-streaming to avoid text duplication.
+    last_deltas_state: std::cell::RefCell<DeltasState>,
 }
 
 impl AgentLoop {
@@ -335,6 +339,7 @@ impl AgentLoop {
             agent_task_store: None,
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
+            last_deltas_state: std::cell::RefCell::new(DeltasState::None),
         })
     }
 
@@ -474,6 +479,7 @@ impl AgentLoop {
             agent_task_store: None,
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
+            last_deltas_state: std::cell::RefCell::new(DeltasState::None),
         })
     }
 
@@ -978,10 +984,13 @@ impl AgentLoop {
                         let keep_count = self.config.post_compact_history_snip_count;
                         ctx.keep_recent_messages(keep_count);
                     }
-                } else if self.config.reactive_compact_threshold == 0 {
+                } else {
                     // Regular auto-compaction (token threshold based)
-                    // Mutual exclusion: skip proactive compaction when reactive compact is enabled
-                    // (reactive compact catches PTL errors via the API retry loop).
+                    // Runs when reactive compact didn't trigger — handles gradual context growth.
+                    // Previously guarded by `else if reactive_compact_threshold == 0` which made
+                    // regular compact unreachable when reactive was enabled (threshold=5000 default).
+                    // Mutual exclusion removed: both reactive (spike detection) and regular
+                    // (threshold-based) compaction now coexist, matching Go behavior.
                     // Check if compaction will run first (inside compactor lock),
                     // then drop the lock before calling post_compact_recovery (async).
                     let will_compact = {
@@ -1720,7 +1729,11 @@ impl AgentLoop {
                         consecutive_stalls = 0;
                     }
                     if consecutive_stalls >= 3 {
-                        // If budget exhausted, try for final summary
+                        // If budget exhausted, return accumulated text if available
+                        // (matching Go: skip extra API call when we already have a final answer)
+                        if !accumulated_text.is_empty() && budget.remaining() == 0 {
+                            return Ok(accumulated_text);
+                        }
                         if budget.remaining() == 0 {
                             agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
                             return self.request_final_summary(&system_prompt, tools).await;
@@ -1742,9 +1755,14 @@ impl AgentLoop {
             }
         }
 
-        // Max turns reached - try to get a final summary
-        agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
-        self.request_final_summary(&system_prompt, tools).await
+        // Max turns reached - return accumulated text if available, otherwise request final summary
+        // Matching Go: if finalText != "", return immediately without extra API call
+        if !accumulated_text.is_empty() {
+            Ok(accumulated_text)
+        } else {
+            agent_emit!("\n[!] Max turns ({}) reached, requesting final answer...", self.max_turns);
+            self.request_final_summary(&system_prompt, tools).await
+        }
     }
 
     /// Request a final summary when max turns is reached
@@ -1826,6 +1844,8 @@ impl AgentLoop {
         // Always try streaming first -- it's more reliable across different
         // API/proxy configurations. Non-streaming can hang on some proxies
         // that don't flush the response until the entire body is ready.
+        // Reset deltas state before the retry loop.
+        *self.last_deltas_state.borrow_mut() = DeltasState::None;
         for attempt in 0..MAX_RETRIES {
             // Check for interruption before each attempt
             if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1836,6 +1856,16 @@ impl AgentLoop {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     let err_str = e.to_string();
+
+                    // Smart retry decision based on what was already delivered.
+                    // When text was already streamed to the user, retrying would
+                    // duplicate text output. Fall back to non-streaming for a
+                    // complete fresh response (matching Go's DeltasStateTextOnly handling).
+                    let deltas_state = self.last_deltas_state.borrow().clone();
+                    if matches!(deltas_state, DeltasState::TextOnly) {
+                        agent_emit!("[!] Text was already streamed before failure, falling back to non-streaming for complete response");
+                        return self.call_with_non_streaming_fallback(system_prompt, messages, tools).await;
+                    }
 
                     // Check if interrupted
                     if self.interrupted.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1967,6 +1997,9 @@ impl AgentLoop {
         }
 
         let stream_result = result?;
+        // Record deltas state so the caller (call_with_retry_and_fallback) can
+        // inspect it after error returns to decide whether to retry or fallback.
+        *self.last_deltas_state.borrow_mut() = stream_result.deltas_state.clone();
         let tool_calls = stream_result.tool_calls;
         let text = stream_result.text;
         let is_confused = collect.is_tool_use_as_text();
@@ -2031,6 +2064,7 @@ impl AgentLoop {
             }
         }
 
+        // Return (tool_calls, text) for success, or Err for error paths above
         Ok((tool_calls, text))
     }
 
@@ -3473,6 +3507,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             agent_task_store: None,
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
+            last_deltas_state: std::cell::RefCell::new(DeltasState::None),
         })
     }
 

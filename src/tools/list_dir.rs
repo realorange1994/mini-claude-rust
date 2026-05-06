@@ -30,7 +30,9 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        "List directory contents. Shows files and subdirectories. Supports recursive listing with ignored directories (.git, node_modules, etc.)."
+        "List directory contents. Shows files and subdirectories. \
+        ALWAYS use list_dir to explore directories. Prefer over exec('ls') or exec('dir'). \
+        Supports recursive listing with ignored directories (.git, node_modules, etc.)."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
