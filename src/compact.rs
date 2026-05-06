@@ -170,7 +170,7 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 /// Generate a detailed summary of conversation entries, matching Go's entriesToSummaryText.
 /// Produces per-message previews (user, assistant, tool calls, tool results), counts
 /// turns and tool calls, and lists files mentioned.
-fn entries_to_summary_text(messages: &[Message]) -> String {
+pub(crate) fn entries_to_summary_text(messages: &[Message]) -> String {
     let mut details = String::new();
     let mut turn_count = 0;
     let mut tool_call_count = 0;
@@ -1666,6 +1666,7 @@ pub fn partial_compact(
     direction: PartialCompactDirection,
     pivot_index: usize,
     transcript_path: Option<&str>,
+    conclusions: &[String],
 ) -> PartialCompactionResult {
     let messages = context.messages().to_vec();
     let entries_before = context.len();
@@ -1734,11 +1735,21 @@ pub fn partial_compact(
 
     // Match upstream's getCompactUserSummaryMessage: add transcript path
     // for detail recovery and recentMessagesPreserved notice.
-    let summary_content = format!(
+    let mut summary_content = format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
          [Previous conversation summary ({} tokens compressed, partial-compact {})]\n\n{}",
         tokens_before, direction, summary_text
     );
+
+    // Include tool state tracker conclusions (what the agent claimed was done).
+    if !conclusions.is_empty() {
+        summary_content.push_str("\n## Completed Work\n");
+        for c in conclusions {
+            summary_content.push_str(&format!("- {}\n", c));
+        }
+        summary_content.push('\n');
+    }
+
     let summary_content = if let Some(tp) = transcript_path {
         format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)
     } else {

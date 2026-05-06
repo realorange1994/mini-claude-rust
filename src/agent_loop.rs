@@ -3189,6 +3189,15 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             format!("\n[compact: {} tokens compressed]\n", tokens_before),
         ];
 
+        // Include structured metadata from the messages being compacted.
+        // This ensures the model sees an explicit inventory of files, tool calls,
+        // and user messages — matching the LLM compact path's structured output.
+        let structured_meta = crate::compact::entries_to_summary_text(&messages);
+        if !structured_meta.is_empty() {
+            summary_lines.push("\n## Structured context from compacted messages:\n".to_string());
+            summary_lines.push(structured_meta);
+        }
+
         // Include tool state tracker conclusions (what the agent claimed was done).
         let conclusions = self.tool_state_tracker.borrow().get_conclusions();
         if !conclusions.is_empty() {
@@ -3365,7 +3374,8 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         agent_emit!("[partial-compact] direction={}, pivot={}, total_messages={}", direction, pivot, total);
 
         let tp = self.transcript_path();
-        let result = crate::compact::partial_compact(&mut context, dir, pivot, Some(&tp));
+        let conclusions = self.tool_state_tracker.borrow().get_conclusions();
+        let result = crate::compact::partial_compact(&mut context, dir, pivot, Some(&tp), &conclusions);
 
         // Mark all tracked items as stale (partial compact removes tool results).
         self.tool_state_tracker.borrow_mut().on_compaction();
