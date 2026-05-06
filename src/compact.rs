@@ -239,19 +239,22 @@ pub(crate) fn entries_to_summary_text(messages: &[Message]) -> String {
 
 // --- Context window tracking ---
 
-/// Model-specific context window sizes
+/// Model-specific context window sizes.
+/// Supports [1m] suffix and known Sonnet 4 / Opus 4 models for 1M context.
+/// Falls back to 200K for all other models.
 pub fn model_context_window(model: &str) -> usize {
-    // Common models and their context windows
-    if model.contains("opus") || model.contains("claude-4") {
-        200_000
-    } else if model.contains("sonnet") || model.contains("claude-3") {
-        200_000
-    } else if model.contains("haiku") {
-        200_000
-    } else {
-        // Default to 200K (most Anthropic models)
-        200_000
+    let lower = model.to_lowercase();
+    // Priority 1: [1m] suffix — explicit 1M context request
+    if lower.contains("[1m]") {
+        return 1_000_000;
     }
+    // Priority 2: Sonnet 4 / Opus 4 裸模型也支持 1M
+    if (lower.contains("sonnet-4") || lower.contains("opus-4-6") || lower.contains("opus-4-7"))
+        && !lower.contains("[haiku]") && !lower.contains("[3.5]") && !lower.contains("[3.0]") {
+        return 1_000_000;
+    }
+    // Default to 200K for all other Anthropic models
+    200_000
 }
 
 /// Tracks context window usage and determines when to compact
@@ -1553,10 +1556,33 @@ pub fn try_sm_compact(
     } else {
         String::new()
     };
+    // Cap session memory content at ~40K tokens to prevent context overflow.
+    // Matches upstream's DEFAULT_SM_COMPACT_CONFIG.maxTokens = 40_000.
+    const MAX_SESSION_MEMORY_TOKENS: usize = 40_000;
+    let sm_tokens = estimate_tokens(&mem_content);
+    let mem_content_for_summary = if sm_tokens > MAX_SESSION_MEMORY_TOKENS {
+        let char_limit = MAX_SESSION_MEMORY_TOKENS * 4;
+        let chars: Vec<char> = mem_content.chars().collect();
+        if chars.len() > char_limit {
+            let mut truncated: String = chars[..char_limit].iter().collect();
+            if let Some(nl) = truncated.rfind('\n') {
+                if nl > char_limit / 2 {
+                    truncated.truncate(nl);
+                }
+            }
+            eprintln!("[sm-compact] Session memory truncated: {} tokens -> {} token limit", sm_tokens, MAX_SESSION_MEMORY_TOKENS);
+            format!("{}\n\n[... session memory truncated for length. Read the full session memory file for details ...]", truncated)
+        } else {
+            mem_content.clone()
+        }
+    } else {
+        mem_content.clone()
+    };
+
     let summary_content = format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
          [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}{}",
-        tokens_before, mem_content, meta_section
+        tokens_before, mem_content_for_summary, meta_section
     );
     let summary_content = if let Some(tp) = transcript_path {
         format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)

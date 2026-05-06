@@ -131,7 +131,7 @@ fn main() -> Result<()> {
     if let Some(base_url) = args.base_url {
         cfg.base_url = Some(base_url);
     }
-    cfg.permission_mode = PermissionMode::from_str(&args.mode);
+    *cfg.permission_mode.lock().unwrap() = PermissionMode::from_str(&args.mode);
     cfg.max_turns = args.max_turns;
 
     // Validate: model is required
@@ -187,6 +187,9 @@ fn main() -> Result<()> {
     let agent_task_store = miniclaudecode_rust::tools::agent_store::AgentTaskStore::new_shared();
     tools::register_agent_management_tools(&registry, &agent_task_store);
     tools::register_send_message_tool(&registry, &agent_task_store);
+
+    // Register EnterPlanMode/ExitPlanMode tools (mode changes applied via ToolResult side-effects)
+    tools::register_plan_mode_tools(&registry, &cfg);
 
     // Parent context slot for agent tool's fork mode — set after agent loop is created
     let parent_context_slot: std::sync::Arc<
@@ -254,6 +257,7 @@ fn main() -> Result<()> {
         tools::register_todo_write_tools(&resume_registry, &todo_list);
         tools::register_agent_management_tools(&resume_registry, &agent_task_store);
         tools::register_send_message_tool(&resume_registry, &agent_task_store);
+        tools::register_plan_mode_tools(&resume_registry, &cfg);
         resume_registry.finalize_tool_search();
 
         match agent_loop::AgentLoop::from_transcript(cfg.clone(), resume_registry, use_stream, &transcript_path, true, Some(Arc::clone(&todo_list))) {
@@ -437,7 +441,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         let mode_lower = mode.to_lowercase();
                         match mode_lower.as_str() {
                             "ask" | "auto" | "bypass" | "plan" => {
-                                agent.config.permission_mode = PermissionMode::from_str(&mode_lower);
+                                *agent.config.permission_mode.lock().unwrap() = PermissionMode::from_str(&mode_lower);
                                 println!("Mode changed to: {}", mode_lower);
                             }
                             _ => {
@@ -445,7 +449,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                             }
                         }
                     } else {
-                        println!("Current mode: {}", agent.config.permission_mode);
+                        println!("Current mode: {}", agent.config.permission_mode.lock().unwrap());
                         println!("Usage: /mode [ask|auto|bypass|plan]");
                     }
                     continue;
@@ -526,6 +530,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         tools::register_todo_write_tools(&registry, &todo_list);
                         tools::register_agent_management_tools(&registry, &agent_task_store);
                         tools::register_send_message_tool(&registry, &agent_task_store);
+                        tools::register_plan_mode_tools(&registry, &agent.config);
                         registry.finalize_tool_search();
 
                         match agent_loop::AgentLoop::from_transcript(

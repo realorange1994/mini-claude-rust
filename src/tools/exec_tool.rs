@@ -1272,6 +1272,7 @@ impl ExecTool {
             output: result,
             is_error: !output.success(),
             metadata,
+            mode_change: None,
         }
     }
 }

@@ -331,7 +331,7 @@ impl PermissionGate {
             }
         }
 
-        match self.config.permission_mode {
+        match *self.config.permission_mode.lock().unwrap() {
             PermissionMode::Bypass => {
                 // Allow all tools directly without classifier evaluation.
                 // Tool's own security check still runs unconditionally.
@@ -393,13 +393,13 @@ impl PermissionGate {
     /// Get current permission mode
     #[allow(dead_code)]
     pub fn mode(&self) -> PermissionMode {
-        self.config.permission_mode
+        *self.config.permission_mode.lock().unwrap()
     }
 
     /// Set permission mode
     #[allow(dead_code)]
     pub fn set_mode(&mut self, mode: PermissionMode) {
-        self.config.permission_mode = mode;
+        *self.config.permission_mode.lock().unwrap() = mode;
     }
 
     /// Auto mode permission check using the classifier.

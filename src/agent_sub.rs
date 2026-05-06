@@ -295,7 +295,7 @@ pub fn build_child_config(parent_config: &Config, model_override: &str, max_turn
 
     // Sub-agents always use AUTO permission mode regardless of parent's mode.
     // This prevents sub-agents from blocking on user prompts.
-    child_config.permission_mode = crate::permissions::PermissionMode::Auto;
+    *child_config.permission_mode.lock().unwrap() = crate::permissions::PermissionMode::Auto;
 
     // Sub-agents should avoid permission prompts: when this flag is true,
     // dangerous tools are auto-denied instead of blocking on user prompts,
@@ -862,7 +862,7 @@ mod tests {
         let parent_config = Config::default();
         let child_config = build_child_config(&parent_config, "", 0);
         // Sub-agents always use AUTO mode
-        assert_eq!(child_config.permission_mode, crate::permissions::PermissionMode::Auto);
+        assert_eq!(*child_config.permission_mode.lock().unwrap(), crate::permissions::PermissionMode::Auto);
     }
 
     #[test]

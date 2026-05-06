@@ -28,11 +28,10 @@ pub mod skill_tools;
 pub mod file_history_tools;
 pub mod memory_tool;
 pub mod task_tool;
-pub mod agent_tool;
-mod brief_tool;
-pub mod tool_search_tool;
 pub mod agent_store;
-pub mod agent_tools;
+mod enter_plan_mode;
+mod exit_plan_mode;
+pub mod agent_tool;
 pub mod todo_write;
 pub mod send_message;
 pub mod ask_user_question;
@@ -66,12 +65,25 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 /// ToolResult holds the output of a tool execution with structured metadata
-#[derive(Debug, Clone, Default)]
+/// Side-effect request from a tool execution that the agent loop should apply.
+/// Tools like EnterPlanMode/ExitPlanMode use this to request permission mode changes,
+/// since the tool executes in a spawned blocking task and cannot directly mutate AgentLoop state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeChange {
+    /// Switch to plan mode, storing the current mode as pre-plan
+    EnterPlan,
+    /// Exit plan mode and restore the pre-plan mode (or fall back to the given mode)
+    ExitPlan { restore_mode: crate::permissions::PermissionMode },
+}
+
+#[derive(Debug, Clone)]
 pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
     /// Structured metadata for compaction summaries
     pub metadata: ToolResultMetadata,
+    /// Optional side-effect: permission mode change request
+    pub mode_change: Option<ModeChange>,
 }
 
 /// Metadata about a tool execution, used for generating high-quality
@@ -135,6 +147,7 @@ impl ToolResult {
             output: output.into(),
             is_error: false,
             metadata: ToolResultMetadata::default(),
+            mode_change: None,
         }
     }
 
@@ -143,6 +156,7 @@ impl ToolResult {
             output: output.into(),
             is_error: true,
             metadata: ToolResultMetadata::default(),
+            mode_change: None,
         }
     }
 
@@ -152,6 +166,24 @@ impl ToolResult {
             output: output.into(),
             is_error,
             metadata,
+            mode_change: None,
+        }
+    }
+
+    /// Set a mode change side-effect on this ToolResult
+    pub fn with_mode_change(mut self, change: ModeChange) -> Self {
+        self.mode_change = Some(change);
+        self
+    }
+}
+
+impl Default for ToolResult {
+    fn default() -> Self {
+        Self {
+            output: String::new(),
+            is_error: false,
+            metadata: ToolResultMetadata::default(),
+            mode_change: None,
         }
     }
 }
@@ -776,4 +808,20 @@ pub fn is_path_allowed_with_workspace(workspace: &std::path::Path, path: &str) -
             Err(e)
         }
     }
+}
+
+/// Register EnterPlanMode and ExitPlanMode tools.
+/// These tools return ToolResult with mode_change side-effects.
+/// The AgentLoop is responsible for applying the mode changes.
+pub fn register_plan_mode_tools(registry: &Registry, cfg: &Config) {
+    let cfg_for_enter = cfg.clone();
+    registry.register(enter_plan_mode::EnterPlanModeTool {
+        get_mode: Box::new(move || cfg_for_enter.permission_mode.lock().unwrap().to_string()),
+    });
+
+    let cfg_for_exit = cfg.clone();
+    registry.register(exit_plan_mode::ExitPlanModeTool {
+        get_mode: Box::new(move || cfg_for_exit.permission_mode.lock().unwrap().to_string()),
+        get_pre_plan_mode: Box::new(move || *cfg_for_exit.pre_plan_mode.lock().unwrap()),
+    });
 }

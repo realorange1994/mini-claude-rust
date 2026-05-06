@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use crate::permissions::PermissionMode;
 pub use crate::tools::Registry;
@@ -18,7 +18,8 @@ pub struct Config {
     pub base_url: Option<String>,
     pub max_turns: usize,
     pub max_context_msgs: usize,
-    pub permission_mode: PermissionMode,
+    pub permission_mode: Arc<Mutex<PermissionMode>>,
+    pub pre_plan_mode: Arc<Mutex<Option<PermissionMode>>>, // remembers the mode before entering plan mode
     pub allowed_commands: Vec<String>,
     pub denied_patterns: Vec<String>,
     pub project_dir: PathBuf,
@@ -71,7 +72,8 @@ impl Default for Config {
             base_url: None,
             max_turns: 90,
             max_context_msgs: 100,
-            permission_mode: PermissionMode::Ask,
+            permission_mode: Arc::new(Mutex::new(PermissionMode::Ask)),
+            pre_plan_mode: Arc::new(Mutex::new(None)),
             allowed_commands: vec![
                 "ls".to_string(),
                 "cat".to_string(),
@@ -580,13 +582,44 @@ pub fn build_system_prompt(
 
     // Permission mode
     let mode_upper = permission_mode.to_string().to_uppercase();
+    let plan_mode_instructions = r#"## Plan Mode Instructions
+
+When using plan mode, follow this 5-phase workflow:
+
+### Phase 1: Initial Understanding
+- Explore the codebase using read-only tools (glob, grep, file_read)
+- Launch EXPLORE_AGENT subagents in parallel to investigate different areas
+- Build a mental model of the codebase structure
+
+### Phase 2: Design
+- Launch PLAN_AGENT agents to design implementation approaches
+- Evaluate trade-offs between different approaches
+- Consider existing patterns and utilities in the codebase
+
+### Phase 3: Review
+- Read critical files identified during exploration
+- Ensure design aligns with user intent
+- Use AskUserQuestion to clarify requirements
+
+### Phase 4: Final Plan
+- Write your final plan to the plan file (the only file you can edit without approval)
+- Include: Context, approach, file changes, verification section
+- Reference existing functions and utilities with file paths
+
+### Phase 5: Call ExitPlanMode
+- After user approves the plan, use ExitPlanMode tool to exit plan mode
+- Then implement the approved plan
+
+## Current Permission Mode: PLAN
+In PLAN mode, only read-only operations are allowed. Write operations are blocked. Use the ExitPlanMode tool when ready to execute changes."#;
+
     let mode_desc = match permission_mode {
-        PermissionMode::Ask => "In ASK mode, potentially dangerous operations will require user confirmation.",
-        PermissionMode::Auto => "In AUTO mode, all operations are auto-approved (use with caution).",
-        PermissionMode::Plan => "In PLAN mode, only read-only operations are allowed. Write operations are blocked.",
-        PermissionMode::Bypass => "In BYPASS mode, all tools are allowed directly without any permission checks.",
+        PermissionMode::Ask => format!("## Current Permission Mode: {}\nIn ASK mode, potentially dangerous operations will require user confirmation.", mode_upper),
+        PermissionMode::Auto => format!("## Current Permission Mode: {}\nIn AUTO mode, all operations are auto-approved (use with caution).", mode_upper),
+        PermissionMode::Plan => plan_mode_instructions.to_string(),
+        PermissionMode::Bypass => format!("## Current Permission Mode: {}\nIn BYPASS mode, all tools are allowed directly without any permission checks.", mode_upper),
     };
-    prompt.push_str(&format!("## Current Permission Mode: {}\n{}\n", mode_upper, mode_desc));
+    prompt.push_str(&format!("{}\n", mode_desc));
 
     // Session-specific guidance
     prompt.push_str("\n## Session-specific guidance\n");

@@ -265,7 +265,7 @@ impl AgentLoop {
         let mut gate = PermissionGate::new(config.clone());
 
         // Wire auto mode classifier if enabled
-        if config.auto_classifier_enabled && config.permission_mode == crate::permissions::PermissionMode::Auto {
+        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Auto {
             let classifier_model = if config.auto_classifier_model.is_empty() {
                 config.model.clone()
             } else {
@@ -288,7 +288,7 @@ impl AgentLoop {
         let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
         let transcript = Transcript::new(&transcript_path);
         // Write system entry with model/mode info (matching Go format)
-        let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode));
+        let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode.lock().unwrap()));
 
         // Initialize compactor with config values
         let session_memory = config.session_memory.clone();
@@ -389,7 +389,7 @@ impl AgentLoop {
             let _ = std::fs::create_dir_all(&transcript_dir);
             let path = transcript_dir.join(format!("{}.jsonl", session_id));
             let t = Transcript::new(&path);
-            let _ = t.add_system(format!("model={}, mode={}", config.model, config.permission_mode));
+            let _ = t.add_system(format!("model={}, mode={}", config.model, *config.permission_mode.lock().unwrap()));
             let _ = t.add_user(format!(
                 "Resumed from {} ({} messages restored)",
                 transcript_path.display(),
@@ -430,7 +430,7 @@ impl AgentLoop {
         let context = Arc::new(RwLock::new(context));
 
         // Wire auto mode classifier if enabled
-        if config.auto_classifier_enabled && config.permission_mode == crate::permissions::PermissionMode::Auto {
+        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Auto {
             let classifier_model = if config.auto_classifier_model.is_empty() {
                 config.model.clone()
             } else {
@@ -677,9 +677,10 @@ impl AgentLoop {
         }
         let tracker = self.skill_tracker.blocking_read();
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
+        let mode = *self.config.permission_mode.lock().unwrap();
         let prompt = crate::config::build_system_prompt(
             &*self.registry.blocking_read(),
-            &self.config.permission_mode,
+            &mode,
             &self.config.project_dir,
             &self.config.model,
             self.config.skill_loader.as_ref(),
@@ -716,9 +717,10 @@ impl AgentLoop {
         }
         let tracker = self.skill_tracker.read().await;
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
+        let mode = *self.config.permission_mode.lock().unwrap();
         let prompt = crate::config::build_system_prompt(
             &*self.registry.read().await,
-            &self.config.permission_mode,
+            &mode,
             &self.config.project_dir,
             &self.config.model,
             self.config.skill_loader.as_ref(),
@@ -1176,7 +1178,7 @@ impl AgentLoop {
                                 );
                                 let tc = entry.tc.clone();
                                 handles.push(tokio::task::spawn(async move {
-                                    (entry.index, output, true, std::time::Duration::ZERO, false, tc.id, tc.name)
+                                    (entry.index, output, true, std::time::Duration::ZERO, false, tc.id, tc.name, None)
                                 }));
                             } else {
                                 // Approved tools execute concurrently
@@ -1367,20 +1369,20 @@ impl AgentLoop {
                                             } else {
                                                 result.output.clone()
                                             };
-                                            (output, result.is_error, elapsed)
+                                            (output, result.is_error, elapsed, result.mode_change)
                                         }
                                         Ok(Err(e)) => {
                                             agent_emit!("  [{}] panicked: {}", tc.name, e);
                                             let output = format!("Error: tool execution panicked: {}", e);
-                                            (output, true, elapsed)
+                                            (output, true, elapsed, None)
                                         }
                                         Err(_) => {
                                             let output = format!("Error: {} timed out after {:?}", tc.name, tool_timeout);
                                             agent_emit!("  [{}] timed out after {:.1}s", tc.name, elapsed.as_secs_f64());
-                                            (output, true, elapsed)
+                                            (output, true, elapsed, None)
                                         }
                                     };
-                                    (entry.index, output.0, output.1, output.2, interrupted.load(std::sync::atomic::Ordering::SeqCst), tc.id, tc.name)
+                                    (entry.index, output.0, output.1, output.2, interrupted.load(std::sync::atomic::Ordering::SeqCst), tc.id, tc.name, output.3)
                                 }));
                             }
                         }
@@ -1391,10 +1393,10 @@ impl AgentLoop {
                         }
 
                         // Collect results in order and record to transcript
-                        let mut tool_results: Vec<(usize, String, bool, std::time::Duration, String, String)> = Vec::new();
+                        let mut tool_results: Vec<(usize, String, bool, std::time::Duration, String, String, Option<crate::tools::ModeChange>)> = Vec::new();
                         for handle in handles {
                             if let Ok(result) = handle.await {
-                                // result is (index, output, is_error, elapsed, was_interrupted, tool_id, tool_name)
+                                // result is (index, output, is_error, elapsed, was_interrupted, tool_id, tool_name, mode_change)
                                 if result.4 {
                                     // Tool was interrupted
                                     return Ok("[Interrupted by user]".to_string());
@@ -1405,13 +1407,20 @@ impl AgentLoop {
                                     result.6.clone(),  // tool_name
                                     result.1.clone(),  // output
                                 );
-                                tool_results.push((result.0, result.1, result.2, result.3, result.5, result.6));
+                                tool_results.push((result.0, result.1, result.2, result.3, result.5, result.6, result.7));
                             }
                         }
                         tool_results.sort_by_key(|r| r.0);
 
+                        // Apply any mode change side-effects from tool execution
+                        for (_, _, _, _, _, _, mode_change) in &tool_results {
+                            if let Some(mc) = mode_change {
+                                self.apply_mode_change(*mc);
+                            }
+                        }
+
                         // Display results (matching Go's ASCII format: [+] tool: preview / [x] tool (time): error)
-                        for (_i, output, is_error, elapsed, _tool_id, tool_name) in &tool_results {
+                        for (_i, output, is_error, elapsed, _tool_id, tool_name, _) in &tool_results {
                             let elapsed_str = format!("{:.2}s", elapsed.as_secs_f64());
                             if *is_error {
                                 let preview = limit_str(output, 150);
@@ -1483,8 +1492,8 @@ impl AgentLoop {
                         let tool_result_blocks: Vec<crate::context::ToolResultBlock> = tool_calls.iter().enumerate().map(|(i, tc)| {
                             // Find the result for this tool call
                             let (output, is_error) = tool_results.iter()
-                                .find(|(idx, _, _, _, _, _)| *idx == i)
-                                .map(|(_, output, is_error, _, _, _)| (output.clone(), *is_error))
+                                .find(|(idx, _, _, _, _, _, _)| *idx == i)
+                                .map(|(_, output, is_error, _, _, _, _)| (output.clone(), *is_error))
                                 .unwrap_or_else(|| ("Error: no result".to_string(), true));
 
                             crate::context::ToolResultBlock {
@@ -2798,7 +2807,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
         // --- Plan mode recovery ---
         // If in plan mode, remind the model to continue planning without executing.
-        if self.config.permission_mode == crate::permissions::PermissionMode::Plan {
+        if *self.config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Plan {
             let mut ctx_mut = self.context.write().await;
             ctx_mut.add_attachment(
                 "## Plan Mode Active\n\nYou are in plan mode. Do NOT execute any tools without first presenting your plan to the user and getting their approval. Continue planning — do not execute.".to_string()
@@ -2839,6 +2848,16 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 ctx_mut.add_attachment(agent_attachment);
                 agent_emit!("[post-compact] Re-announced background agents");
             }
+        }
+
+        // --- Todo/Task recovery ---
+        // Re-inject task state by scanning transcript for task_create, task_update,
+        // and TodoWrite tool calls. This survives compact since the transcript persists.
+        let task_attachment = Self::build_task_recovery_attachment(&*self.context.read().await);
+        if !task_attachment.is_empty() {
+            let mut ctx_mut = self.context.write().await;
+            ctx_mut.add_attachment(task_attachment);
+            agent_emit!("[post-compact] Task/Todo state recovered");
         }
 
         recovered_paths
@@ -2992,6 +3011,148 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             path.display(),
             content
         )
+    }
+
+    /// Scan conversation messages for task_create, task_update, and TodoWrite tool
+    /// calls and format the recovered task state as an attachment.
+    /// Matches upstream's extractTodosFromTranscript.
+    fn build_task_recovery_attachment(ctx: &crate::context::ConversationContext) -> String {
+        use crate::context::MessageContent;
+
+        let messages = ctx.messages();
+
+        #[derive(Default)]
+        struct TaskState {
+            id: String,
+            subject: String,
+            status: String,
+            description: String,
+        }
+        let mut latest_tasks: std::collections::HashMap<String, TaskState> =
+            std::collections::HashMap::new();
+        let mut todo_items: Vec<String> = Vec::new();
+
+        for msg in messages.iter().rev() {
+            let MessageContent::ToolUseBlocks(blocks) = &msg.content else {
+                continue;
+            };
+            for block in blocks {
+                // Serialize to JSON to extract name and input fields
+                let json = serde_json::to_string(block).ok();
+                let json = match json {
+                    Some(j) => j,
+                    None => continue,
+                };
+                let parsed: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let name = parsed.get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let input = match parsed.get("input") {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                match name {
+                    "task_create" => {
+                        let id = input.get("taskId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if !latest_tasks.contains_key(&id) {
+                            latest_tasks.insert(id.clone(), TaskState {
+                                id,
+                                subject: input.get("subject").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                status: "pending".to_string(),
+                                description: input.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                    "task_update" => {
+                        let id = input.get("taskId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if let Some(existing) = latest_tasks.get_mut(&id) {
+                            if let Some(s) = input.get("status").and_then(|v| v.as_str()) {
+                                existing.status = s.to_string();
+                            }
+                            if let Some(s) = input.get("subject").and_then(|v| v.as_str()) {
+                                existing.subject = s.to_string();
+                            }
+                        } else {
+                            latest_tasks.insert(id.clone(), TaskState {
+                                id,
+                                subject: input.get("subject").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                status: input.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
+                                description: String::new(),
+                            });
+                        }
+                    }
+                    "TodoWrite" => {
+                        if !todo_items.is_empty() {
+                            continue; // Already found the most recent
+                        }
+                        if let Some(todos) = input.get("todos").and_then(|v| v.as_array()) {
+                            for t in todos {
+                                let status = t.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("pending");
+                                let content = t.get("content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let icon = match status {
+                                    "in_progress" => "◐",
+                                    "completed" => "●",
+                                    _ => "O",
+                                };
+                                todo_items.push(format!("{} {} [{}]", icon, content, status));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut sb = String::new();
+
+        if !latest_tasks.is_empty() {
+            sb.push_str("## Tasks (recovered from transcript)\n\n");
+            for (_, t) in latest_tasks.iter() {
+                let icon = match t.status.as_str() {
+                    "in_progress" => "◐",
+                    "completed" => "●",
+                    _ => "O",
+                };
+                sb.push_str(&format!("{} [{}] {}\n", icon, t.id, t.subject));
+                if !t.description.is_empty() {
+                    sb.push_str(&format!("  {}\n", t.description));
+                }
+            }
+        }
+
+        if !todo_items.is_empty() {
+            if !sb.is_empty() {
+                sb.push('\n');
+            }
+            sb.push_str("## Todo List (recovered from transcript)\n\n");
+            for item in &todo_items {
+                sb.push_str(item);
+                sb.push('\n');
+            }
+            sb.push_str("\nUse task_list, task_update, or TodoWrite to manage these items.\n");
+        }
+
+        sb
     }
 
     /// Build a re-announcement of MCP servers and tools after compaction.
@@ -3210,6 +3371,23 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
     /// Force compact the conversation context (for /compact command).
     /// Uses local truncation-based compaction (no LLM call).
+    /// Apply a mode change side-effect from tool execution (EnterPlanMode/ExitPlanMode).
+    pub fn apply_mode_change(&self, mode_change: crate::tools::ModeChange) {
+        use crate::permissions::PermissionMode;
+        match mode_change {
+            crate::tools::ModeChange::EnterPlan => {
+                let current = *self.config.permission_mode.lock().unwrap();
+                *self.config.pre_plan_mode.lock().unwrap() = Some(current);
+                *self.config.permission_mode.lock().unwrap() = PermissionMode::Plan;
+                agent_emit!("[mode] Entered plan mode");
+            }
+            crate::tools::ModeChange::ExitPlan { restore_mode } => {
+                *self.config.permission_mode.lock().unwrap() = restore_mode;
+                agent_emit!("[mode] Exited plan mode, restored to {}", restore_mode);
+            }
+        }
+    }
+
     pub fn force_compact(&self) -> crate::compact::CompactStats {
         let mut context = self.context.blocking_write();
         let messages = context.messages().to_vec();
@@ -3617,7 +3795,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let _ = std::fs::create_dir_all(&transcript_dir);
         let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
         let transcript = Transcript::new(&transcript_path);
-        let _ = transcript.add_system(format!("sub-agent: model={}, mode={}", gate.config.model, gate.config.permission_mode));
+        let _ = transcript.add_system(format!("sub-agent: model={}, mode={}", gate.config.model, *gate.config.permission_mode.lock().unwrap()));
 
         let session_memory = config.session_memory.clone();
         let compactor = RwLock::new(
