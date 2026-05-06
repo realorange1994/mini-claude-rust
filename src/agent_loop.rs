@@ -1461,7 +1461,7 @@ impl AgentLoop {
                                 serde_json::from_str(&tc.arguments).unwrap_or_default();
                             match tc.name.as_str() {
                                 "read_file" => {
-                                    if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                                    if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
                                         self.tool_state_tracker.borrow_mut().record_file_read(path);
                                     }
                                 }

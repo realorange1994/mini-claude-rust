@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn test_format_action_for_classifier_write_file() {
         let mut input = HashMap::new();
-        input.insert("path".to_string(), serde_json::json!("src/main.rs"));
+        input.insert("file_path".to_string(), serde_json::json!("src/main.rs"));
         let formatted = format_action_for_classifier("write_file", &input);
         assert!(formatted.contains("write_file"));
         assert!(formatted.contains("src/main.rs"));
@@ -1383,7 +1383,7 @@ mod tests {
     #[test]
     fn test_format_action_for_classifier_edit_file() {
         let mut input = HashMap::new();
-        input.insert("path".to_string(), serde_json::json!("src/lib.rs"));
+        input.insert("file_path".to_string(), serde_json::json!("src/lib.rs"));
         input.insert(
             "old_string".to_string(),
             serde_json::json!("fn old() {}"),
@@ -1397,7 +1397,7 @@ mod tests {
     #[test]
     fn test_format_action_for_classifier_long_old_string() {
         let mut input = HashMap::new();
-        input.insert("path".to_string(), serde_json::json!("src/lib.rs"));
+        input.insert("file_path".to_string(), serde_json::json!("src/lib.rs"));
         input.insert("old_string".to_string(), serde_json::json!("x".repeat(200)));
         let formatted = format_action_for_classifier("edit_file", &input);
         assert!(formatted.ends_with("..."));
