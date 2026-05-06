@@ -6,6 +6,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Permission mode for tool execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,12 +137,20 @@ fn contains_shell_metacharacters(s: &str) -> bool {
     s.contains('\n') || s.contains('\r')
 }
 
+/// Records a user's explicit approval for a tool action (from AskUserQuestion).
+struct ApprovedAction {
+    tool_name: String,
+    params: String, // compact serialization for matching
+    expires: Instant,
+}
+
 /// PermissionGate checks if tool execution is allowed
 pub struct PermissionGate {
     pub config: crate::config::Config,
     classifier: Option<AutoModeClassifier>,
     transcript_src: Option<Arc<tokio::sync::RwLock<ConversationContext>>>,
     denial_count: AtomicUsize,
+    recently_approved: std::sync::Mutex<Vec<ApprovedAction>>,
 }
 
 impl PermissionGate {
@@ -151,6 +160,7 @@ impl PermissionGate {
             classifier: None,
             transcript_src: None,
             denial_count: AtomicUsize::new(0),
+            recently_approved: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -426,6 +436,13 @@ impl PermissionGate {
             _ => return None, // No classifier configured: auto mode allows all tools (old behavior)
         };
 
+        // Check if this tool was explicitly approved by the user via AskUserQuestion.
+        // If the user said "Yes, continue", their explicit consent is binding.
+        if self.tool_matches_recent_approval(tool_name, params) {
+            self.denial_count.store(0, Ordering::SeqCst);
+            return None;
+        }
+
         // Build transcript for classifier context
         let transcript = if let Some(src) = &self.transcript_src {
             // Try to get a read lock (non-blocking to avoid deadlocks)
@@ -463,6 +480,67 @@ impl PermissionGate {
         self.denial_count.store(0, Ordering::SeqCst);
         None
     }
+
+    /// Record that the user explicitly approved a tool action via AskUserQuestion.
+    /// The approval is valid for 2 minutes and allows matching tool calls to bypass the classifier.
+    pub fn record_user_approval(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) {
+        let compact = compact_params(tool_name, params);
+        let action = ApprovedAction {
+            tool_name: tool_name.to_string(),
+            params: compact,
+            expires: Instant::now() + Duration::from_secs(120),
+        };
+        let mut approved = self.recently_approved.lock().unwrap();
+        approved.push(action);
+        // Trim expired entries
+        let now = Instant::now();
+        approved.retain(|a| a.expires > now);
+    }
+
+    /// Check if this tool call matches a recent user approval from AskUserQuestion.
+    fn tool_matches_recent_approval(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> bool {
+        let compact = compact_params(tool_name, params);
+        let now = Instant::now();
+        let approved = self.recently_approved.lock().unwrap();
+        for a in approved.iter() {
+            if a.expires > now && a.tool_name == tool_name && a.params == compact {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Produce a compact string representation of tool params for matching user approvals.
+fn compact_params(tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> String {
+    match tool_name {
+        "exec" => {
+            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                return cmd.to_string();
+            }
+        }
+        "write_file" | "edit_file" | "multi_edit" => {
+            if let Some(p) = params.get("file_path").and_then(|v| v.as_str()) {
+                return p.to_string();
+            }
+        }
+        "fileops" => {
+            if let Some(p) = params.get("path").and_then(|v| v.as_str()) {
+                return p.to_string();
+            }
+        }
+        "git" => {
+            if let Some(args) = params.get("args").and_then(|v| v.as_str()) {
+                return args.to_string();
+            }
+        }
+        _ => {
+            if let Ok(json) = serde_json::to_string(params) {
+                return json;
+            }
+        }
+    }
+    String::new()
 }
 
 impl Clone for PermissionGate {
@@ -472,6 +550,7 @@ impl Clone for PermissionGate {
             classifier: None, // Classifiers are not cloned (they hold HTTP clients)
             transcript_src: self.transcript_src.clone(),
             denial_count: AtomicUsize::new(self.denial_count.load(Ordering::SeqCst)),
+            recently_approved: std::sync::Mutex::new(Vec::new()), // Don't clone pending approvals
         }
     }
 }

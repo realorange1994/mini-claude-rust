@@ -45,7 +45,11 @@ pub fn build_compact_transcript(ctx: &ConversationContext, max_messages: usize) 
                     } else {
                         content.as_str()
                     };
-                    sb.push_str(&format!("[Result] {}\n", truncated));
+                    if is_ask_user_approval(truncated) {
+                        sb.push_str(&format!("[Result] USER EXPLICITLY APPROVED: {}\n", truncated));
+                    } else {
+                        sb.push_str(&format!("[Result] {}\n", truncated));
+                    }
                 }
             }
             // Skip CompactBoundaryContent, SummaryContent, AttachmentContent
@@ -109,6 +113,33 @@ pub fn format_tool_input_compact(tool_name: &str, input: &HashMap<String, serde_
         })
         .collect();
     parts.join(", ")
+}
+
+/// Detects whether a tool result represents an explicit user approval from AskUserQuestion.
+/// Returns true if the user selected an option that indicates consent.
+fn is_ask_user_approval(result: &str) -> bool {
+    let lower = result.to_lowercase();
+    // AskUserQuestion format: "Q: ...\nA: <option>"
+    if !lower.contains("q:") || !lower.contains("a:") {
+        return false;
+    }
+    // Extract the answer part after "a:"
+    if let Some(idx) = lower.find("a:") {
+        let answer = lower[idx..].trim_start_matches("a:").trim();
+        // Check for affirmative keywords
+        let affirmations = [
+            "yes", "ok", "sure", "continue", "allow", "proceed",
+            "go ahead", "fine", "good", "agreed", "approve",
+            "do it", "go for it", "approved",
+            "create", "yes, continue", "yes allow", "yes approve",
+        ];
+        for a in affirmations {
+            if answer.contains(a) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
