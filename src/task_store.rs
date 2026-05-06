@@ -3,6 +3,7 @@
 //! Ported from Go's agent_task.go. Manages task lifecycle (pending -> running ->
 //! completed/failed/killed) with OS process handles for kill support.
 
+use crate::process_manager::kill_process_group;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -176,7 +177,7 @@ impl TaskStore {
 
         // Kill the OS process using the stored PID
         if let Some(pid) = task.pid {
-            kill_process(pid);
+            kill_process_group(pid);
         }
 
         task.kill();
@@ -249,26 +250,7 @@ impl Default for TaskStore {
 
 // ─── Process kill helpers ───────────────────────────────────────────────────
 
-/// Kill a process by PID using platform-specific commands.
-/// On Unix, kills the entire process group (tree-kill) to prevent orphaned subprocesses.
-/// On Windows, uses taskkill /T to kill the process tree.
-fn kill_process(pid: u32) {
-    #[cfg(unix)]
-    {
-        // Kill the entire process group (tree-kill) by sending SIGKILL to -pid.
-        // This matches upstream's treeKill behavior and prevents orphaned subprocesses.
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(&["/F", "/T", "/PID", &pid.to_string()])
-            .output();
-    }
-}
+// kill_process is now provided by crate::process_manager::kill_process_group
 
 // ─── Task ID generation ─────────────────────────────────────────────────────
 

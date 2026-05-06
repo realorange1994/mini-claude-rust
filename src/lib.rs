@@ -9,6 +9,7 @@ pub mod filehistory;
 pub mod mcp;
 pub mod normalize;
 pub mod permissions;
+pub mod process_manager;
 pub mod prompt_caching;
 pub mod context_references;
 pub mod rate_limit;

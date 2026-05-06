@@ -32,6 +32,10 @@ pub mod agent_tools;
 pub mod todo_write;
 pub mod send_message;
 pub mod ask_user_question;
+mod path_safety;
+
+pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};
+use dunce;
 
 // Re-export tool structs for integration tests
 pub use exec_tool::ExecTool;
@@ -723,37 +727,30 @@ pub fn truncate_at(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Check that a resolved file path is within the working directory.
+/// Check that a resolved file path is within the working directory or a trusted path.
 /// Returns Ok(()) if allowed, or Err(error_message) if the path escapes the project.
 pub fn is_path_allowed(path: &str) -> Result<(), String> {
-    let resolved = expand_path(path);
-    let wd = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
+    let workspace = std::env::current_dir().map_err(|e| format!("cannot get cwd: {}", e))?;
+    is_path_allowed_with_workspace(&workspace, path)
+}
 
-    // Resolve symlinks on both sides for robustness
-    let abs_wd = std::fs::canonicalize(&wd).unwrap_or_else(|_| wd.clone());
-    let abs_resolved = match std::fs::canonicalize(&resolved) {
-        Ok(p) => p,
-        Err(_) => {
-            // File doesn't exist yet - check parent directory instead
-            if let Some(parent) = resolved.parent() {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    canonical_parent.join(resolved.file_name().unwrap_or_default())
-                } else {
-                    resolved.clone()
+/// Check that a path is within the given workspace or a trusted path.
+/// Returns Ok(()) if allowed, or Err(error_message) if the path escapes.
+pub fn is_path_allowed_with_workspace(workspace: &std::path::Path, path: &str) -> Result<(), String> {
+    match resolve_path(path, workspace) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // If resolve_path rejects due to workspace boundary, check WorkspaceTrust
+            if e.contains("outside the project directory") || e.contains("escapes workspace") {
+                let expanded = expand_path(path);
+                let abs_resolved = dunce::canonicalize(&expanded)
+                    .unwrap_or_else(|_| expanded.clone());
+                let trust = WorkspaceTrust::load();
+                if trust.permits(&abs_resolved) {
+                    return Ok(());
                 }
-            } else {
-                resolved.clone()
             }
+            Err(e)
         }
-    };
-
-    let rel = abs_resolved.strip_prefix(&abs_wd)
-        .map_err(|_| format!("path {:?} is outside the project directory", path))?;
-    // rel is empty when path equals the project directory itself (e.g. "."),
-    // which is perfectly valid — only block paths that escape via ".."
-    if rel.starts_with("..") {
-        Err(format!("path {:?} is outside the project directory", path))
-    } else {
-        Ok(())
     }
 }
