@@ -25,7 +25,7 @@ struct Args {
     #[arg(long)]
     base_url: Option<String>,
 
-    /// Permission mode (ask|auto|plan)
+    /// Permission mode (ask|auto|bypass|plan)
     #[arg(long, default_value = "ask")]
     mode: String,
 
