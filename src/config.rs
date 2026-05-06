@@ -39,9 +39,12 @@ pub struct Config {
     // Post-compact recovery config (Phase 2)
     pub post_compact_recover_files: bool,
     pub post_compact_max_files: usize,
-    pub post_compact_max_file_chars: usize,
-    pub post_compact_max_skill_chars: usize,
-    pub post_compact_max_total_skill_chars: usize,
+    pub post_compact_max_file_chars: usize, // legacy (deprecated, use post_compact_max_file_tokens)
+    pub post_compact_max_skill_chars: usize, // legacy (deprecated, use post_compact_max_skill_tokens)
+    pub post_compact_max_total_skill_chars: usize, // legacy (deprecated, use post_compact_max_total_skill_tokens)
+    pub post_compact_max_file_tokens: usize, // default 12_500 (~50K chars / 4)
+    pub post_compact_max_skill_tokens: usize, // default 1_250 (~5K chars / 4)
+    pub post_compact_max_total_skill_tokens: usize, // default 6_250 (~25K chars / 4)
     // History snip config (Phase 3)
     pub post_compact_history_snip_count: usize,
     // Session memory (Phase 4)
@@ -122,9 +125,12 @@ impl Default for Config {
             micro_compact_min_char_count: 2000,
             post_compact_recover_files: true,
             post_compact_max_files: 5,
-            post_compact_max_file_chars: 50_000,
-            post_compact_max_skill_chars: 5_000,
-            post_compact_max_total_skill_chars: 25_000,
+            post_compact_max_file_chars: 50_000, // legacy
+            post_compact_max_skill_chars: 5_000, // legacy
+            post_compact_max_total_skill_chars: 25_000, // legacy
+            post_compact_max_file_tokens: 12_500, // ~50K chars at 4 chars/token (upstream-compatible)
+            post_compact_max_skill_tokens: 1_250, // ~5K chars at 4 chars/token
+            post_compact_max_total_skill_tokens: 6_250, // ~25K chars at 4 chars/token
             post_compact_history_snip_count: 3,
             session_memory: None,
             reactive_compact_threshold: 5000,

@@ -1333,10 +1333,10 @@ async fn do_compact_llm_call(
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), serde_json::json!(model));
     payload.insert("max_tokens".to_string(), serde_json::json!(20000));
-    payload.insert(
-        "system".to_string(),
-        serde_json::json!([{"type": "text", "text": COMPACT_SYSTEM_PROMPT}]),
-    );
+    // Build system prompt with cache_control for prompt caching efficiency
+    let mut system_json = serde_json::json!([{"type": "text", "text": COMPACT_SYSTEM_PROMPT}]);
+    crate::prompt_caching::cache_system_prompt(&mut system_json);
+    payload.insert("system".to_string(), system_json);
     // Disable extended thinking during compaction to prevent wasting output
     // tokens on thinking blocks. The summary needs all available tokens.
     payload.insert(
@@ -1350,6 +1350,11 @@ async fn do_compact_llm_call(
         "role": "user",
         "content": [{"type": "text", "text": user_prompt}]
     }));
+
+    // Apply prompt caching to reduce input token costs on compaction calls.
+    // This reuses cached prefixes from the previous conversation when possible.
+    crate::prompt_caching::apply_prompt_caching(&mut all_messages, "5m");
+
     payload.insert("messages".to_string(), serde_json::json!(all_messages));
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));

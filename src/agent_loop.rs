@@ -1,4 +1,4 @@
-use crate::compact::Compactor;
+use crate::compact::{Compactor, estimate_tokens};
 use crate::config::Config;
 use crate::context::{ConversationContext, ConversationEntry, Message, MessageContent, MessageRole, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
@@ -2651,10 +2651,16 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         } else {
             self.config.post_compact_max_files
         };
-        let max_file_chars = if self.config.post_compact_max_file_chars == 0 {
-            50_000
+        // Use token-based budget (upstream-compatible), fall back to char-based if not set
+        let max_file_tokens = if self.config.post_compact_max_file_tokens == 0 {
+            let max_file_chars = if self.config.post_compact_max_file_chars == 0 {
+                50_000
+            } else {
+                self.config.post_compact_max_file_chars
+            };
+            max_file_chars / 4
         } else {
-            self.config.post_compact_max_file_chars
+            self.config.post_compact_max_file_tokens
         };
 
         // Collect file paths already visible in preserved messages (after boundary).
@@ -2668,7 +2674,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let paths = registry.get_recently_read_files(max_files);
         drop(registry);
 
-        let mut total_chars = 0;
+        let mut total_tokens = 0;
         let mut files_recovered = 0;
         let mut paths_to_remark = Vec::new();
 
@@ -2691,16 +2697,24 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             }
 
             if let Ok(data) = std::fs::read_to_string(&real_path) {
-                let content = if total_chars + data.len() > max_file_chars {
-                    let remaining = max_file_chars - total_chars;
-                    if remaining < 200 {
+                let content_tokens = estimate_tokens(&data);
+                let content = if total_tokens + content_tokens > max_file_tokens {
+                    // Truncate to fit budget — estimate how many chars fit in remaining tokens
+                    let remaining_tokens = max_file_tokens - total_tokens;
+                    if remaining_tokens < 50 {
                         break;
                     }
-                    let truncated: String = data.chars().take(remaining).collect();
-                    format!("{}\n... [truncated]", truncated)
+                    let remaining_chars = remaining_tokens * 4;
+                    if remaining_chars < data.len() {
+                        let truncated: String = data.chars().take(remaining_chars).collect();
+                        format!("{}\n... [truncated]", truncated)
+                    } else {
+                        data.clone()
+                    }
                 } else {
                     data.clone()
                 };
+                let actual_tokens = estimate_tokens(&content);
 
                 let attachment = format!(
                     "[Post-compact file recovery: {}]\n```\n{}\n```",
@@ -2710,7 +2724,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                     let mut ctx_mut = self.context.write().await;
                     ctx_mut.add_attachment(attachment);
                 }
-                total_chars += data.len();
+                total_tokens += actual_tokens;
                 files_recovered += 1;
                 recovered_paths.push(path.clone());
                 paths_to_remark.push(path.clone());
@@ -2727,22 +2741,33 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
         if files_recovered > 0 {
             agent_emit!(
-                "[post-compact] Recovered {} files ({} chars)",
-                files_recovered, total_chars
+                "[post-compact] Recovered {} files (~{} tokens)",
+                files_recovered, total_tokens
             );
         }
 
         // --- Skill content recovery ---
         if let Some(loader) = &self.config.skill_loader {
-            let max_skill_chars = if self.config.post_compact_max_skill_chars == 0 {
-                5_000
+            // Use token-based budgets (upstream-compatible), fall back to char-based if not set
+            let max_skill_tokens = if self.config.post_compact_max_skill_tokens == 0 {
+                let max_skill_chars = if self.config.post_compact_max_skill_chars == 0 {
+                    5_000
+                } else {
+                    self.config.post_compact_max_skill_chars
+                };
+                max_skill_chars / 4
             } else {
-                self.config.post_compact_max_skill_chars
+                self.config.post_compact_max_skill_tokens
             };
-            let max_total_skill_chars = if self.config.post_compact_max_total_skill_chars == 0 {
-                25_000
+            let max_total_skill_tokens = if self.config.post_compact_max_total_skill_tokens == 0 {
+                let max_total_skill_chars = if self.config.post_compact_max_total_skill_chars == 0 {
+                    25_000
+                } else {
+                    self.config.post_compact_max_total_skill_chars
+                };
+                max_total_skill_chars / 4
             } else {
-                self.config.post_compact_max_total_skill_chars
+                self.config.post_compact_max_total_skill_tokens
             };
 
             let read_skills = {
@@ -2750,7 +2775,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 tracker.get_read_skill_names()
             };
 
-            let mut total_skill_chars = 0;
+            let mut total_skill_tokens = 0;
             let mut skills_recovered = 0;
 
             for name in &read_skills {
@@ -2762,14 +2787,22 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                     continue;
                 }
 
-                let truncated = if content.len() > max_skill_chars {
-                    let truncated: String = content.chars().take(max_skill_chars).collect();
-                    format!("{}\n... [truncated]", truncated)
+                let content_tokens = estimate_tokens(&content);
+                let truncated = if content_tokens > max_skill_tokens {
+                    // Truncate per-skill: approximate char limit from token budget
+                    let char_limit = max_skill_tokens * 4;
+                    if char_limit < content.len() {
+                        let truncated: String = content.chars().take(char_limit).collect();
+                        format!("{}\n... [truncated]", truncated)
+                    } else {
+                        content.clone()
+                    }
                 } else {
                     content.clone()
                 };
+                let truncated_tokens = estimate_tokens(&truncated);
 
-                if total_skill_chars + truncated.len() > max_total_skill_chars {
+                if total_skill_tokens + truncated_tokens > max_total_skill_tokens {
                     break;
                 }
 
@@ -2781,14 +2814,14 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                     let mut ctx_mut = self.context.write().await;
                     ctx_mut.add_attachment(attachment);
                 }
-                total_skill_chars += truncated.len();
+                total_skill_tokens += truncated_tokens;
                 skills_recovered += 1;
             }
 
             if skills_recovered > 0 {
                 agent_emit!(
-                    "[post-compact] Recovered {} skills ({} chars)",
-                    skills_recovered, total_skill_chars
+                    "[post-compact] Recovered {} skills (~{} tokens)",
+                    skills_recovered, total_skill_tokens
                 );
             }
         }
@@ -3531,11 +3564,16 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         if self.config.post_compact_recover_files {
             let registry = self.registry.blocking_read();
             let max_files = if self.config.post_compact_max_files == 0 { 5 } else { self.config.post_compact_max_files };
-            let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+            let max_file_tokens = if self.config.post_compact_max_file_tokens == 0 {
+                let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+                max_file_chars / 4
+            } else {
+                self.config.post_compact_max_file_tokens
+            };
             let paths = registry.get_recently_read_files(max_files);
             drop(registry);
 
-            let mut total_chars = 0;
+            let mut total_tokens = 0;
             let mut files_recovered = 0;
             let mut paths_to_remark = Vec::new();
             for path in &paths {
@@ -3550,14 +3588,21 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 }
 
                 if let Ok(data) = std::fs::read_to_string(&real_path) {
-                    let content = if total_chars + data.len() > max_file_chars {
-                        let remaining = max_file_chars - total_chars;
-                        if remaining < 200 { break; }
-                        let truncated: String = data.chars().take(remaining).collect();
-                        format!("{}\n... [truncated]", truncated)
+                    let content_tokens = estimate_tokens(&data);
+                    let content = if total_tokens + content_tokens > max_file_tokens {
+                        let remaining_tokens = max_file_tokens - total_tokens;
+                        if remaining_tokens < 50 { break; }
+                        let remaining_chars = remaining_tokens * 4;
+                        if remaining_chars < data.len() {
+                            let truncated: String = data.chars().take(remaining_chars).collect();
+                            format!("{}\n... [truncated]", truncated)
+                        } else {
+                            data.clone()
+                        }
                     } else {
                         data.clone()
                     };
+                    let actual_tokens = estimate_tokens(&content);
 
                     let attachment = format!(
                         "[Post-compact file recovery: {}]\n```\n{}\n```",
@@ -3567,7 +3612,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                         let mut ctx_mut = self.context.blocking_write();
                         ctx_mut.add_attachment(attachment);
                     }
-                    total_chars += data.len();
+                    total_tokens += actual_tokens;
                     files_recovered += 1;
                     paths_to_remark.push(path.clone());
                 }
@@ -3579,7 +3624,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             }
 
             if files_recovered > 0 {
-                agent_emit!("[post-compact] Recovered {} files ({} chars)", files_recovered, total_chars);
+                agent_emit!("[post-compact] Recovered {} files (~{} tokens)", files_recovered, total_tokens);
             }
         }
 
@@ -3664,12 +3709,17 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         if self.config.post_compact_recover_files {
             let registry = self.registry.blocking_read();
             let max_files = if self.config.post_compact_max_files == 0 { 5 } else { self.config.post_compact_max_files };
-            let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+            let max_file_tokens = if self.config.post_compact_max_file_tokens == 0 {
+                let max_file_chars = if self.config.post_compact_max_file_chars == 0 { 50_000 } else { self.config.post_compact_max_file_chars };
+                max_file_chars / 4
+            } else {
+                self.config.post_compact_max_file_tokens
+            };
             let paths = registry.get_recently_read_files(max_files);
             drop(registry);
 
             let preserved_read_paths = Self::collect_read_tool_file_paths(&context);
-            let mut total_chars = 0;
+            let mut total_tokens = 0;
             for path in &paths {
                 let real_path = if std::path::Path::new(path).is_absolute() {
                     path.clone()
@@ -3679,15 +3729,20 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                 if Self::should_exclude_from_post_compact_restore(&real_path, &self.config.project_dir) { continue; }
                 if preserved_read_paths.contains(&real_path) { continue; }
                 if let Ok(data) = std::fs::read_to_string(&real_path) {
-                    let content = if total_chars + data.len() > max_file_chars {
-                        let remaining = max_file_chars - total_chars;
-                        if remaining < 200 { break; }
-                        let truncated: String = data.chars().take(remaining).collect();
-                        format!("{}\n... [truncated]", truncated)
+                    let content_tokens = estimate_tokens(&data);
+                    let content = if total_tokens + content_tokens > max_file_tokens {
+                        let remaining_tokens = max_file_tokens - total_tokens;
+                        if remaining_tokens < 50 { break; }
+                        let remaining_chars = remaining_tokens * 4;
+                        if remaining_chars < data.len() {
+                            let truncated: String = data.chars().take(remaining_chars).collect();
+                            format!("{}\n... [truncated]", truncated)
+                        } else { data.clone() }
                     } else { data.clone() };
+                    let actual_tokens = estimate_tokens(&content);
                     let attachment = format!("[Post-compact file recovery: {}]\n```\n{}\n```", path, content);
                     context.add_attachment(attachment);
-                    total_chars += data.len();
+                    total_tokens += actual_tokens;
                 }
             }
         }
