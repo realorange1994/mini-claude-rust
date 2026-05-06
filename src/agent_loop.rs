@@ -2085,8 +2085,10 @@ impl AgentLoop {
         tools: &[serde_json::Value],
     ) -> Result<(Vec<ToolCallInfo>, String)> {
         const MAX_RETRIES: usize = 10;
+        const CONSECUTIVE_500_THRESHOLD: usize = 3;
 
         let mut current_messages: Vec<serde_json::Value> = messages.to_vec();
+        let mut consecutive_500s: usize = 0;
 
         for attempt in 0..MAX_RETRIES {
             // Check for interruption before each attempt
@@ -2114,6 +2116,7 @@ impl AgentLoop {
                         }
                         // Rebuild messages from repaired context and retry
                         current_messages = self.entries_to_messages_async().await;
+                        consecutive_500s = 0;
                         continue;
                     }
 
@@ -2124,6 +2127,38 @@ impl AgentLoop {
                         is_context_length_error(&err_str) {
                         return Err(e);
                     }
+
+                    // Track consecutive 500 errors as a heuristic for context overflow.
+                    // When using a proxy (e.g., coze.site), context overflow often returns
+                    // a generic 500 instead of "context_length_exceeded". If we see 3+
+                    // consecutive 500s, assume context overflow and trigger compaction
+                    // instead of retrying the same oversized request indefinitely.
+                    let is_500 = err_str.contains(" 500 ") || err_str.contains("500 Internal Server Error");
+                    if is_500 {
+                        consecutive_500s += 1;
+                        if consecutive_500s >= CONSECUTIVE_500_THRESHOLD {
+                            agent_emit!("[!] Consecutive 500 errors detected (context overflow likely), triggering compaction...");
+                            {
+                                let mut ctx = self.context.write().await;
+                                ctx.truncate_history();
+                            }
+                            return Err(anyhow!("context_length_exceeded"));
+                        }
+                        // Transient 500: retry with backoff
+                        if attempt < MAX_RETRIES - 1 {
+                            let delay = jittered_backoff(
+                                attempt + 1,
+                                Duration::from_secs(2),
+                                Duration::from_secs(18),
+                                0.5,
+                            );
+                            agent_emit!("[!] Non-streaming 500 error ({}/{}), retrying in {:?}: {}",
+                                consecutive_500s, CONSECUTIVE_500_THRESHOLD, delay, e);
+                            tokio::time::sleep(delay).await;
+                        }
+                        continue;
+                    }
+                    consecutive_500s = 0;
 
                     let classification = classify_error(&err_str, 0, 0);
                     if !classification.retryable {
