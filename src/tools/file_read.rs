@@ -9,6 +9,9 @@ use std::time::SystemTime;
 
 const MAX_FILE_SIZE: u64 = 256 * 1024; // 256 KB, matching Claude Code official
 
+/// Prefix of the "file unchanged" dedup stub. Re-exports the shared constant from the tools module.
+const FILE_UNCHANGED_STUB: &str = super::FILE_UNCHANGED_STUB;
+
 pub struct FileReadTool {
     files_read: Option<Arc<RwLock<HashMap<String, FileReadInfo>>>>,
 }
@@ -212,7 +215,8 @@ impl Tool for FileReadTool {
                                 if modified == info.mtime {
                                     // File unchanged — return stub
                                     return ToolResult::ok(format!(
-                                        "File unchanged since last read. The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading."
+                                        "{} The content from the earlier read_file tool_result in this conversation is still current — refer to that instead of re-reading.",
+                                        FILE_UNCHANGED_STUB
                                     ));
                                 }
                             }

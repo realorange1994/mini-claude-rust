@@ -1,5 +1,9 @@
 //! Tools module - implements all built-in tools
 
+/// Prefix of the "file unchanged" dedup stub returned by read_file when the file
+/// hasn't changed since the last read. Used for both stub generation and detection.
+pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read.";
+
 pub mod coercion;
 
 mod exec_tool;
@@ -472,10 +476,10 @@ pub fn register_builtin_tools(registry: &Registry) {
 }
 
 /// Register MCP and skills tools
-pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config) {
+pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config, task_store: &crate::task_store::SharedTaskStore) {
     if let Some(mcp_manager) = &cfg.mcp_manager {
         registry.register(mcp_tools::ListMcpTools::new(mcp_manager.clone()));
-        registry.register(mcp_tools::McpToolCaller::new(mcp_manager.clone()));
+        registry.register(mcp_tools::McpToolCaller::new(mcp_manager.clone(), Arc::clone(task_store)));
         registry.register(mcp_tools::McpServerStatus::new(mcp_manager.clone()));
     }
 

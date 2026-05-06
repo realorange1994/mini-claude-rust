@@ -74,6 +74,7 @@ struct AgentTaskInner {
     output: String,
     output_file: String,
     pending_messages: Vec<String>, // queued by send_message, drained at turn boundaries
+    notified: bool,               // true once the user/main agent has been informed of completion
 }
 
 /// Tracks a single background sub-agent task.
@@ -184,6 +185,14 @@ impl AgentTask {
     }
     pub fn duration_ms(&self) -> u64 {
         self.inner.lock().unwrap().duration_ms
+    }
+    /// Check if the user/main agent has been notified of completion
+    pub fn notified(&self) -> bool {
+        self.inner.lock().unwrap().notified
+    }
+    /// Mark the task as having been notified to the user/main agent
+    pub fn set_notified(&self) {
+        self.inner.lock().unwrap().notified = true;
     }
 
     /// Set status to Completed
@@ -325,6 +334,7 @@ impl AgentTaskStore {
                 output: String::new(),
                 output_file: String::new(),
                 pending_messages: Vec::new(),
+                notified: false,
             }),
         });
 

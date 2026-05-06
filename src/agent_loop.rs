@@ -2588,7 +2588,8 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             for block in blocks {
                 for c in &block.content {
                     let ToolResultContent::Text { text } = c;
-                    if text.starts_with("File unchanged since last read.") {
+                    let is_stub = text.starts_with(crate::tools::FILE_UNCHANGED_STUB);
+                    if is_stub {
                         stub_tool_use_ids.insert(block.tool_use_id.clone());
                     }
                 }
@@ -2783,6 +2784,28 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             }
         }
 
+        // --- Plan file recovery ---
+        // Re-inject the current plan file if one exists, so the model knows
+        // what it was working on and what to do next.
+        {
+            let plan_attachment = Self::build_post_compact_plan_attachment(self.config.project_dir.to_string_lossy().as_ref());
+            if !plan_attachment.is_empty() {
+                let mut ctx_mut = self.context.write().await;
+                ctx_mut.add_attachment(plan_attachment);
+                agent_emit!("[post-compact] Recovered plan file");
+            }
+        }
+
+        // --- Plan mode recovery ---
+        // If in plan mode, remind the model to continue planning without executing.
+        if self.config.permission_mode == crate::permissions::PermissionMode::Plan {
+            let mut ctx_mut = self.context.write().await;
+            ctx_mut.add_attachment(
+                "## Plan Mode Active\n\nYou are in plan mode. Do NOT execute any tools without first presenting your plan to the user and getting their approval. Continue planning — do not execute.".to_string()
+            );
+            agent_emit!("[post-compact] Plan mode reminder injected");
+        }
+
         // --- Tools re-announcement ---
         // After compaction the model loses all tool-use history. Re-announce the
         // full tool inventory so the model knows what capabilities are available.
@@ -2926,6 +2949,51 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         sb.trim_end().to_string()
     }
 
+    /// Read the most recent plan file from .claude/plan/ and return it as an
+    /// attachment. Matches upstream's createPlanAttachmentIfNeeded.
+    fn build_post_compact_plan_attachment(project_dir: &str) -> String {
+        let plan_dir = std::path::Path::new(project_dir).join(".claude").join("plan");
+
+        let entries = match std::fs::read_dir(&plan_dir) {
+            Ok(rd) => rd,
+            Err(_) => return String::new(),
+        };
+
+        // Find the most recently modified .md file
+        let mut newest_path: Option<std::path::PathBuf> = None;
+        let mut newest_time: std::time::SystemTime = std::time::SystemTime::UNIX_EPOCH;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+            if let Some(mod_time) = modified {
+                if mod_time > newest_time {
+                    newest_time = mod_time;
+                    newest_path = Some(path);
+                }
+            }
+        }
+
+        let path = match newest_path {
+            Some(p) => p,
+            None => return String::new(),
+        };
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+
+        format!(
+            "A plan file exists from plan mode at: {}\n\nPlan contents:\n\n{}\n\nIf this plan is relevant to the current work and not already complete, continue working on it.",
+            path.display(),
+            content
+        )
+    }
+
     /// Build a re-announcement of MCP servers and tools after compaction.
     fn build_post_compact_mcp_announcement(mgr: &crate::mcp::Manager) -> String {
         let servers = mgr.list_servers();
@@ -2973,36 +3041,63 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         sb.trim_end().to_string()
     }
 
-    /// Build a re-announcement of active background sub-agents after compaction.
+    /// Build a re-announcement of active and completed-but-unretrieved background
+    /// sub-agents after compaction. Matches upstream's createAsyncAgentAttachmentsIfNeeded
+    /// which includes all agents with retrieved==false (running + completed but not yet collected).
     fn build_post_compact_agent_announcement(
         store: &crate::tools::agent_store::SharedAgentTaskStore,
     ) -> String {
         let tasks = store.list();
-        let active: Vec<_> = tasks
-            .iter()
-            .filter(|t| {
-                let status = t.status();
-                status == crate::tools::agent_store::AgentTaskStatus::Running
-                    || status == crate::tools::agent_store::AgentTaskStatus::Pending
-            })
-            .collect();
+        let mut active: Vec<_> = Vec::new();
+        let mut completed_unretrieved: Vec<_> = Vec::new();
 
-        if active.is_empty() {
+        for t in &tasks {
+            let status = t.status();
+            if status == crate::tools::agent_store::AgentTaskStatus::Running
+                || status == crate::tools::agent_store::AgentTaskStatus::Pending
+            {
+                active.push(t.clone());
+            } else if status == crate::tools::agent_store::AgentTaskStatus::Completed
+                && !t.notified()
+            {
+                // Completed but results not yet retrieved by the user/main agent.
+                // Include these to prevent the model from re-spawning the same task.
+                completed_unretrieved.push(t.clone());
+            }
+        }
+
+        if active.is_empty() && completed_unretrieved.is_empty() {
             return String::new();
         }
 
-        let mut sb = String::from(
-            "## Background Agents After Compaction\n\n\
-             The following sub-agents are running. Do NOT spawn duplicates for the same task.\n\n",
-        );
+        let mut sb = String::from("## Background Agents After Compaction\n\n");
 
-        for t in &active {
-            sb.push_str(&format!(
-                "- agentId: {}, status: {}, description: {}\n",
-                t.id,
-                t.status(),
-                t.description
-            ));
+        if !active.is_empty() {
+            sb.push_str("The following sub-agents are running. Do NOT spawn duplicates for the same task.\n\n");
+            for t in &active {
+                sb.push_str(&format!(
+                    "- agentId: {}, status: {}, description: {}\n",
+                    t.id,
+                    t.status(),
+                    t.description
+                ));
+            }
+        }
+
+        if !completed_unretrieved.is_empty() {
+            sb.push_str("\nThe following sub-agents completed but results have not been retrieved. Check their output before spawning duplicates.\n\n");
+            for t in &completed_unretrieved {
+                let output_info = t.output_file();
+                let output_suffix = if !output_info.is_empty() {
+                    format!(", output: {}", output_info)
+                } else {
+                    String::new()
+                };
+                sb.push_str(&format!(
+                    "- agentId: {}, status: completed, description: {}{}\n",
+                    t.id, t.description, output_suffix
+                ));
+            }
         }
 
         sb.trim_end().to_string()

@@ -1,7 +1,8 @@
 //! SkillTracker - tracks which skills have been shown/read/used across agent turns
 
 use crate::skills::SkillInfo;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 /// Tracks skill visibility and usage across agent loop turns.
 /// Derives Clone so it can be shared via Arc<RwLock<SkillTracker>>.
@@ -9,8 +10,8 @@ use std::collections::HashSet;
 pub struct SkillTracker {
     /// Skills already announced in system prompt
     shown_skills: HashSet<String>,
-    /// Skills the model has read via read_skill tool
-    read_skills: HashSet<String>,
+    /// Skills the model has read via read_skill tool, with timestamp
+    read_skills: HashMap<String, Instant>,
     /// Skills the model has actively used after reading
     used_skills: HashSet<String>,
 }
@@ -30,9 +31,10 @@ impl SkillTracker {
         self.shown_skills.insert(name.to_string());
     }
 
-    /// Mark a skill as read by the model (read_skill tool called)
+    /// Mark a skill as read by the model (read_skill tool called).
+    /// Records the current timestamp for time-based ordering during post-compact recovery.
     pub fn mark_read(&mut self, name: &str) {
-        self.read_skills.insert(name.to_string());
+        self.read_skills.insert(name.to_string(), Instant::now());
     }
 
     /// Mark a skill as used (model performed actions after reading it)
@@ -42,7 +44,7 @@ impl SkillTracker {
 
     /// Check if a specific skill was read
     pub fn was_read(&self, name: &str) -> bool {
-        self.read_skills.contains(name)
+        self.read_skills.contains_key(name)
     }
 
     /// Check if a specific skill was used
@@ -92,9 +94,12 @@ impl SkillTracker {
         self.used_skills.len()
     }
 
-    /// Get names of skills that have been read, for post-compact recovery
+    /// Get names of skills that have been read, sorted by read time descending
+    /// (most recently read first). Matches upstream's invokedAt-based ordering.
     pub fn get_read_skill_names(&self) -> Vec<String> {
-        self.read_skills.iter().cloned().collect()
+        let mut entries: Vec<_> = self.read_skills.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1)); // most recent first
+        entries.into_iter().map(|(name, _)| name.clone()).collect()
     }
 }
 
@@ -189,5 +194,23 @@ mod tests {
         assert!(!tracker.is_new_skill(skill));
         assert!(tracker.was_read(skill));
         assert!(tracker.was_used(skill));
+    }
+
+    #[test]
+    fn test_read_skill_names_sorted_by_time() {
+        let mut tracker = SkillTracker::new();
+        tracker.mark_read("first");
+        // Small delay to ensure different timestamps
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        tracker.mark_read("second");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        tracker.mark_read("third");
+
+        let names = tracker.get_read_skill_names();
+        assert_eq!(names.len(), 3);
+        // Most recently read should be first
+        assert_eq!(names[0], "third");
+        assert_eq!(names[1], "second");
+        assert_eq!(names[2], "first");
     }
 }
