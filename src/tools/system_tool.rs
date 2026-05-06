@@ -31,7 +31,7 @@ impl Tool for SystemTool {
     }
 
     fn description(&self) -> &str {
-        "Get system information. Supports uname, df (disk), free (memory), top (processes), uptime, who, w, hostname, and arch. On Windows, uses PowerShell cmdlets."
+        "Get system information. Supports info (full overview), uname, df (disk), free (memory), top (processes), uptime, who (logged-in users), w, hostname, and arch. On Windows, uses PowerShell cmdlets."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -40,8 +40,8 @@ impl Tool for SystemTool {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "description": "System operation: uname, df, free, top, uptime, who, w, hostname, arch",
-                    "enum": ["uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"]
+                    "description": "System operation: info (full overview), uname, df, free, top, uptime, who, w, hostname, arch",
+                    "enum": ["info", "uname", "df", "free", "top", "uptime", "who", "w", "hostname", "arch"]
                 },
                 "flags": {
                     "type": "string",
@@ -69,6 +69,7 @@ impl Tool for SystemTool {
         #[cfg(target_os = "windows")]
         {
             match operation {
+                "info" => self.windows_info(),
                 "uname" => self.windows_uname(),
                 "df" => self.windows_df(),
                 "free" => self.windows_free(),
@@ -85,6 +86,7 @@ impl Tool for SystemTool {
         #[cfg(not(target_os = "windows"))]
         {
             match operation {
+                "info" => self.unix_info(),
                 "uname" => self.unix_uname(params),
                 "df" => self.unix_df(params),
                 "free" => self.unix_free(),
@@ -102,9 +104,35 @@ impl Tool for SystemTool {
 
 impl SystemTool {
     #[cfg(target_os = "windows")]
+    fn windows_info(&self) -> ToolResult {
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "$os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-CimInstance Win32_Processor; $mem = [math]::Round($os.TotalVisibleMemorySize/1MB,2); $free = [math]::Round($os.FreePhysicalMemory/1MB,2); $used = [math]::Round($mem - $free,2); $bootTime = $os.LastBootUpTime; $now = Get-Date; $diff = New-TimeSpan -Start $bootTime -End $now; $d = [math]::Floor($diff.TotalDays); $h = $diff.Hours; $m = $diff.Minutes; $uptimeStr = if ($d -gt 0) { '{0} days, {1}:{2}' -f $d, $h.ToString('00'), $m.ToString('00') } else { '{0}:{1}' -f $h.ToString('00'), $m.ToString('00') }; Write-Output \"OS:       $($os.Caption) $($os.Version)\"; Write-Output \"Host:     $env:COMPUTERNAME\"; Write-Output \"Arch:     $($cpu.Name)\"; Write-Output \"CPU:      $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads\"; Write-Output \"Memory:   $used GB used / $mem GB total ($free GB free)\"; Write-Output \"Uptime:   $uptimeStr\""])
+            .output();
+        match output {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if o.status.success() {
+                    ToolResult::ok(stdout.trim().to_string())
+                } else {
+                    let out = if !stderr.trim().is_empty() {
+                        format!("{}\n{}", stdout.trim(), stderr.trim())
+                    } else {
+                        stdout.trim().to_string()
+                    };
+                    ToolResult::error(out)
+                }
+            }
+            Err(e) => ToolResult::error(format!("Error: {}", e)),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     fn windows_uname(&self) -> ToolResult {
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $h = $env:COMPUTERNAME; $os = (Get-CimInstance Win32_OperatingSystem).Caption; $v = (Get-CimInstance Win32_OperatingSystem).Version; Write-Output \"Windows $h $os $v\""])
+            .args(["-NoProfile", "-Command",
+                "$h = $env:COMPUTERNAME; $os = ((Get-CimInstance Win32_OperatingSystem).Caption) -replace 'Microsoft ', ''; $v = (Get-CimInstance Win32_OperatingSystem).Version; $cpu = (Get-CimInstance Win32_Processor)[0].Name; Write-Output \"Windows $h $os $v $cpu\""])
             .output();
 
         match output {
@@ -229,13 +257,22 @@ impl SystemTool {
 
     #[cfg(target_os = "windows")]
     fn windows_who(&self) -> ToolResult {
-        let output = Command::new("whoami").output();
+        // Try to get logged-in users via Win32_ComputerSystem (current interactive user)
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                r#"$user = (Get-CimInstance Win32_ComputerSystem).UserName; if ($user) { "$user  pts/0  $(Get-Date -Format 'yyyy-MM-dd HH:mm')" } else { "No users logged in." }"#])
+            .output();
         match output {
             Ok(o) => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                ToolResult::ok(stdout.trim().to_string())
+                let out = stdout.trim().to_string();
+                if !out.is_empty() && !out.contains("Error") {
+                    ToolResult::ok(out)
+                } else {
+                    ToolResult::ok("No users logged in.".to_string())
+                }
             }
-            Err(e) => ToolResult::error(format!("Error: {}", e)),
+            Err(e) => ToolResult::ok("No users logged in.".to_string()),
         }
     }
 
@@ -296,6 +333,51 @@ impl SystemTool {
                 }
             }
             Err(_) => ToolResult::ok(std::env::consts::ARCH.to_string()),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn unix_info(&self) -> ToolResult {
+        // Collect system info from various Unix commands
+        let mut parts = Vec::new();
+
+        // uname -a
+        if let Ok(o) = Command::new("uname").args(["-a"]).output() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !s.is_empty() {
+                parts.push(format!("OS:       {}", s));
+            }
+        }
+
+        // nproc (CPU cores)
+        if let Ok(o) = Command::new("nproc").output() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !s.is_empty() {
+                parts.push(format!("CPU:      {} cores", s));
+            }
+        }
+
+        // free -h (memory)
+        if let Ok(o) = Command::new("free").args(["-h"]).output() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let lines: Vec<&str> = s.lines().collect();
+            if lines.len() >= 2 {
+                parts.push(format!("Memory:   {}", lines[1].trim()));
+            }
+        }
+
+        // uptime
+        if let Ok(o) = Command::new("uptime").output() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !s.is_empty() {
+                parts.push(format!("Uptime:   {}", s));
+            }
+        }
+
+        if parts.is_empty() {
+            ToolResult::error("Unable to gather system information".to_string())
+        } else {
+            ToolResult::ok(parts.join("\n"))
         }
     }
 
