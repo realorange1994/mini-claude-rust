@@ -709,8 +709,9 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
 Your summary should include the following sections:
 
 1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
+2. **Target Paths**: Any file paths, directory paths, or URLs that are the subject of work. Include the FULL absolute path, not just filenames. Example: "Modifying E:\\Git\\miniClaudeCode-rust\\src\\compact.rs"
+3. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
+4. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
 4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
 6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
@@ -731,12 +732,16 @@ Here's an example of how your output should be structured:
 1. Primary Request and Intent:
    [Detailed description]
 
-2. Key Technical Concepts:
+2. Target Paths:
+   - [Full absolute path 1 - description of what's being done]
+   - [Full absolute path 2 - description]
+
+3. Key Technical Concepts:
    - [Concept 1]
    - [Concept 2]
    - [...]
 
-3. Files and Code Sections:
+4. Files and Code Sections:
    - [File Name 1]
       - [Summary of why this file is important]
       - [Summary of the changes made to this file, if any]
@@ -745,33 +750,33 @@ Here's an example of how your output should be structured:
       - [Important Code Snippet]
    - [...]
 
-4. Errors and fixes:
+5. Errors and fixes:
     - [Detailed description of error 1]:
       - [How you fixed the error]
       - [User feedback on the error if any]
     - [...]
 
-5. Problem Solving:
+6. Problem Solving:
    [Description of solved problems and ongoing troubleshooting]
 
-6. All user messages:
+7. All user messages:
     - [Detailed non tool use user message]
     - [...]
 
-7. Completed Tasks:
+8. Completed Tasks:
    - [Task 1 completed]: [Brief description of what was done and result]
    - [Task 2 completed]: [Brief description of what was done and result]
    - [...]
 
-8. Pending Tasks:
+9. Pending Tasks:
    - [Task 1]
    - [Task 2]
    - [...]
 
-9. Current Work:
+10. Current Work:
    [Precise description of current work]
 
-10. Optional Next Step:
+11. Optional Next Step:
    [Optional Next step to take]
 
 </summary>
@@ -966,6 +971,10 @@ const COMPACT_USER_PROMPT_ITERATIVE: &str = r#"Below is the previous summary fol
 - Removing information that is no longer relevant
 - Preserving all user messages (add new ones, keep existing ones)
 - Preserving code snippets, function signatures, and file edits from the previous summary (do NOT summarize them away -- keep them verbatim)
+- CRITICAL: Preserve all Target Paths from the previous summary with their FULL absolute paths. Never abbreviate or drop file paths.
+- CRITICAL: Preserve the Primary Request and Intent section completely. Do not summarize it further or lose any detail.
+- If the previous summary has a Target Paths section, keep it and update it with any new paths or completed paths.
+- When the previous summary is already condensed, do NOT further compress it. Keep all existing detail and only merge new messages.
 
 Previous Summary:
 {previous_summary}
@@ -1283,13 +1292,24 @@ async fn do_compact_llm_call(
         .filter_map(|msg| message_to_api(msg))
         .collect();
 
+    // Generate structured metadata from the pruned messages and inject it into
+    // the compact prompt. This ensures the LLM sees an explicit inventory of
+    // files, tool calls, and user messages even when it can't fully parse
+    // the entire conversation history due to token limits.
+    let structured_meta = entries_to_summary_text(&pruned_messages);
+    let meta_prefix = if !structured_meta.is_empty() {
+        format!("## Structured context from {} conversation messages:\n{}\n\n", pruned_messages.len(), structured_meta)
+    } else {
+        String::new()
+    };
+
     // Choose prompt based on whether we have a previous summary
     // All prompts are wrapped with NO_TOOLS_PREAMBLE + NO_TOOLS_TRAILER
     // to prevent the model from wasting a turn on tool calls.
     let user_prompt = if let Some(summary) = last_summary {
-        format!("{}{}{}", NO_TOOLS_PREAMBLE, COMPACT_USER_PROMPT_ITERATIVE.replace("{previous_summary}", summary), NO_TOOLS_TRAILER)
+        format!("{}{}\n{}\n{}", NO_TOOLS_PREAMBLE, meta_prefix, COMPACT_USER_PROMPT_ITERATIVE.replace("{previous_summary}", summary), NO_TOOLS_TRAILER)
     } else {
-        format!("{}{}{}", NO_TOOLS_PREAMBLE, BASE_COMPACT_PROMPT, NO_TOOLS_TRAILER)
+        format!("{}{}\n{}\n{}", NO_TOOLS_PREAMBLE, meta_prefix, BASE_COMPACT_PROMPT, NO_TOOLS_TRAILER)
     };
 
     // Build the payload
@@ -1525,10 +1545,18 @@ pub fn try_sm_compact(
     // Format the session memory as a summary message
     // Match upstream's getCompactUserSummaryMessage: add transcript path
     // for detail recovery and recentMessagesPreserved notice.
+    // Also inject structured metadata (file paths, tool calls) from the
+    // messages being compacted so the agent doesn't lose target paths.
+    let structured_meta = entries_to_summary_text(&messages);
+    let meta_section = if !structured_meta.is_empty() {
+        format!("\n\n## Structured context from compacted messages:\n{}", structured_meta)
+    } else {
+        String::new()
+    };
     let summary_content = format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n\
-         [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}",
-        tokens_before, mem_content
+         [Previous conversation summary ({} tokens compressed, SM-compact)]\n\n{}{}",
+        tokens_before, mem_content, meta_section
     );
     let summary_content = if let Some(tp) = transcript_path {
         format!("{}\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: {}", summary_content, tp)
@@ -1545,9 +1573,11 @@ pub fn try_sm_compact(
     // 4 was too small: a single tool_use + tool_result = 2 messages, so 4 only
     // preserved 2 recent tool pairs. After SM-compact the model would forget the
     // tool results from just 2 turns back, causing re-execution.
-    // 8 gives 4 tool pairs (~2 turns of back-and-forth) which matches upstream's
+    // 8 gave 4 tool pairs (~2 turns of back-and-forth) which matched upstream's
     // keepLast default in SmartCompact.
-    const TAIL_SIZE: usize = 8;
+    // 12 gives 6 tool pairs (~3 turns) — better context retention after compaction
+    // without excessive token usage.
+    const TAIL_SIZE: usize = 12;
     let tail_start = messages.len().saturating_sub(TAIL_SIZE);
     let mut tail: Vec<Message> = messages[tail_start..].to_vec();
 
@@ -2092,8 +2122,9 @@ impl Compactor {
                     // pattern used by hermes and the Go version.
                     // Keep the last few messages as "tail" to maintain context
                     // continuity after compaction.
-                    // 4 was too small (only ~2 tool pairs); use 8 like SM-compact.
-                    const TAIL_SIZE: usize = 8;
+                    // 4 was too small (only ~2 tool pairs); 8 was OK but still
+                    // caused context loss. Use 12 for ~3 turns of back-and-forth.
+                    const TAIL_SIZE: usize = 12;
                     let tail_start = messages.len().saturating_sub(TAIL_SIZE);
                     let mut tail: Vec<Message> = messages[tail_start..].to_vec();
 
