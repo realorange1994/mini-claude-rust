@@ -1562,28 +1562,30 @@ impl AgentLoop {
                         // This happens when the model uses extended thinking but hasn't produced text yet.
                         // Continue the loop to let the model produce more output.
                         consecutive_empty_responses += 1;
-                        if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
-                            agent_emit!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
-                            return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
-                        }
                         // When budget is exhausted but text is empty, grant a grace call
-                        // so the model gets one more chance to produce a final answer
+                        // so the model gets one more chance to produce a final answer.
                         if !budget.consume() {
                             if budget.grace_call() {
                                 agent_emit!("\n[!] Budget exhausted, granting grace call for final answer...");
                             } else {
-                                agent_emit!("[!] No text/tool_use in response (attempt {}/{}), giving up...",
+                                // Grace call exhausted and still empty -- give up.
+                                // Matching Go's agent_loop.go: give up after MAX_EMPTY_RESPONSES.
+                                if consecutive_empty_responses >= MAX_EMPTY_RESPONSES {
+                                    agent_emit!("[!] No actionable response after {} attempts, giving up", MAX_EMPTY_RESPONSES);
+                                    return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
+                                }
+                                // Still within retry budget -- continue with hint injection
+                                agent_emit!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
                                     consecutive_empty_responses, MAX_EMPTY_RESPONSES);
-                                return Err(anyhow!("Model returned no actionable response {} times in a row", MAX_EMPTY_RESPONSES));
                             }
                         }
-                        agent_emit!("[!] No text/tool_use in response (attempt {}/{}), continuing...",
-                            consecutive_empty_responses, MAX_EMPTY_RESPONSES);
-                        // Inject hint to encourage actual output
-                        let mut ctx = self.context.write().await;
-                        ctx.add_user_message(
-                            "Please continue and provide your response in text or use a tool.".to_string(),
-                        );
+                        if consecutive_empty_responses < MAX_EMPTY_RESPONSES {
+                            // Inject hint to encourage actual output (only when still retrying)
+                            let mut ctx = self.context.write().await;
+                            ctx.add_user_message(
+                                "Please continue and provide your response in text or use a tool.".to_string(),
+                            );
+                        }
                     }
                 }
                 Err(e) => {
