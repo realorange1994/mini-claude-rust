@@ -1452,6 +1452,18 @@ async fn do_compact_llm_call(
         "thinking".to_string(),
         serde_json::json!({"type": "disabled"}),
     );
+    // Add context_management to clear tool results and thinking blocks
+    // server-side during compaction. This preserves prompt cache (cache_edits)
+    // by only removing cleared content, not invalidating the entire cache.
+    // Strategies: clear_tool_uses_20250919 (clears tool_use blocks after summary),
+    // clear_thinking_20251015 (clears thinking blocks after summary).
+    payload.insert(
+        "context_management".to_string(),
+        serde_json::json!({
+            "clear_tool_uses": {"strategy": "all"},
+            "clear_thinking": {"strategy": "all"},
+        }),
+    );
 
     // Append the summary prompt as the final user message after the conversation history
     let mut all_messages = api_messages;
