@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub use crate::permissions::PermissionMode;
+pub use crate::permissions::RuleStore;
 pub use crate::tools::Registry;
 pub use crate::mcp::Manager as McpManager;
 pub use crate::skills::Loader as SkillLoader;
@@ -66,6 +67,8 @@ pub struct Config {
     pub max_output_tokens: i64,
     // Escalated max_tokens when the default cap is hit (default 64000, matching Claude's ESCALATED_MAX_TOKENS)
     pub escalated_max_output_tokens: i64,
+    // Rule store loaded from settings.json
+    pub rule_store: Option<Arc<RuleStore>>,
 }
 
 impl Default for Config {
@@ -145,6 +148,7 @@ impl Default for Config {
             should_avoid_permission_prompts: false,
             max_output_tokens: 16384,
             escalated_max_output_tokens: 64000,
+            rule_store: None,
         }
     }
 }
@@ -317,6 +321,12 @@ pub fn load_config_from_file(project_dir: &Path) -> Option<Config> {
                 }
             }
         }
+    }
+
+    // Load permission rules from settings files (project + home)
+    {
+        let store = crate::permissions::load_rules_from_all_sources(project_dir);
+        cfg.rule_store = Some(Arc::new(*store));
     }
 
     // Start MCP servers after all loading is done

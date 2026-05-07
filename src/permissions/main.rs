@@ -1,6 +1,10 @@
 use crate::auto_classifier::{AutoModeClassifier, is_auto_allowlisted};
 use crate::context::ConversationContext;
 use crate::tools::{ToolResult, ApprovalRequirement, ToolPermissionResult, PermissionBehavior};
+use super::rule_store::RuleStore;
+use super::path_validation::{validate_path, OperationType, PathValidationResult};
+use super::auto_strip::is_dangerous_allow_rule;
+use super::rule_parser::ParsedRule;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -151,6 +155,12 @@ pub struct PermissionGate {
     transcript_src: Option<Arc<tokio::sync::RwLock<ConversationContext>>>,
     denial_count: AtomicUsize,
     recently_approved: std::sync::Mutex<Vec<ApprovedAction>>,
+    /// Rule store for permission rules loaded from settings
+    rule_store: Option<Arc<RuleStore>>,
+    /// Project directory for path validation
+    project_dir: Option<String>,
+    /// Stripped dangerous rules (for auto mode restoration)
+    stripped_rules: std::sync::Mutex<Option<Vec<(String, Vec<ParsedRule>)>>>,
 }
 
 impl PermissionGate {
@@ -161,7 +171,16 @@ impl PermissionGate {
             transcript_src: None,
             denial_count: AtomicUsize::new(0),
             recently_approved: std::sync::Mutex::new(Vec::new()),
+            rule_store: None,
+            project_dir: None,
+            stripped_rules: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Set the rule store and project directory for permission rule checks.
+    pub fn with_rule_store(&mut self, store: Arc<RuleStore>, project_dir: String) {
+        self.rule_store = Some(store);
+        self.project_dir = Some(project_dir);
     }
 
     /// Set the auto mode classifier.
@@ -302,21 +321,109 @@ impl PermissionGate {
     /// Check if a tool should be allowed to execute
     /// Returns Some(ToolResult) if blocked, None if allowed
     pub fn check(&self, tool: &dyn crate::tools::Tool, params: std::collections::HashMap<String, serde_json::Value>) -> Option<ToolResult> {
-        // Step 1a: deny rule (handled in check_denied_patterns below)
+        // Step 0: Auto mode — strip dangerous allow rules on entry
+        let auto_mode_stripped = self.try_strip_dangerous_rules();
 
-        // Step 1b: ask rule (handled in mode-specific logic below)
+        // Helper: restore stripped rules on early exit
+        let restore_stripped = || {
+            if auto_mode_stripped {
+                self.restore_stripped_rules();
+            }
+        };
 
-        // Step 1c/1d/1e/1f/1g: tool-level self-check returns PermissionResult
+        let tool_name = tool.name();
+        let upstream_name = super::upstream_to_internal(tool_name);
+        let content = self.extract_rule_content(tool_name, &params);
+        let path_param = self.extract_path_param(tool_name, &params);
+
+        // STEP 1a: Tool-level deny rule (bypass-immune)
+        if let Some(rule) = self.find_tool_level_deny(&upstream_name) {
+            restore_stripped();
+            return Some(ToolResult::error(format!("Permission denied by rule: {}", rule)));
+        }
+
+        // STEP 1b: Content-specific deny rule (bypass-immune)
+        if !content.is_empty() {
+            if let Some(rule) = self.find_content_deny(&upstream_name, &content) {
+                restore_stripped();
+                return Some(ToolResult::error(format!("Permission denied by rule: {}", rule)));
+            }
+        }
+
+        // STEP 1c: File path validation for write/read/fileops tools
+        if !path_param.is_empty() {
+            let op_type = if self.is_write_tool(tool_name) {
+                OperationType::Write
+            } else {
+                OperationType::Read
+            };
+            if let Some(v_result) = self.validate_path_for_tool(&path_param, op_type) {
+                if !v_result.allowed {
+                    restore_stripped();
+                    if v_result.reason == "safetyCheck" || v_result.reason == "rule" {
+                        if self.should_avoid_prompts() {
+                            return Some(ToolResult::error(format!(
+                                "Permission denied: {} (interactive prompts disabled for sub-agent)",
+                                v_result.message
+                            )));
+                        }
+                        if !self.ask_user(tool_name, &params, Some(&v_result.message)) {
+                            return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                        }
+                    } else {
+                        return Some(ToolResult::error(format!("Permission denied: {}", v_result.message)));
+                    }
+                }
+            }
+        }
+
+        // STEP 1d: Tool-level ask rule (bypass-immune)
+        if let Some(rule) = self.find_tool_level_ask(&upstream_name) {
+            restore_stripped();
+            if self.should_avoid_prompts() {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: {} requires confirmation (interactive prompts disabled for sub-agent)",
+                    rule
+                )));
+            }
+            let msg = format!("Tool requires confirmation by rule: {}", rule);
+            if !self.ask_user(tool_name, &params, Some(&msg)) {
+                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+            }
+            return None;
+        }
+
+        // STEP 1e: Content-specific ask rule (bypass-immune)
+        if !content.is_empty() {
+            if let Some(rule) = self.find_content_ask(&upstream_name, &content) {
+                restore_stripped();
+                if self.should_avoid_prompts() {
+                    return Some(ToolResult::error(format!(
+                        "Permission denied: {} requires confirmation (interactive prompts disabled for sub-agent)",
+                        rule
+                    )));
+                }
+                let msg = format!("Tool requires confirmation by rule: {}", rule);
+                if !self.ask_user(tool_name, &params, Some(&msg)) {
+                    return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                }
+                return None;
+            }
+        }
+
+        // Step 2: tool-level self-check returns PermissionResult
         let result = tool.check_permissions(&params);
 
-        // Step 1d: deny is always bypass-immune
+        // Step 2d: deny is always bypass-immune
         if result.behavior == PermissionBehavior::Deny {
+            restore_stripped();
             return Some(ToolResult::error(format!("Permission denied: {}", result.message)));
         }
 
-        // Step 1g: ask from safetyCheck is bypass-immune
-        // Step 1e/1f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
+        // Step 2e: ask from safetyCheck is bypass-immune
+        // Step 2f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
         if result.behavior == PermissionBehavior::Ask {
+            restore_stripped();
             if self.should_avoid_prompts() {
                 return Some(ToolResult::error(format!(
                     "Permission denied: {} (interactive prompts disabled for sub-agent)", result.message
@@ -330,6 +437,7 @@ impl PermissionGate {
 
         // Layer 1.5: Denied patterns check (hard denial)
         if let Some(denial) = self.check_denied_patterns(tool.name(), &params) {
+            restore_stripped();
             return Some(ToolResult::error(denial));
         }
 
@@ -370,6 +478,7 @@ impl PermissionGate {
         // Step 2a: bypass mode — allow all (only reached if 1d-1g didn't return)
         match *self.config.permission_mode.lock().unwrap() {
             PermissionMode::Bypass => {
+                restore_stripped();
                 // Bypass mode: allow all tools directly.
                 // Layer 1 deny/ask (bypass-immune) already handled above.
                 // This aligns with upstream's bypassPermissions behavior (step 2a).
@@ -377,6 +486,7 @@ impl PermissionGate {
             }
             PermissionMode::Auto => {
                 // Use auto mode classifier (if available) or fall back to allow-all
+                restore_stripped();
                 self.check_auto_mode(tool, &params)
             }
             PermissionMode::Plan => {
@@ -386,11 +496,13 @@ impl PermissionGate {
                     "exec", "write_file", "edit_file", "multi_edit", "fileops",
                 ];
                 if write_tools.contains(&tool.name()) {
+                    restore_stripped();
                     return Some(ToolResult::error(format!(
                         "Permission denied: '{}' is blocked in PLAN mode (read-only).",
                         tool.name()
                     )));
                 }
+                restore_stripped();
                 None
             }
             PermissionMode::Ask => {
@@ -398,13 +510,16 @@ impl PermissionGate {
                 match tool.approval_requirement() {
                     ApprovalRequirement::Auto => {
                         // Auto-approved tools pass through
+                        restore_stripped();
                         return None;
                     }
                     ApprovalRequirement::Required => {
                         // Always prompt user for approval
                         if !self.ask_user(tool.name(), &params, None) {
+                            restore_stripped();
                             return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
                         }
+                        restore_stripped();
                         return None;
                     }
                     ApprovalRequirement::Classifier => {
@@ -412,13 +527,16 @@ impl PermissionGate {
                         if tool.name() == "exec" {
                             if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
                                 if self.is_safe_command(cmd) {
+                                    restore_stripped();
                                     return None;
                                 }
                             }
                         }
                         if !self.ask_user(tool.name(), &params, None) {
+                            restore_stripped();
                             return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
                         }
+                        restore_stripped();
                         return None;
                     }
                 }
@@ -620,7 +738,124 @@ impl Clone for PermissionGate {
             transcript_src: self.transcript_src.clone(),
             denial_count: AtomicUsize::new(self.denial_count.load(Ordering::SeqCst)),
             recently_approved: std::sync::Mutex::new(Vec::new()), // Don't clone pending approvals
+            rule_store: None,
+            project_dir: None,
+            stripped_rules: std::sync::Mutex::new(None),
         }
+    }
+}
+
+// ─── Rule checking helpers ─────────────────────────────────────────────────────
+
+impl PermissionGate {
+    /// Try to strip dangerous allow rules in auto mode
+    fn try_strip_dangerous_rules(&self) -> bool {
+        let mode = *self.config.permission_mode.lock().unwrap();
+        if mode != PermissionMode::Auto {
+            return false;
+        }
+        if self.should_avoid_prompts() {
+            return false;
+        }
+        if self.rule_store.is_none() {
+            return false;
+        }
+
+        let mut guard = self.stripped_rules.lock().unwrap();
+        if guard.is_some() {
+            return false; // Already stripped
+        }
+
+        if let Some(ref store) = self.rule_store {
+            let stash = store.strip_dangerous_allow_rules();
+            if !stash.is_empty() {
+                *guard = Some(stash);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Restore stripped dangerous rules
+    fn restore_stripped_rules(&self) {
+        if let Ok(mut guard) = self.stripped_rules.lock() {
+            if let Some(stash) = guard.take() {
+                if let Some(ref store) = self.rule_store {
+                    store.restore_stripped_rules(stash);
+                }
+            }
+        }
+    }
+
+    fn find_tool_level_deny(&self, upstream_name: &str) -> Option<String> {
+        let store = self.rule_store.as_ref()?;
+        if store.has_deny_rule(upstream_name) {
+            for rule in store.get_rules_for_tool(upstream_name) {
+                if rule.behavior == "deny" && rule.is_tool_level() {
+                    return Some(rule.to_string());
+                }
+            }
+            return Some(upstream_name.to_string()); // Tool-level deny
+        }
+        None
+    }
+
+    fn find_content_deny(&self, upstream_name: &str, content: &str) -> Option<String> {
+        let store = self.rule_store.as_ref()?;
+        store
+            .find_content_rule(upstream_name, content, "deny")
+            .map(|r| r.to_string())
+    }
+
+    fn find_tool_level_ask(&self, upstream_name: &str) -> Option<String> {
+        let store = self.rule_store.as_ref()?;
+        if store.has_ask_rule(upstream_name) {
+            for rule in store.get_rules_for_tool(upstream_name) {
+                if rule.behavior == "ask" && rule.is_tool_level() {
+                    return Some(rule.to_string());
+                }
+            }
+            return Some(upstream_name.to_string());
+        }
+        None
+    }
+
+    fn find_content_ask(&self, upstream_name: &str, content: &str) -> Option<String> {
+        let store = self.rule_store.as_ref()?;
+        store
+            .find_content_rule(upstream_name, content, "ask")
+            .map(|r| r.to_string())
+    }
+
+    fn extract_rule_content(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> String {
+        match tool_name {
+            "exec" => params.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "write_file" | "edit_file" | "multi_edit" => params.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "read_file" => params.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "fileops" => params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            "git" => params.get("args").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn extract_path_param(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> String {
+        match tool_name {
+            "write_file" | "edit_file" | "multi_edit" | "read_file" => {
+                params.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+            }
+            "fileops" => params.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn is_write_tool(&self, tool_name: &str) -> bool {
+        matches!(tool_name, "write_file" | "edit_file" | "multi_edit" | "fileops")
+    }
+
+    fn validate_path_for_tool(&self, path: &str, op_type: OperationType) -> Option<PathValidationResult> {
+        let store = self.rule_store.as_ref().map(|s| s.as_ref());
+        let cwd = self.project_dir.as_deref().unwrap_or("");
+        Some(validate_path(path, op_type, store, cwd))
     }
 }
 
