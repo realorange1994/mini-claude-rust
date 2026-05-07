@@ -23,6 +23,8 @@ pub struct ToolPermissionResult {
     pub message: String,
     /// Reason category: "safetyCheck", "tool", "rule", or empty.
     pub decision_reason: &'static str,
+    /// True if auto-mode classifier may approve this ask; false if must always prompt.
+    pub classifier_approvable: bool,
 }
 
 impl ToolPermissionResult {
@@ -31,6 +33,7 @@ impl ToolPermissionResult {
             behavior: PermissionBehavior::Allow,
             message: String::new(),
             decision_reason: "",
+            classifier_approvable: true,
         }
     }
 
@@ -39,6 +42,7 @@ impl ToolPermissionResult {
             behavior: PermissionBehavior::Deny,
             message: msg.to_string(),
             decision_reason: "tool",
+            classifier_approvable: true,
         }
     }
 
@@ -47,6 +51,16 @@ impl ToolPermissionResult {
             behavior: PermissionBehavior::Ask,
             message: msg.to_string(),
             decision_reason: reason,
+            classifier_approvable: true,
+        }
+    }
+
+    pub fn ask_not_classifiable(msg: &str, reason: &'static str) -> Self {
+        Self {
+            behavior: PermissionBehavior::Ask,
+            message: msg.to_string(),
+            decision_reason: reason,
+            classifier_approvable: false,
         }
     }
 
@@ -55,6 +69,7 @@ impl ToolPermissionResult {
             behavior: PermissionBehavior::Passthrough,
             message: String::new(),
             decision_reason: "",
+            classifier_approvable: true,
         }
     }
 
@@ -140,6 +155,10 @@ pub fn is_dangerous_file_path(path: &str) -> Option<String> {
 /// Detect suspicious Windows path patterns.
 /// Returns Some(message) if suspicious, None if safe.
 pub fn has_suspicious_windows_path_pattern(path: &str) -> Option<String> {
+    // NTFS Alternate Data Streams: colon after position 2 (e.g., file.txt:Zone.Identifier)
+    if path.len() > 2 && path[2..].contains(':') {
+        return Some("path contains NTFS Alternate Data Stream syntax".to_string());
+    }
     // 8.3 short names (GIT~1, CLAUDE~1)
     if path.contains('~') {
         let re = regex::Regex::new(r"~\d").unwrap();
@@ -189,15 +208,23 @@ pub fn has_suspicious_windows_path_pattern(path: &str) -> Option<String> {
 /// Check if a file path is safe for auto-editing.
 /// Returns ToolPermissionResult: passthrough if safe, ask with safetyCheck if unsafe.
 pub fn check_path_safety_for_auto_edit(path: &str) -> ToolPermissionResult {
-    // Check suspicious Windows path patterns
+    // Check suspicious Windows path patterns (NOT classifier-approvable)
     if has_suspicious_windows_path_pattern(path).is_some() {
-        return ToolPermissionResult::ask(
+        return ToolPermissionResult::ask_not_classifiable(
             &format!("Claude requested permissions to write to {}, which contains a suspicious Windows path pattern that requires manual approval.", path),
             "safetyCheck",
         );
     }
 
-    // Check dangerous files/directories
+    // Check Claude config files (classifier-approvable)
+    if is_claude_config_path(path) {
+        return ToolPermissionResult::ask(
+            &format!("Claude requested permissions to edit {}, which is a Claude configuration file that requires manual approval.", path),
+            "safetyCheck",
+        );
+    }
+
+    // Check dangerous files/directories (classifier-approvable)
     if let Some(msg) = is_dangerous_file_path(path) {
         return ToolPermissionResult::ask(
             &format!("Claude requested permissions to edit {} which is a sensitive file: {}", path, msg),
@@ -206,4 +233,20 @@ pub fn check_path_safety_for_auto_edit(path: &str) -> ToolPermissionResult {
     }
 
     ToolPermissionResult::passthrough()
+}
+
+/// Check if a path is a Claude Code configuration file or directory
+/// that should be auto-edit blocked but classifier-approvable.
+fn is_claude_config_path(path: &str) -> bool {
+    let p = path.to_lowercase().replace('\\', "/");
+    let config_patterns = [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".claude/commands/",
+        ".claude/agents/",
+        ".claude/skills/",
+    ];
+    config_patterns.iter().any(|pattern| {
+        p.ends_with(pattern) || p.contains(&format!("/{}", pattern))
+    })
 }

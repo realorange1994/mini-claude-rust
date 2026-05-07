@@ -2,7 +2,7 @@ use crate::auto_classifier::{AutoModeClassifier, is_auto_allowlisted};
 use crate::context::ConversationContext;
 use crate::tools::{ToolResult, ApprovalRequirement, ToolPermissionResult, PermissionBehavior};
 use super::rule_store::RuleStore;
-use super::path_validation::{validate_path, OperationType, PathValidationResult};
+use super::path_validation::{validate_path, validate_read_path, OperationType, PathValidationResult};
 use super::auto_strip::is_dangerous_allow_rule;
 use super::rule_parser::ParsedRule;
 use serde::{Deserialize, Serialize};
@@ -357,7 +357,12 @@ impl PermissionGate {
             } else {
                 OperationType::Read
             };
-            if let Some(v_result) = self.validate_path_for_tool(&path_param, op_type) {
+            let v_result = if op_type == OperationType::Read {
+                self.validate_read_path_for_tool(&path_param)
+            } else {
+                self.validate_path_for_tool(&path_param, op_type)
+            };
+            if let Some(v_result) = v_result {
                 if !v_result.allowed {
                     restore_stripped();
                     if v_result.reason == "safetyCheck" || v_result.reason == "rule" {
@@ -485,9 +490,17 @@ impl PermissionGate {
                 None
             }
             PermissionMode::Auto => {
+                // Step 3c: toolAlwaysAllowedRule — if rule store has a tool-level
+                // allow rule for this tool, allow without classifier evaluation.
+                if let Some(ref store) = self.rule_store {
+                    if store.has_allow_rule(&upstream_name) {
+                        restore_stripped();
+                        return None;
+                    }
+                }
                 // Use auto mode classifier (if available) or fall back to allow-all
                 restore_stripped();
-                self.check_auto_mode(tool, &params)
+                self.check_auto_mode(tool.name(), &params, &result)
             }
             PermissionMode::Plan => {
                 // Plan mode: read-only tools only. Blocks write operations.
@@ -563,56 +576,34 @@ impl PermissionGate {
     /// - Classifier: evaluate via LLM classifier (with whitelist fallback)
     /// After consecutive denials exceeding the limit, falls back to interactive prompt.
     /// When classifier is nil/disabled: auto-allow (legacy behavior).
+    /// Auto mode permission check using the classifier.
+    /// Uses the tool's approval_requirement() to decide the path:
+    /// - Auto: auto-allow
+    /// - Required: block (cannot prompt user in auto mode without classifier)
+    /// - Classifier: evaluate via LLM classifier (with whitelist fallback)
+    /// After consecutive denials exceeding the limit, falls back to interactive prompt.
+    /// When classifier is nil/disabled: auto-allow (legacy behavior).
     fn check_auto_mode(
         &self,
-        tool: &dyn crate::tools::Tool,
+        tool_name: &str,
         params: &std::collections::HashMap<String, serde_json::Value>,
+        tool_result: &ToolPermissionResult,
     ) -> Option<ToolResult> {
-        let tool_name = tool.name();
-
-        // Fast path: tools marked Auto are always allowed without classifier
-        if tool.approval_requirement() == ApprovalRequirement::Auto {
-            self.denial_count.store(0, Ordering::SeqCst);
+        // If tool returned ask with classifier_approvable=false, always prompt user (never bypass)
+        if tool_result.behavior == PermissionBehavior::Ask && !tool_result.classifier_approvable {
+            if self.should_avoid_prompts() {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: {} (interactive prompts disabled for sub-agent)", tool_result.message
+                )));
+            }
+            if !self.ask_user(tool_name, params, Some(&tool_result.message)) {
+                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+            }
             return None;
         }
 
-        // Fast path: tools marked Required cannot be auto-allowed without classifier.
-        // Fall through to legacy whitelist for exec/git safe-command checks.
-        if tool.approval_requirement() == ApprovalRequirement::Required {
-            // Only allow if matches legacy whitelist (e.g., safe exec commands)
-            if !is_auto_allowlisted(tool_name, params) {
-                return Some(ToolResult::error(format!(
-                    "Permission denied: {} requires user approval in auto mode.",
-                    tool_name
-                )));
-            }
-        }
-
-        // Classifier path: for Classifier and non-Required tools, check legacy whitelist
-        // This handles safe exec commands, git read-only ops, etc.
+        // Check auto allowlist (whitelist of known-safe operations)
         if is_auto_allowlisted(tool_name, params) {
-            let desc = match tool_name {
-                "exec" => {
-                    let cmd = params.get("command")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<no command>");
-                    format!("WHITELISTED: [exec]: {}", cmd)
-                }
-                "git" => {
-                    let op = params.get("operation")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<no operation>");
-                    format!("WHITELISTED: [git]: {}", op)
-                }
-                "process" => {
-                    let op = params.get("operation")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<no operation>");
-                    format!("WHITELISTED: [process]: {}", op)
-                }
-                other => format!("WHITELISTED: [{}]", other),
-            };
-            eprintln!("  [auto-classifier] {}", desc);
             self.denial_count.store(0, Ordering::SeqCst);
             return None;
         }
@@ -632,23 +623,21 @@ impl PermissionGate {
 
         // Build transcript for classifier context
         let transcript = if let Some(src) = &self.transcript_src {
-            // Try to get a read lock (non-blocking to avoid deadlocks)
             match src.try_read() {
                 Ok(ctx) => crate::transcript_builder::build_compact_transcript(&ctx, 20),
-                Err(_) => String::new(), // Lock contention: skip transcript
+                Err(_) => String::new(),
             }
         } else {
             String::new()
         };
 
-        // Convert params from HashMap<String, Value> for classifier
+        // Convert params for classifier
         let result = classifier.classify(tool_name, params, &transcript);
 
         if !result.allow {
             let count = self.denial_count.fetch_add(1, Ordering::SeqCst) + 1;
             let denial_limit = self.config.auto_denial_limit;
             // After consecutive denials, fall back to interactive prompt
-            // (but avoid prompts for sub-agents with no terminal user)
             if count >= denial_limit && !self.should_avoid_prompts() {
                 eprintln!(
                     "  [auto-classifier] {} consecutive denials, falling back to manual approval",
@@ -856,6 +845,11 @@ impl PermissionGate {
         let store = self.rule_store.as_ref().map(|s| s.as_ref());
         let cwd = self.project_dir.as_deref().unwrap_or("");
         Some(validate_path(path, op_type, store, cwd))
+    }
+
+    fn validate_read_path_for_tool(&self, path: &str) -> Option<PathValidationResult> {
+        let store = self.rule_store.as_ref().map(|s| s.as_ref());
+        Some(validate_read_path(path, store))
     }
 }
 

@@ -153,10 +153,10 @@ pub fn validate_read_path(
         return result;
     }
 
-    // 2. Suspicious Windows patterns
+    // 2. Suspicious Windows patterns (prompt user, not hard denial)
     if let Some(msg) = has_suspicious_windows_pattern(&expanded) {
         result.message = msg;
-        result.reason = "other".to_string();
+        result.reason = "safetyCheck".to_string();
         return result;
     }
 
@@ -220,7 +220,18 @@ fn is_unc_path(path: &str) -> bool {
 }
 
 fn is_tilde_variant(path: &str) -> bool {
-    path.starts_with("~+") || path.starts_with("~-")
+    // Block: ~root, ~user, ~+, ~- (anything that's ~ followed by non-slash, non-end)
+    // Matches upstream's block for ~user, ~+, ~-
+    if path.starts_with("~") && path.len() > 1 {
+        if path.starts_with("~/") {
+            return false; // bare ~/home-path is ok
+        }
+        if path == "~" {
+            return false; // bare ~ is ok (expanded by expand_tilde)
+        }
+        return true; // ~+, ~-, ~root, ~user all blocked
+    }
+    false
 }
 
 fn has_shell_expansion(path: &str) -> bool {
@@ -254,6 +265,13 @@ fn check_path_safety(path: &str) -> Option<PathValidationResult> {
 
 fn has_suspicious_windows_pattern(path: &str) -> Option<String> {
     use regex::Regex;
+
+    // NTFS Alternate Data Streams: colon after position 2 (e.g., file.txt:Zone.Identifier)
+    if path.len() > 2 {
+        if path[2..].contains(':') {
+            return Some("path contains NTFS Alternate Data Stream syntax".to_string());
+        }
+    }
 
     // 8.3 short names
     if Regex::new(r"~\d")
