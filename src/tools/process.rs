@@ -1,6 +1,6 @@
 //! ProcessTool - Process management and monitoring
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -68,8 +68,8 @@ impl Tool for ProcessTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

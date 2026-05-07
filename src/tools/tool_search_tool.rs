@@ -6,7 +6,7 @@
 use std::sync::{Arc, RwLock};
 use serde_json::Value;
 use std::collections::HashMap;
-use super::{Tool, ToolResult};
+use super::{Tool, ToolResult, ToolPermissionResult};
 
 /// Callback type that returns a list of all available tools.
 /// This avoids the circular problem of needing an Arc<Registry> before
@@ -74,8 +74,8 @@ impl Tool for ToolSearchTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -269,7 +269,7 @@ mod tests {
         fn input_schema(&self) -> serde_json::Map<String, Value> {
             serde_json::json!({}).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _: &HashMap<String, Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _: &HashMap<String, Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _: HashMap<String, Value>) -> ToolResult { ToolResult::ok("") }
     }
 
@@ -283,7 +283,7 @@ mod tests {
                 }
             }).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _: &HashMap<String, Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _: &HashMap<String, Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _: HashMap<String, Value>) -> ToolResult { ToolResult::ok("") }
     }
 
@@ -298,7 +298,7 @@ mod tests {
                 }
             }).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _: &HashMap<String, Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _: &HashMap<String, Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _: HashMap<String, Value>) -> ToolResult { ToolResult::ok("") }
     }
 
@@ -312,7 +312,7 @@ mod tests {
                 }
             }).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _: &HashMap<String, Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _: &HashMap<String, Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _: HashMap<String, Value>) -> ToolResult { ToolResult::ok("") }
     }
 

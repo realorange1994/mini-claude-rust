@@ -1,6 +1,6 @@
 //! GitTool - Git version control operations
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, PermissionBehavior};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -491,31 +491,16 @@ impl Tool for GitTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
-        let operation = params.get("operation")?.as_str()?;
+    /// Check permissions for the git operation.
+    /// Only blocks truly destructive operations (reset --hard, push --force, etc.).
+    /// Normal state-modifying operations (commit, push, checkout, etc.) are allowed.
+    fn check_permissions(&self, params: &HashMap<String, Value>) -> ToolPermissionResult {
+        let operation = match params.get("operation").and_then(|v| v.as_str()) {
+            Some(op) => op,
+            None => return ToolPermissionResult::passthrough(),
+        };
 
-        // Handle gh operations via is_gh_repo_dangerous
-        if operation == "gh" {
-            let subcmd = params.get("gh_subcommand")?.as_str()?;
-            let flags: Vec<String> = params
-                .get("gh_flags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if is_gh_repo_dangerous(subcmd, &flags) {
-                return Some(ToolResult::error(format!(
-                    "Permission denied: gh {} is a write/destructive operation",
-                    subcmd
-                )));
-            }
-            return None;
-        }
-
-        // For git operations, collect all effective flags
+        // Collect effective flags from params
         let mut effective_flags: Vec<String> = params
             .get("flags")
             .and_then(|v| v.as_array())
@@ -527,16 +512,11 @@ impl Tool for GitTool {
             .unwrap_or_default();
 
         // Map boolean params to their flag equivalents for security checking
-        // clean: force → -f, recursive → -d
         if operation == "clean" {
             if params.get("force").and_then(|v| v.as_bool()).unwrap_or(false) && !effective_flags.contains(&"-f".to_string()) {
                 effective_flags.push("-f".to_string());
             }
-            if params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) && !effective_flags.contains(&"-d".to_string()) {
-                effective_flags.push("-d".to_string());
-            }
         }
-        // reset: target like --hard, --soft, --mixed
         if operation == "reset" {
             if let Some(target) = params.get("target").and_then(|v| v.as_str()) {
                 if target.starts_with("--") && !effective_flags.contains(&target.to_string()) {
@@ -545,7 +525,22 @@ impl Tool for GitTool {
             }
         }
 
-        check_git_flags_permission(operation, &effective_flags)
+        // Block dangerous gh subcommands
+        if operation == "gh" {
+            if let Some(subcmd) = params.get("gh_subcommand").and_then(|v| v.as_str()) {
+                if is_gh_repo_dangerous(subcmd, &effective_flags) {
+                    return ToolPermissionResult::deny(&format!("Permission denied: gh {} is not allowed", subcmd));
+                }
+            }
+        }
+
+        // Only block truly dangerous operations/flags
+        if let Some(reason) = is_dangerous_git_operation(operation, &effective_flags) {
+            return ToolPermissionResult::deny(&format!("Permission denied: {}", reason));
+        }
+
+        // All other operations are allowed
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -2637,8 +2632,8 @@ mod tests {
         params.insert("gh_subcommand".to_string(), Value::String("pr_merge".to_string()));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "gh pr_merge should be permission-denied");
-        assert!(result.unwrap().is_error, "Should be an error result");
+        assert!(result.behavior == PermissionBehavior::Deny, "gh pr_merge should be permission-denied");
+        assert!(result.message.contains("denied"), "Should be a deny result");
     }
 
     #[test]
@@ -2650,7 +2645,7 @@ mod tests {
         params.insert("gh_flags".to_string(), Value::Array(vec![Value::String("list".to_string())]));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "gh pr list should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "gh pr list should be allowed");
     }
 
     #[test]
@@ -2661,7 +2656,7 @@ mod tests {
         params.insert("flags".to_string(), Value::Array(vec![Value::String("--force".to_string())]));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git push --force should be permission-denied");
+        assert!(result.behavior == PermissionBehavior::Deny, "git push --force should be permission-denied");
     }
 
     #[test]
@@ -2673,7 +2668,7 @@ mod tests {
         params.insert("recursive".to_string(), Value::Bool(true));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git clean -fd (via force+recursive params) should be permission-denied");
+        assert!(result.behavior == PermissionBehavior::Deny, "git clean -fd (via force+recursive params) should be permission-denied");
     }
 
     #[test]
@@ -2684,7 +2679,7 @@ mod tests {
         params.insert("dry_run".to_string(), Value::Bool(true));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "git clean --dry-run should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "git clean --dry-run should be allowed");
     }
 
     #[test]
@@ -2695,7 +2690,7 @@ mod tests {
         params.insert("flags".to_string(), Value::Array(vec![Value::String("--hard".to_string())]));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_some(), "git reset --hard should be permission-denied");
+        assert!(result.behavior == PermissionBehavior::Deny, "git reset --hard should be permission-denied");
     }
 
     #[test]
@@ -2707,7 +2702,7 @@ mod tests {
 
         // commit --amend is allowed (upstream only warns, doesn't block)
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "git commit --amend should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "git commit --amend should be allowed");
     }
 
     #[test]
@@ -2719,7 +2714,7 @@ mod tests {
 
         // rebase --interactive is allowed (upstream only warns, doesn't block)
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "git rebase --interactive should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "git rebase --interactive should be allowed");
     }
 
     #[test]
@@ -2731,7 +2726,7 @@ mod tests {
 
         // --force-with-lease is allowed (safer variant)
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "git push --force-with-lease should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "git push --force-with-lease should be allowed");
     }
 
     #[test]
@@ -2741,7 +2736,7 @@ mod tests {
         params.insert("operation".to_string(), Value::String("status".to_string()));
 
         let result = tool.check_permissions(&params);
-        assert!(result.is_none(), "git status should be allowed");
+        assert!(result.behavior == PermissionBehavior::Passthrough, "git status should be allowed");
     }
 
 }

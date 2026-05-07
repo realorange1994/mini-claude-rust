@@ -1,6 +1,6 @@
 //! ListDirTool - List directory contents
 
-use crate::tools::{Tool, ToolResult, expand_path, is_ignored_dir};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, expand_path, is_ignored_dir};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -56,8 +56,8 @@ impl Tool for ListDirTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

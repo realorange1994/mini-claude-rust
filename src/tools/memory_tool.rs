@@ -1,7 +1,7 @@
 //! Memory tools — memory_add and memory_search for session memory.
 
 use crate::session_memory::SessionMemory;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,8 +58,8 @@ impl Tool for MemoryAddTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -131,8 +131,8 @@ impl Tool for MemorySearchTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

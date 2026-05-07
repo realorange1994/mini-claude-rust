@@ -4,7 +4,7 @@
 //! TaskOutputTool) and the background bash spawning engine that was previously
 //! in bash_task_tools.rs.
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -873,10 +873,10 @@ impl Tool for ExecTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
+    fn check_permissions(&self, params: &HashMap<String, Value>) -> ToolPermissionResult {
         let command = match params.get("command").and_then(|v| v.as_str()) {
             Some(cmd) => cmd.trim(),
-            None => return None,
+            None => return ToolPermissionResult::passthrough(),
         };
 
         // Split compound commands
@@ -899,7 +899,7 @@ impl Tool for ExecTool {
         // (path resolution would be relative to the changed directory)
         if has_cd {
             if let Some(reason) = validate_redirect_targets(command) {
-                return Some(ToolResult::error(reason));
+                return ToolPermissionResult::deny(&reason);
             }
         }
 
@@ -909,28 +909,28 @@ impl Tool for ExecTool {
 
             // Check for command substitution
             if let Some(reason) = detect_command_substitution(&stripped) {
-                return Some(ToolResult::error(format!("Command substitution detected: {}", reason)));
+                return ToolPermissionResult::deny(&format!("Command substitution detected: {}", reason));
             }
 
             // Check for glob/brace expansion in destructive commands
             if let Some(reason) = detect_expansion(&stripped) {
-                return Some(ToolResult::error(reason));
+                return ToolPermissionResult::deny(&reason);
             }
 
             // Check for destructive commands
             let (is_destructive, reason) = is_destructive_command(&stripped);
             if is_destructive {
-                return Some(ToolResult::error(format!("Destructive command detected: {}", reason)));
+                return ToolPermissionResult::deny(&format!("Destructive command detected: {}", reason));
             }
 
             // Validate deletion paths
             if let Some(reason) = validate_deletion_paths(&stripped) {
-                return Some(ToolResult::error(reason));
+                return ToolPermissionResult::deny(&reason);
             }
 
             // Validate output redirection targets
             if let Some(reason) = validate_redirect_targets(&stripped) {
-                return Some(ToolResult::error(reason));
+                return ToolPermissionResult::deny(&reason);
             }
         }
 
@@ -968,7 +968,7 @@ impl Tool for ExecTool {
 
         for re in dangerous {
             if re.is_match(&lower) {
-                return Some(ToolResult::error(format!("Dangerous command pattern detected: {}", re.as_str())));
+                return ToolPermissionResult::deny(&format!("Dangerous command pattern detected: {}", re.as_str()));
             }
         }
 
@@ -991,7 +991,7 @@ impl Tool for ExecTool {
         });
         for re in git_harmful {
             if re.is_match(&lower) {
-                return Some(ToolResult::error("Command would destroy .git directory"));
+                return ToolPermissionResult::deny("Command would destroy .git directory");
             }
         }
 
@@ -1015,7 +1015,7 @@ impl Tool for ExecTool {
         });
         for re in home_harmful {
             if re.is_match(&lower) {
-                return Some(ToolResult::error("Command would destroy home directory or system root"));
+                return ToolPermissionResult::deny("Command would destroy home directory or system root");
             }
         }
 
@@ -1032,18 +1032,18 @@ impl Tool for ExecTool {
 
         for re in url_patterns {
             if re.is_match(&lower) {
-                return Some(ToolResult::error("Internal/private URL detected"));
+                return ToolPermissionResult::deny("Internal/private URL detected");
             }
         }
 
         // Check for UNC paths (SMB/WebDAV) that could leak NTLM credentials on Windows
         if contains_vulnerable_unc_path(command) {
-            return Some(ToolResult::error(
+            return ToolPermissionResult::deny(
                 "UNC path detected: commands targeting SMB/WebDAV shares are blocked",
-            ));
+            );
         }
 
-        None
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1366,8 +1366,8 @@ impl Tool for TaskStopTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1454,8 +1454,8 @@ impl Tool for TaskOutputTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

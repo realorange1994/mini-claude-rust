@@ -15,7 +15,7 @@ fn config_default() {
     assert!(cfg.base_url.is_none());
     assert_eq!(cfg.max_turns, 90);
     assert_eq!(cfg.max_context_msgs, 100);
-    assert_eq!(cfg.permission_mode, PermissionMode::Ask);
+    assert_eq!(*cfg.permission_mode.lock().unwrap(), PermissionMode::Ask);
     assert!(cfg.mcp_manager.is_none());
     assert!(cfg.skill_loader.is_none());
     assert!(cfg.auto_compact_enabled);
@@ -60,7 +60,7 @@ fn config_custom_values() {
         base_url: Some("https://custom.api.com".to_string()),
         max_turns: 50,
         max_context_msgs: 200,
-        permission_mode: PermissionMode::Auto,
+        permission_mode: std::sync::Arc::new(std::sync::Mutex::new(PermissionMode::Auto)),
         project_dir: PathBuf::from("/my/project"),
         allowed_commands: vec!["ls".to_string()],
         denied_patterns: vec![],
@@ -75,11 +75,15 @@ fn config_custom_values() {
         micro_compact_keep_recent: 5,
         micro_compact_placeholder: "[Old tool result content cleared]".to_string(),
         micro_compact_min_char_count: 2000,
+        micro_compact_gap_minutes: 60,
         post_compact_recover_files: true,
         post_compact_max_files: 5,
         post_compact_max_file_chars: 50_000,
         post_compact_max_skill_chars: 5_000,
         post_compact_max_total_skill_chars: 25_000,
+        post_compact_max_file_tokens: 12_500,
+        post_compact_max_skill_tokens: 1_250,
+        post_compact_max_total_skill_tokens: 6_250,
         post_compact_history_snip_count: 3,
         session_memory: None,
         reactive_compact_threshold: 5000,
@@ -92,11 +96,12 @@ fn config_custom_values() {
         should_avoid_permission_prompts: false,
         max_output_tokens: 16384,
         escalated_max_output_tokens: 64000,
+        pre_plan_mode: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
     assert_eq!(cfg.model, "custom-model");
     assert_eq!(cfg.api_key, Some("sk-test".to_string()));
     assert_eq!(cfg.max_turns, 50);
-    assert_eq!(cfg.permission_mode, PermissionMode::Auto);
+    assert_eq!(*cfg.permission_mode.lock().unwrap(), PermissionMode::Auto);
 }
 
 #[test]

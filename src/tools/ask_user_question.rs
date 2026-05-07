@@ -1,6 +1,6 @@
 //! AskUserQuestionTool - allows the model to ask the user questions with multiple-choice options.
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -84,8 +84,8 @@ impl Tool for AskUserQuestionTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None // Always allowed - user must interact to proceed
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough() // Always allowed - user must interact to proceed
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

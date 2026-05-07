@@ -2751,9 +2751,9 @@ mod tests {
     #[test]
     fn test_context_window_tracker() {
         let tracker = ContextWindowTracker::new("claude-sonnet-4-20250514", 0.75, 13_000);
-        assert_eq!(tracker.effective_window(), 180_000); // 200K - 20K
-        // threshold = min(180K * 0.75, 180K - 13K) = min(135K, 167K) = 135K
-        assert_eq!(tracker.compact_threshold(), 135_000);
+        assert_eq!(tracker.effective_window(), 980_000); // 1M - 20K (Sonnet-4 supports 1M context)
+        // threshold = min(980K * 0.75, 980K - 13K) = min(735K, 967K) = 735K
+        assert_eq!(tracker.compact_threshold(), 735_000);
     }
 
     #[test]

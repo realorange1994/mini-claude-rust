@@ -1,6 +1,6 @@
 //! ExitPlanModeTool - Switch the agent out of plan mode back to its previous mode
 
-use crate::tools::{Tool, ToolResult, ModeChange};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, ModeChange};
 use crate::permissions::PermissionMode;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,8 +40,8 @@ impl Tool for ExitPlanModeTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

@@ -1,6 +1,6 @@
 //! File history tools - undo/rewind functionality with read/grep/glob support
 
-use crate::tools::{Tool, ToolResult, expand_path, truncate_at};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, expand_path, truncate_at};
 use crate::filehistory::FileHistory;
 use regex::Regex;
 use serde_json::Value;
@@ -53,8 +53,8 @@ impl Tool for FileHistoryTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
         vec![crate::tools::ToolCapability::ReadOnly]
@@ -253,8 +253,8 @@ impl Tool for FileHistoryReadTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -381,8 +381,8 @@ impl Tool for FileHistoryGrepTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -545,8 +545,8 @@ impl Tool for FileRestoreTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -628,8 +628,8 @@ impl Tool for FileRewindTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -736,8 +736,8 @@ impl Tool for FileHistoryDiffTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -974,8 +974,8 @@ impl Tool for FileHistorySearchTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1067,8 +1067,8 @@ impl Tool for FileHistorySummaryTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1161,8 +1161,8 @@ impl Tool for FileHistoryTimelineTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1257,8 +1257,8 @@ impl Tool for FileHistoryTagTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1414,8 +1414,8 @@ impl Tool for FileHistoryAnnotateTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1509,8 +1509,8 @@ impl Tool for FileHistoryBatchTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -1665,8 +1665,8 @@ impl Tool for FileHistoryCheckoutTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

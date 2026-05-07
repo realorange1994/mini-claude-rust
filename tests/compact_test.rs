@@ -104,6 +104,7 @@ fn estimate_compact_boundary_message_tokens() {
         MessageContent::CompactBoundary {
             trigger: CompactTrigger::Auto,
             pre_compact_tokens: 50000,
+            uuid: uuid::Uuid::new_v4().to_string(),
         },
     );
     let tokens = estimate_message_tokens(&msg);
@@ -277,9 +278,9 @@ fn context_window_tracker_threshold() {
     let tracker = miniclaudecode_rust::compact::ContextWindowTracker::new(
         "claude-sonnet-4-20250514", 0.75, 13_000,
     );
-    assert_eq!(tracker.effective_window(), 180_000); // 200K - 20K
-    // threshold = min(180K * 0.75, 180K - 13K) = min(135K, 167K) = 135K
-    assert_eq!(tracker.compact_threshold(), 135_000);
+    assert_eq!(tracker.effective_window(), 980_000); // 1M - 20K (Sonnet-4 supports 1M context)
+    // threshold = min(980K * 0.75, 980K - 13K) = min(735K, 967K) = 735K
+    assert_eq!(tracker.compact_threshold(), 735_000);
 }
 
 #[test]
@@ -288,9 +289,9 @@ fn context_window_tracker_should_compact() {
         "claude-sonnet-4-20250514", 0.75, 13_000,
     );
 
-    // Create enough messages to trigger compaction
+    // Create enough messages to trigger compaction (threshold is now 735K for Sonnet-4)
     let mut messages = Vec::new();
-    for _i in 0..5000 {
+    for _i in 0..30000 {
         messages.push(Message::new(
             MessageRole::User,
             MessageContent::Text("A".repeat(100)), // ~25 tokens each

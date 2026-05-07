@@ -1,6 +1,6 @@
 //! ExaSearchTool - Exa deep web search
 
-use crate::tools::{Tool, ToolResult, contains_internal_url, strip_tags};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, contains_internal_url, strip_tags};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -58,12 +58,15 @@ impl Tool for ExaSearchTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
-        let query = params.get("query")?.as_str()?;
+    fn check_permissions(&self, params: &HashMap<String, Value>) -> ToolPermissionResult {
+        let query = match params.get("query").and_then(|v| v.as_str()) {
+            Some(q) => q,
+            None => return ToolPermissionResult::passthrough(),
+        };
         if contains_internal_url(query) {
-            return Some(ToolResult::error("Search blocked: internal URL detected in query"));
+            return ToolPermissionResult::deny("Search blocked: internal URL detected in query");
         }
-        None
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

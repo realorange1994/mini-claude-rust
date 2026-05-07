@@ -10,7 +10,7 @@
 
 use miniclaudecode_rust::tools::{
     expand_path, is_ignored_dir, strip_tags, contains_internal_url, restore_crlf, truncate_at,
-    ToolResult, validate_params, Tool, Registry,
+    ToolResult, validate_params, Tool, Registry, ToolPermissionResult, PermissionBehavior,
 };
 use miniclaudecode_rust::tools::{
     FileReadTool, FileWriteTool, FileEditTool, MultiEditTool, FileOpsTool, ListDirTool,
@@ -59,7 +59,7 @@ fn validate_params_all_present() {
                 "required": ["a", "b"]
             }).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _p: HashMap<String, serde_json::Value>) -> ToolResult { ToolResult::ok("ok") }
     }
 
@@ -80,7 +80,7 @@ fn validate_params_missing_required() {
                 "required": ["path"]
             }).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _p: HashMap<String, serde_json::Value>) -> ToolResult { ToolResult::ok("ok") }
     }
 
@@ -101,7 +101,7 @@ fn validate_params_no_required_fields() {
         fn input_schema(&self) -> serde_json::Map<String, serde_json::Value> {
             serde_json::json!({}).as_object().unwrap().clone()
         }
-        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> Option<ToolResult> { None }
+        fn check_permissions(&self, _p: &HashMap<String, serde_json::Value>) -> ToolPermissionResult { ToolPermissionResult::passthrough() }
         fn execute(&self, _p: HashMap<String, serde_json::Value>) -> ToolResult { ToolResult::ok("ok") }
     }
 

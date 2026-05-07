@@ -1,6 +1,6 @@
 use crate::auto_classifier::{AutoModeClassifier, is_auto_allowlisted};
 use crate::context::ConversationContext;
-use crate::tools::{Tool, ToolResult, ApprovalRequirement};
+use crate::tools::{ToolResult, ApprovalRequirement, ToolPermissionResult, PermissionBehavior};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{self, Write};
@@ -302,10 +302,35 @@ impl PermissionGate {
     /// Check if a tool should be allowed to execute
     /// Returns Some(ToolResult) if blocked, None if allowed
     pub fn check(&self, tool: &dyn crate::tools::Tool, params: std::collections::HashMap<String, serde_json::Value>) -> Option<ToolResult> {
-        // UNCONDITIONAL: Always run tool's own security check (dangerous operations, etc.)
-        // This must not be bypassed by any permission mode.
-        if let Some(denial) = tool.check_permissions(&params) {
-            return Some(denial);
+        // Step 1a: deny rule (handled in check_denied_patterns below)
+
+        // Step 1b: ask rule (handled in mode-specific logic below)
+
+        // Step 1c/1d/1e/1f/1g: tool-level self-check returns PermissionResult
+        let result = tool.check_permissions(&params);
+
+        // Step 1d: deny is always bypass-immune
+        if result.behavior == PermissionBehavior::Deny {
+            return Some(ToolResult::error(format!("Permission denied: {}", result.message)));
+        }
+
+        // Step 1g: ask from safetyCheck is bypass-immune
+        // Step 1e/1f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
+        if result.behavior == PermissionBehavior::Ask {
+            if self.should_avoid_prompts() {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: {} (interactive prompts disabled for sub-agent)", result.message
+                )));
+            }
+            if !self.ask_user(tool.name(), &params, Some(&result.message)) {
+                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+            }
+            return None; // user approved
+        }
+
+        // Layer 1.5: Denied patterns check (hard denial)
+        if let Some(denial) = self.check_denied_patterns(tool.name(), &params) {
+            return Some(ToolResult::error(denial));
         }
 
         // When should_avoid_prompts is true (sub-agents), tools that require user
@@ -342,10 +367,12 @@ impl PermissionGate {
             }
         }
 
+        // Step 2a: bypass mode — allow all (only reached if 1d-1g didn't return)
         match *self.config.permission_mode.lock().unwrap() {
             PermissionMode::Bypass => {
-                // Allow all tools directly without classifier evaluation.
-                // Tool's own security check still runs unconditionally.
+                // Bypass mode: allow all tools directly.
+                // Layer 1 deny/ask (bypass-immune) already handled above.
+                // This aligns with upstream's bypassPermissions behavior (step 2a).
                 None
             }
             PermissionMode::Auto => {
@@ -353,22 +380,20 @@ impl PermissionGate {
                 self.check_auto_mode(tool, &params)
             }
             PermissionMode::Plan => {
-                // Plan mode: only auto-approved tools allowed. Tools that require
-                // classifier evaluation or user approval are blocked.
-                if tool.approval_requirement() != ApprovalRequirement::Auto {
+                // Plan mode: read-only tools only. Blocks write operations.
+                // Matches Go's Plan mode writeTools check.
+                let write_tools = [
+                    "exec", "write_file", "edit_file", "multi_edit", "fileops",
+                ];
+                if write_tools.contains(&tool.name()) {
                     return Some(ToolResult::error(format!(
-                        "Permission denied: {} is not allowed in PLAN mode (auto-approved tools only)",
+                        "Permission denied: '{}' is blocked in PLAN mode (read-only).",
                         tool.name()
                     )));
                 }
                 None
             }
             PermissionMode::Ask => {
-                // Layer 1.5: Denied patterns check (hard denial)
-                if let Some(denial) = self.check_denied_patterns(tool.name(), &params) {
-                    return Some(ToolResult::error(denial));
-                }
-
                 // Use approval_requirement() to decide behavior
                 match tool.approval_requirement() {
                     ApprovalRequirement::Auto => {

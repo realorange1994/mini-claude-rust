@@ -4,7 +4,7 @@
 //! work on a background agent, ask for progress, or retrieve results.
 
 use crate::tools::agent_store::SharedAgentTaskStore;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,8 +63,8 @@ impl Tool for SendMessageTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None // no permissions required
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough() // no permissions required
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

@@ -4,7 +4,7 @@
 //! control background sub-agent tasks.
 
 use crate::tools::agent_store::{AgentTaskStatus, SharedAgentTaskStore};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,8 +42,8 @@ impl Tool for AgentListTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -157,8 +157,8 @@ impl Tool for AgentGetTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {
@@ -265,8 +265,8 @@ impl Tool for AgentKillTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

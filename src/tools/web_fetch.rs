@@ -1,6 +1,6 @@
 //! WebFetchTool - Fetch and extract readable content from URLs
 
-use crate::tools::{Tool, ToolResult, contains_internal_url, strip_tags};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, contains_internal_url, strip_tags};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -52,15 +52,18 @@ impl Tool for WebFetchTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, params: &HashMap<String, Value>) -> Option<ToolResult> {
-        let url = params.get("url")?.as_str()?;
+    fn check_permissions(&self, params: &HashMap<String, Value>) -> ToolPermissionResult {
+        let url = match params.get("url").and_then(|v| v.as_str()) {
+            Some(u) => u,
+            None => return ToolPermissionResult::passthrough(),
+        };
         if url.starts_with("file://") {
-            return Some(ToolResult::error("Blocked: file:// URLs are not allowed"));
+            return ToolPermissionResult::deny("Blocked: file:// URLs are not allowed");
         }
         if contains_internal_url(url) {
-            return Some(ToolResult::error("Blocked: internal/private URLs are not allowed"));
+            return ToolPermissionResult::deny("Blocked: internal/private URLs are not allowed");
         }
-        None
+        ToolPermissionResult::passthrough()
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

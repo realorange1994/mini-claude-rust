@@ -1,6 +1,6 @@
 //! EnterPlanModeTool - Switch the agent into plan mode
 
-use crate::tools::{Tool, ToolResult, ModeChange};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, ModeChange};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -33,8 +33,8 @@ impl Tool for EnterPlanModeTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

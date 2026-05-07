@@ -15,8 +15,9 @@
 
 use miniclaudecode_rust::config::Config;
 use miniclaudecode_rust::permissions::{PermissionGate, PermissionMode};
-use miniclaudecode_rust::tools::{Registry, ExecTool, FileWriteTool, FileEditTool, FileReadTool, ListDirTool, GrepTool, GlobTool, GitTool, RuntimeInfoTool, WebSearchTool, Tool};
+use miniclaudecode_rust::tools::{Registry, ExecTool, FileWriteTool, FileEditTool, FileReadTool, ListDirTool, GrepTool, GlobTool, GitTool, RuntimeInfoTool, WebSearchTool, Tool, PermissionBehavior};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // ─── PermissionMode ───
 
@@ -73,7 +74,7 @@ fn permission_mode_from_str_trait() {
 #[test]
 fn permission_gate_auto_allows_everything() {
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Auto;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Auto;
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
@@ -96,7 +97,7 @@ fn permission_gate_auto_allows_everything() {
 #[test]
 fn permission_gate_plan_allows_read_only() {
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Plan;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Plan;
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
@@ -120,7 +121,7 @@ fn permission_gate_plan_allows_read_only() {
 #[test]
 fn permission_gate_plan_blocks_write() {
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Plan;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Plan;
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
@@ -151,14 +152,8 @@ fn exec_tool_check_permissions_dangerous_rm() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("rm -rf /home"));
     let result = tool.check_permissions(&params);
-    assert!(result.is_some());
-    let output = &result.unwrap().output;
-    assert!(
-        output.to_lowercase().contains("dangerous") ||
-        output.to_lowercase().contains("destructive") ||
-        output.to_lowercase().contains("home"),
-        "Expected dangerous/destructive/home error, got: {}", output
-    );
+    // Dangerous command should return deny or ask
+    assert!(result.behavior == PermissionBehavior::Deny || result.behavior == PermissionBehavior::Ask);
 }
 
 #[test]
@@ -167,14 +162,7 @@ fn exec_tool_check_permissions_git_destruction() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("rm -rf .git"));
     let result = tool.check_permissions(&params);
-    assert!(result.is_some());
-    let output = result.unwrap().output;
-    // The error could come from destructive detection or .git regex
-    assert!(
-        output.contains(".git") || output.contains("git directory") ||
-        output.to_lowercase().contains("destructive") || output.to_lowercase().contains("dangerous"),
-        "Expected .git/destructive/dangerous error, got: {}", output
-    );
+    assert!(result.behavior == PermissionBehavior::Deny || result.behavior == PermissionBehavior::Ask);
 }
 
 #[test]
@@ -183,12 +171,7 @@ fn exec_tool_check_permissions_shutdown() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("shutdown now"));
     let result = tool.check_permissions(&params);
-    assert!(result.is_some());
-    let output = &result.unwrap().output;
-    assert!(
-        output.to_lowercase().contains("dangerous") || output.to_lowercase().contains("destructive") || output.to_lowercase().contains("shutdown"),
-        "Expected dangerous/destructive/shutdown error, got: {}", output
-    );
+    assert!(result.behavior == PermissionBehavior::Deny || result.behavior == PermissionBehavior::Ask);
 }
 
 #[test]
@@ -197,8 +180,8 @@ fn exec_tool_check_permissions_safe_command() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("ls -la"));
     let result = tool.check_permissions(&params);
-    // Safe command should return None (no warning)
-    assert!(result.is_none());
+    // Safe command should return passthrough (no warning)
+    assert!(result.behavior == PermissionBehavior::Passthrough || result.behavior == PermissionBehavior::Allow);
 }
 
 #[test]
@@ -207,7 +190,7 @@ fn exec_tool_check_permissions_git_status() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("git status"));
     let result = tool.check_permissions(&params);
-    assert!(result.is_none());
+    assert!(result.behavior == PermissionBehavior::Passthrough || result.behavior == PermissionBehavior::Allow);
 }
 
 #[test]
@@ -216,7 +199,7 @@ fn exec_tool_check_permissions_echo() {
     let mut params = HashMap::new();
     params.insert("command".to_string(), serde_json::json!("echo hello"));
     let result = tool.check_permissions(&params);
-    assert!(result.is_none());
+    assert!(result.behavior == PermissionBehavior::Passthrough || result.behavior == PermissionBehavior::Allow);
 }
 
 // ─── PermissionGate clone and mode methods ───
@@ -232,7 +215,7 @@ fn permission_gate_clone() {
 #[test]
 fn permission_gate_mode() {
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Auto;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Auto;
     let gate = PermissionGate::new(config);
     assert_eq!(gate.mode(), PermissionMode::Auto);
 }
@@ -240,7 +223,7 @@ fn permission_gate_mode() {
 #[test]
 fn permission_gate_set_mode() {
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Ask;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Ask;
     let mut gate = PermissionGate::new(config);
     assert_eq!(gate.mode(), PermissionMode::Ask);
 
@@ -278,7 +261,7 @@ fn permission_mode_serialize_deserialize_roundtrip() {
 fn permission_gate_auto_allows_safe_commands() {
     // In Auto mode, safe commands are allowed (no user confirmation needed)
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Auto;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Auto;
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();
@@ -297,7 +280,7 @@ fn permission_gate_auto_blocks_dangerous_commands() {
     // In Auto mode, security checks from tools are still enforced
     // (unconditional security layer, not bypassed by permission mode)
     let mut config = Config::default();
-    config.permission_mode = PermissionMode::Auto;
+    *config.permission_mode.lock().unwrap() = PermissionMode::Auto;
     let gate = PermissionGate::new(config);
 
     let registry = Registry::new();

@@ -4,7 +4,7 @@
 //! The list is injected into the system prompt as a reminder.
 
 use crate::context::{TodoItem, TodoList};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,8 +106,8 @@ impl Tool for TodoWriteTool {
         .clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None // no permissions required
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough() // no permissions required
     }
 
     fn execute(&self, params: HashMap<String, Value>) -> ToolResult {

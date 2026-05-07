@@ -1,6 +1,6 @@
 //! BriefTool - Provides communication principles to the agent
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, PermissionBehavior};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -46,8 +46,8 @@ impl Tool for BriefTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
@@ -175,7 +175,7 @@ mod tests {
     fn brief_tool_check_permissions_returns_none() {
         let tool = BriefTool::new();
         let params: HashMap<String, Value> = HashMap::new();
-        assert!(tool.check_permissions(&params).is_none());
+        assert!(tool.check_permissions(&params).behavior == PermissionBehavior::Passthrough);
     }
 
     #[test]

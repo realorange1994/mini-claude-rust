@@ -39,9 +39,11 @@ pub mod todo_write;
 pub mod send_message;
 pub mod ask_user_question;
 mod path_safety;
+mod filesystem_safety;
 mod capabilities;
 
 pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};
+pub use filesystem_safety::{PermissionBehavior, ToolPermissionResult, check_path_safety_for_auto_edit, is_dangerous_file_path, has_suspicious_windows_path_pattern};
 pub use capabilities::{ToolCapability, ApprovalRequirement, SafetyLevel, ToolProfile};
 use dunce;
 
@@ -213,7 +215,7 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> serde_json::Map<String, serde_json::Value>;
-    fn check_permissions(&self, params: &HashMap<String, serde_json::Value>) -> Option<ToolResult>;
+    fn check_permissions(&self, params: &HashMap<String, serde_json::Value>) -> ToolPermissionResult;
     fn execute(&self, params: HashMap<String, serde_json::Value>) -> ToolResult;
 
     /// Declares the capabilities this tool has.

@@ -1,6 +1,6 @@
 //! TerminalTool - Terminal session management (tmux/screen)
 
-use crate::tools::{Tool, ToolResult};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Command;
@@ -69,15 +69,15 @@ impl Tool for TerminalTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
         #[cfg(target_os = "windows")]
         {
-            return Some(ToolResult::error(
+            return ToolPermissionResult::deny(
                 "Error: terminal tool is not supported on Windows. It requires tmux or screen which are Unix/Linux tools.",
-            ));
+            );
         }
         #[cfg(not(target_os = "windows"))]
-        None
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {

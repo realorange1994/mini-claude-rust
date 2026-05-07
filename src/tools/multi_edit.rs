@@ -1,6 +1,6 @@
 //! MultiEditTool - Apply multiple search/replace edits atomically
 
-use crate::tools::{Tool, ToolResult, expand_path, is_unc_path, normalize_file_path, restore_crlf, FileReadInfo};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult, expand_path, is_unc_path, normalize_file_path, restore_crlf, FileReadInfo};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -79,8 +79,8 @@ impl Tool for MultiEditTool {
         }).as_object().unwrap().clone()
     }
 
-    fn check_permissions(&self, _params: &HashMap<String, Value>) -> Option<ToolResult> {
-        None
+    fn check_permissions(&self, _params: &HashMap<String, Value>) -> ToolPermissionResult {
+        ToolPermissionResult::passthrough()
     }
 
     fn capabilities(&self) -> Vec<crate::tools::ToolCapability> {
