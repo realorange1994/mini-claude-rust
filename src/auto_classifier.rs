@@ -565,6 +565,14 @@ impl AutoModeClassifier {
         self.enabled
     }
 
+    /// Clear the classification result cache.
+    /// Called post-compaction to invalidate stale decisions.
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.cache.write() {
+            cache.clear();
+        }
+    }
+
     /// Determine whether a tool call should be allowed in auto mode.
     /// Checks the whitelist first (always allows safe tools), then the cache,
     /// then makes an LLM call if needed.

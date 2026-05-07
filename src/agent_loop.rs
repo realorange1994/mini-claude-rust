@@ -2992,32 +2992,10 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         // --- Session Memory Recovery ---
         // Re-inject session memory after compaction. Session memory contains
         // user-defined notes that must survive context compaction.
+        // Uses per-section truncation matching upstream's truncateSessionMemoryForCompact.
         if let Some(ref sm) = self.config.session_memory {
-            let sm_content = sm.format_for_prompt();
+            let sm_content = sm.format_for_prompt_truncated(8_000);
             if !sm_content.is_empty() {
-                // Cap at 40K tokens to avoid blowing past context limits
-                const MAX_SM_TOKENS: usize = 40_000;
-                let sm_tokens = estimate_tokens(&sm_content);
-                let sm_content = if sm_tokens > MAX_SM_TOKENS {
-                    let char_limit = MAX_SM_TOKENS * 4;
-                    let truncated = if sm_content.len() > char_limit {
-                        let s = &sm_content[..char_limit];
-                        if let Some(nl) = s.rfind('\n') {
-                            if nl > char_limit / 2 {
-                                format!("{}\n\n[... session memory truncated for length ...]", &s[..nl])
-                            } else {
-                                format!("{}\n\n[... session memory truncated for length ...]", &sm_content[..char_limit])
-                            }
-                        } else {
-                            format!("{}\n\n[... session memory truncated for length ...]", &sm_content[..char_limit])
-                        }
-                    } else {
-                        sm_content
-                    };
-                    truncated
-                } else {
-                    sm_content
-                };
                 let attachment = format!("<session_memory>\n{}\n</session_memory>", sm_content);
                 {
                     let mut ctx_mut = self.context.write().await;
@@ -3054,6 +3032,10 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         // Reset cached microcompact tracker — clear all registered tool IDs
         // and deleted refs. After compaction, tool results are rebuilt from scratch.
         self.cached_mc.reset();
+
+        // Classifier and permission state — stale decisions may reference
+        // compacted messages, so clear them to force re-evaluation.
+        self.gate.reset_post_compact();
     }
 
     /// Build a re-announcement of all available tools after compaction.

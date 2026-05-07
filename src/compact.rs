@@ -1912,7 +1912,7 @@ pub fn try_sm_compact(
 ) -> Option<CompactStats> {
     // Check if session memory is available and has content
     let mem = session_memory?;
-    let mem_content = mem.format_for_prompt();
+    let mem_content = mem.format_for_prompt_truncated(8_000);
     if mem_content.is_empty() {
         return None;
     }
@@ -1977,10 +1977,11 @@ pub fn try_sm_compact(
     );
 
     // Calculate adaptive tail using token budgets instead of fixed entry count.
-    // Min: 2K tokens / 4 text msgs, Max: 12K tokens.
+    // Min: 10K tokens / 5 text msgs, Max: 40K tokens.
+    // Matches upstream's calculateMessagesToKeepIndex thresholds.
     let (_, mut tail) = calculate_adaptive_tail(
         &messages, messages.len(),
-        2000, 4, 12_000,
+        10_000, 5, 40_000,
     );
 
     let mut new_messages = vec![boundary, summary];

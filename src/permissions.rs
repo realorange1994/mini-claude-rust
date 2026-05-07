@@ -174,6 +174,17 @@ impl PermissionGate {
         self.transcript_src = Some(src);
     }
 
+    /// Clear classifier cache and approval state after context compaction.
+    pub fn reset_post_compact(&self) {
+        if let Some(ref classifier) = self.classifier {
+            classifier.clear_cache();
+        }
+        if let Ok(mut approved) = self.recently_approved.lock() {
+            approved.clear();
+        }
+        self.denial_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Check if a command is safe (read-only, no approval needed)
     fn is_safe_command(&self, command: &str) -> bool {
         let cmd = command.trim().to_lowercase();

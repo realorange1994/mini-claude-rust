@@ -194,6 +194,63 @@ impl SessionMemory {
         result
     }
 
+    /// Formats memory entries for injection after compaction.
+    /// Each section is truncated to `max_section_chars` (~8000) matching
+    /// upstream's `truncateSessionMemoryForCompact`.
+    pub fn format_for_prompt_truncated(&self, max_section_chars: usize) -> String {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.entries.is_empty() {
+            return String::new();
+        }
+
+        // Group by category
+        let mut groups: HashMap<String, Vec<&MemoryEntry>> = HashMap::new();
+        for entry in &guard.entries {
+            groups.entry(entry.category.clone()).or_default().push(entry);
+        }
+
+        let mut categories: Vec<String> = groups.keys().cloned().collect();
+        categories.sort();
+
+        let mut result = String::from("## Session Memory\n\n");
+        result.push_str(
+            "The following notes were recorded during this or previous sessions. Use them as context.\n\n",
+        );
+
+        for cat in &categories {
+            let section_header = format!("### {}\n", cat);
+            result.push_str(&section_header);
+
+            let mut remaining = max_section_chars.saturating_sub(section_header.len());
+            if let Some(entries) = groups.get(cat) {
+                for entry in entries {
+                    let line = format!("- {}\n", entry.content);
+                    if remaining == 0 {
+                        continue;
+                    }
+                    if line.len() <= remaining {
+                        result.push_str(&line);
+                        remaining -= line.len();
+                    } else {
+                        // Truncate at sentence boundary
+                        let truncated = &line[..remaining];
+                        if let Some(nl_idx) = truncated.rfind('\n') {
+                            result.push_str(&line[..nl_idx + 1]);
+                        } else {
+                            result.push_str(truncated);
+                            result.push_str("]\n");
+                        }
+                        result.push_str("  [... section truncated ...]\n");
+                        break;
+                    }
+                }
+            }
+            result.push('\n');
+        }
+
+        result
+    }
+
     /// Returns true if there are no memory entries.
     pub fn is_empty(&self) -> bool {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
