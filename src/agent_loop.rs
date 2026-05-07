@@ -1005,6 +1005,16 @@ impl AgentLoop {
                         // preventing re-triggering on the next turn (Go: agent_loop.go:850).
                         let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
                         compactor.update_prev_turn_tokens(current_tokens);
+                        // Phase 2: Keep recent messages — preserve with tool structure intact.
+                        // Run BEFORE post_compact_recovery so attachments appear AFTER kept messages.
+                        // Matching Go's ordering: boundary → summary → kept → attachments.
+                        let keep_count = self.config.post_compact_history_snip_count;
+                        ctx.keep_recent_messages(keep_count);
+                        ctx.validate_tool_pairing();
+                        ctx.fix_role_alternation();
+                        // Phase 3: Post-compact recovery — re-inject critical context
+                        drop(ctx); // release compactor lock before async recovery
+                        drop(compactor);
                         let recovered_paths = self.post_compact_recovery().await;
                         // Mark recovered files as fresh (content re-injected).
                         for path in &recovered_paths {
@@ -1015,12 +1025,8 @@ impl AgentLoop {
                         if recovered_paths.is_empty() {
                             self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
-                        // Phase 3: Keep recent messages — preserve with tool structure intact
-                        let mut ctx = self.context.write().await;
                         // Inject running agent status so model doesn't spawn duplicates
                         self.inject_running_agent_status();
-                        let keep_count = self.config.post_compact_history_snip_count;
-                        ctx.keep_recent_messages(keep_count);
                     }
                 } else {
                     // Regular auto-compaction (token threshold based)
@@ -1057,7 +1063,17 @@ impl AgentLoop {
                         }
                     };
                     if will_compact {
-                        // Phase 2: Post-compact recovery — re-inject critical context
+                        // Phase 2: Keep recent messages — preserve with tool structure intact.
+                        // Run BEFORE post_compact_recovery so attachments appear AFTER kept messages.
+                        // Matching Go's ordering: boundary → summary → kept → attachments.
+                        {
+                            let mut ctx = self.context.write().await;
+                            let keep_count = self.config.post_compact_history_snip_count;
+                            ctx.keep_recent_messages(keep_count);
+                            ctx.validate_tool_pairing();
+                            ctx.fix_role_alternation();
+                        }
+                        // Phase 3: Post-compact recovery — re-inject critical context
                         let recovered_paths = self.post_compact_recovery().await;
                         // Mark recovered files as fresh (content re-injected).
                         for path in &recovered_paths {
@@ -1068,12 +1084,8 @@ impl AgentLoop {
                         if recovered_paths.is_empty() {
                             self.tool_state_tracker.borrow_mut().clear_conclusions();
                         }
-                        // Phase 3: Keep recent messages — preserve with tool structure intact
-                        let mut ctx = self.context.write().await;
                         // Inject running agent status so model doesn't spawn duplicates
                         self.inject_running_agent_status();
-                        let keep_count = self.config.post_compact_history_snip_count;
-                        ctx.keep_recent_messages(keep_count);
                     }
 
                     // Log summary to transcript if one was added
