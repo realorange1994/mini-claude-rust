@@ -1,4 +1,4 @@
-use crate::compact::{Compactor, estimate_tokens};
+use crate::compact::{Compactor, CachedMicrocompactTracker, estimate_tokens};
 use crate::config::{Config, CachedSystemPrompt};
 use crate::context::{ConversationContext, ConversationEntry, Message, MessageContent, MessageRole, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
@@ -237,6 +237,8 @@ pub struct AgentLoop {
     /// Caches the system prompt and only rebuilds it when marked dirty
     /// (e.g., after compaction events). Critical for Anthropic prefix caching.
     cached_system_prompt: CachedSystemPrompt,
+    /// Cached microcompact tracker for cache_edits API.
+    cached_mc: Arc<CachedMicrocompactTracker>,
 }
 
 impl AgentLoop {
@@ -345,6 +347,7 @@ impl AgentLoop {
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
+            cached_mc: Arc::new(CachedMicrocompactTracker::new()),
         })
     }
 
@@ -486,6 +489,7 @@ impl AgentLoop {
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
+            cached_mc: Arc::new(CachedMicrocompactTracker::new()),
         })
     }
 
@@ -1143,6 +1147,11 @@ impl AgentLoop {
                     consecutive_empty_responses = 0;
                     consecutive_unrecognized_errors = 0;
                     continue_reason = ContinueReason::NextTurn;
+
+                    // Register tool_use IDs for cache_edits tracking
+                    for tc in &tool_calls {
+                        self.cached_mc.register_tool_use(&tc.id);
+                    }
 
                     if !tool_calls.is_empty() {
                         // Execute tools
@@ -2058,6 +2067,19 @@ impl AgentLoop {
         let mut cached_messages = messages.to_vec();
         apply_prompt_caching(&mut cached_messages, "5m");
 
+        // Inject cache_edits block if the cached microcompact tracker has deletions pending.
+        // This deletes old tool results server-side while preserving the prompt cache.
+        if let Some(cache_edits) = self.cached_mc.get_cache_edits_block() {
+            for msg in cached_messages.iter_mut().rev() {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+                    if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        content.push(cache_edits);
+                    }
+                    break;
+                }
+            }
+        }
+
         let result = process_sse_events(
             &self.client,
             &self.base_url,
@@ -2274,6 +2296,19 @@ impl AgentLoop {
         // Apply prompt caching to messages (system_and_3 strategy)
         let mut cached_messages = messages.to_vec();
         apply_prompt_caching(&mut cached_messages, "5m");
+
+        // Inject cache_edits block if the cached microcompact tracker has deletions pending.
+        // This deletes old tool results server-side while preserving the prompt cache.
+        if let Some(cache_edits) = self.cached_mc.get_cache_edits_block() {
+            for msg in cached_messages.iter_mut().rev() {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+                    if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        content.push(cache_edits);
+                    }
+                    break;
+                }
+            }
+        }
 
         // Build system prompt array with cache_control
         let mut sys_arr = serde_json::json!([{"type": "text", "text": system_prompt}]);
@@ -2954,6 +2989,44 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             agent_emit!("[post-compact] Task/Todo state recovered");
         }
 
+        // --- Session Memory Recovery ---
+        // Re-inject session memory after compaction. Session memory contains
+        // user-defined notes that must survive context compaction.
+        if let Some(ref sm) = self.config.session_memory {
+            let sm_content = sm.format_for_prompt();
+            if !sm_content.is_empty() {
+                // Cap at 40K tokens to avoid blowing past context limits
+                const MAX_SM_TOKENS: usize = 40_000;
+                let sm_tokens = estimate_tokens(&sm_content);
+                let sm_content = if sm_tokens > MAX_SM_TOKENS {
+                    let char_limit = MAX_SM_TOKENS * 4;
+                    let truncated = if sm_content.len() > char_limit {
+                        let s = &sm_content[..char_limit];
+                        if let Some(nl) = s.rfind('\n') {
+                            if nl > char_limit / 2 {
+                                format!("{}\n\n[... session memory truncated for length ...]", &s[..nl])
+                            } else {
+                                format!("{}\n\n[... session memory truncated for length ...]", &sm_content[..char_limit])
+                            }
+                        } else {
+                            format!("{}\n\n[... session memory truncated for length ...]", &sm_content[..char_limit])
+                        }
+                    } else {
+                        sm_content
+                    };
+                    truncated
+                } else {
+                    sm_content
+                };
+                let attachment = format!("<session_memory>\n{}\n</session_memory>", sm_content);
+                {
+                    let mut ctx_mut = self.context.write().await;
+                    ctx_mut.add_attachment(attachment);
+                }
+                agent_emit!("[post-compact] Session memory recovered");
+            }
+        }
+
         // --- Post-compact cleanup ---
         // Clear caches and tracking state invalidated by compaction.
         // This matches upstream's runPostCompactCleanup in postCompactCleanup.ts.
@@ -2977,6 +3050,10 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         // Clear tool state conclusions. Compacted messages had conclusions from
         // pre-compact tool results; those results may no longer be in context.
         self.tool_state_tracker.borrow_mut().clear_conclusions();
+
+        // Reset cached microcompact tracker — clear all registered tool IDs
+        // and deleted refs. After compaction, tool results are rebuilt from scratch.
+        self.cached_mc.reset();
     }
 
     /// Build a re-announcement of all available tools after compaction.
@@ -3989,6 +4066,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
+            cached_mc: Arc::new(CachedMicrocompactTracker::new()),
         })
     }
     /// Called at tool-round boundaries so the sub-agent can process messages

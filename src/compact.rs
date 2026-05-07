@@ -687,6 +687,103 @@ fn strip_image_content(messages: &mut Vec<Message>) {
     }
 }
 
+// ─── Cached Microcompact (cache_edits API) ───────────────────────────────────
+
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+pub struct CachedMicrocompactTracker {
+    registered_tools: Mutex<HashSet<String>>,
+    tool_order: Mutex<Vec<String>>,
+    deleted_refs: Mutex<HashSet<String>>,
+    max_tools: usize,
+    keep_recent: usize,
+}
+
+impl CachedMicrocompactTracker {
+    pub fn new() -> Self {
+        Self {
+            registered_tools: Mutex::new(HashSet::new()),
+            tool_order: Mutex::new(Vec::new()),
+            deleted_refs: Mutex::new(HashSet::new()),
+            max_tools: 10,
+            keep_recent: 5,
+        }
+    }
+
+    pub fn register_tool_use(&self, tool_use_id: &str) {
+        let mut tools = self.registered_tools.lock().unwrap();
+        let mut order = self.tool_order.lock().unwrap();
+        if !tools.contains(tool_use_id) {
+            tools.insert(tool_use_id.to_string());
+            order.push(tool_use_id.to_string());
+        }
+    }
+
+    pub fn get_cache_edits_block(&self) -> Option<serde_json::Value> {
+        let tool_order = {
+            let order = self.tool_order.lock().unwrap();
+            order.clone()
+        };
+        let deleted_refs = {
+            let refs = self.deleted_refs.lock().unwrap();
+            refs.clone()
+        };
+
+        let compactable: Vec<&str> = tool_order
+            .iter()
+            .filter(|id| !deleted_refs.contains(*id))
+            .map(|s| s.as_str())
+            .collect();
+
+        if compactable.len() <= self.max_tools {
+            return None;
+        }
+
+        let split_idx = compactable.len() - self.keep_recent;
+        let to_delete: Vec<&str> = compactable[..split_idx].to_vec();
+
+        if to_delete.is_empty() {
+            return None;
+        }
+
+        // Mark as deleted
+        {
+            let mut refs = self.deleted_refs.lock().unwrap();
+            for id in &to_delete {
+                refs.insert((*id).to_string());
+            }
+        }
+
+        let edits: Vec<serde_json::Value> = to_delete
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "type": "delete_tool_result",
+                    "tool_use_id": *id
+                })
+            })
+            .collect();
+
+        Some(serde_json::json!({
+            "type": "cache_edits",
+            "edits": edits
+        }))
+    }
+
+    pub fn reset(&self) {
+        self.registered_tools.lock().unwrap().clear();
+        self.tool_order.lock().unwrap().clear();
+        self.deleted_refs.lock().unwrap().clear();
+    }
+}
+
+impl Default for CachedMicrocompactTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Run all 4 passes of pre-pruning on messages.
 pub fn prune_tool_results(messages: &mut Vec<Message>) {
     dedup_tool_results(messages);
@@ -1455,13 +1552,14 @@ async fn do_compact_llm_call(
     // Add context_management to clear tool results and thinking blocks
     // server-side during compaction. This preserves prompt cache (cache_edits)
     // by only removing cleared content, not invalidating the entire cache.
-    // Strategies: clear_tool_uses_20250919 (clears tool_use blocks after summary),
-    // clear_thinking_20251015 (clears thinking blocks after summary).
+    // Format matches upstream apiMicrocompact.ts: edits array with versioned type strings.
     payload.insert(
         "context_management".to_string(),
         serde_json::json!({
-            "clear_tool_uses": {"strategy": "all"},
-            "clear_thinking": {"strategy": "all"},
+            "edits": [
+                {"type": "clear_tool_uses_20250919", "clear_tool_inputs": true},
+                {"type": "clear_thinking_20251015"},
+            ]
         }),
     );
 
