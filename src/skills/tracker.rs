@@ -101,6 +101,27 @@ impl SkillTracker {
         entries.sort_by(|a, b| b.1.cmp(a.1)); // most recent first
         entries.into_iter().map(|(name, _)| name.clone()).collect()
     }
+
+    /// Reset skill discovery state after compaction.
+    /// This clears:
+    /// - shown_skills: system prompt will be rebuilt, all skills re-announced
+    /// - read_skills: skill content was injected via attachments; re-injecting
+    ///   full skill listing is pure cache creation, so we reset read state too
+    ///
+    /// used_skills is preserved because a skill being "used" is a durable fact
+    /// about the conversation. Matches upstream's postCompactCleanup.ts logic.
+    pub fn reset_post_compact(&mut self) {
+        self.shown_skills.clear();
+        self.read_skills.clear();
+    }
+
+    /// Restore read skills from persisted state (e.g. on resume from transcript).
+    /// This ensures skills survive multiple compaction cycles after resume.
+    pub fn restore_read_skills(&mut self, skills: HashMap<String, Instant>) {
+        for (name, ts) in skills {
+            self.read_skills.insert(name, ts);
+        }
+    }
 }
 
 #[cfg(test)]

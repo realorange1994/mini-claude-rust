@@ -465,7 +465,7 @@ impl AgentLoop {
             rt,
             interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rate_limit_state: RateLimitState::default(),
-            skill_tracker: Arc::new(RwLock::new(SkillTracker::new())),
+            skill_tracker: Arc::new(RwLock::new(Self::restore_skill_state_from_entries(&entries))),
             last_call_was_streaming: std::sync::atomic::AtomicBool::new(false),
             custom_system_prompt: None,
             tools_used: std::sync::atomic::AtomicUsize::new(0),
@@ -481,6 +481,42 @@ impl AgentLoop {
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
         })
+    }
+
+    /// Restore skill state from transcript entries on resume.
+    /// Returns a SkillTracker with restored state from read_skill invocations
+    /// and post-compact recovery patterns. Mirrors upstream's restoreSkillStateFromMessages.
+    fn restore_skill_state_from_entries(entries: &[TranscriptEntry]) -> SkillTracker {
+        let mut tracker = SkillTracker::new();
+        for entry in entries {
+            // Track read_skill tool invocations: these indicate skills that were read.
+            if entry.type_ == TYPE_TOOL_USE {
+                if entry.tool_name.as_deref() == Some("read_skill") {
+                    if let Some(args) = &entry.tool_args {
+                        if let Some(name_val) = args.get("name") {
+                            if let Some(name) = name_val.as_str().filter(|s| !s.is_empty()) {
+                                tracker.mark_shown(name);
+                                tracker.mark_read(name);
+                            }
+                        }
+                    }
+                }
+            }
+            // Also check for "[Post-compact skill recovery: <name>]" patterns in user messages.
+            if entry.type_ == TYPE_USER {
+                if let Some(start) = entry.content.find("[Post-compact skill recovery: ") {
+                    let rest = &entry.content[start + "[Post-compact skill recovery: ".len()..];
+                    if let Some(end) = rest.find(']') {
+                        let name = &rest[..end];
+                        if !name.is_empty() {
+                            tracker.mark_shown(name);
+                            tracker.mark_read(name);
+                        }
+                    }
+                }
+            }
+        }
+        tracker
     }
 
     /// Rebuild conversation context from transcript entries (Go format)
@@ -2793,7 +2829,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
                     let char_limit = max_skill_tokens * 4;
                     if char_limit < content.len() {
                         let truncated: String = content.chars().take(char_limit).collect();
-                        format!("{}\n... [truncated]", truncated)
+                        format!("{}\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]", truncated)
                     } else {
                         content.clone()
                     }
@@ -2893,7 +2929,30 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             agent_emit!("[post-compact] Task/Todo state recovered");
         }
 
+        // --- Post-compact cleanup ---
+        // Clear caches and tracking state invalidated by compaction.
+        // This matches upstream's runPostCompactCleanup in postCompactCleanup.ts.
+        self.run_post_compact_cleanup().await;
+
         recovered_paths
+    }
+
+    /// Run post-compact cleanup: clear caches and tracking state.
+    /// Call this after post_compact_recovery in every compaction path.
+    async fn run_post_compact_cleanup(&self) {
+        // Clear skill discovery state: after compaction, the system prompt is rebuilt
+        // and should re-announce all skills. Skill content is re-injected via
+        // post-compact attachments, so shown/read state should reset.
+        // Preserves used_skills since "used" is a durable fact.
+        self.skill_tracker.write().await.reset_post_compact();
+
+        // Invalidate cached system prompt so it rebuilds fresh with post-compact state.
+        // Note: CachedSystemPrompt exists in config.rs but is not wired into AgentLoop
+        // in the Rust version yet. When it is, call cached.mark_dirty() here.
+
+        // Clear tool state conclusions. Compacted messages had conclusions from
+        // pre-compact tool results; those results may no longer be in context.
+        self.tool_state_tracker.borrow_mut().clear_conclusions();
     }
 
     /// Build a re-announcement of all available tools after compaction.
