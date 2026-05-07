@@ -821,12 +821,12 @@ pub fn is_path_allowed_with_workspace(workspace: &std::path::Path, path: &str) -
 pub fn register_plan_mode_tools(registry: &Registry, cfg: &Config) {
     let cfg_for_enter = cfg.clone();
     registry.register(enter_plan_mode::EnterPlanModeTool {
-        get_mode: Box::new(move || cfg_for_enter.permission_mode.lock().unwrap().to_string()),
+        get_mode: Box::new(move || cfg_for_enter.permission_mode.lock().unwrap_or_else(|e| e.into_inner()).to_string()),
     });
 
     let cfg_for_exit = cfg.clone();
     registry.register(exit_plan_mode::ExitPlanModeTool {
-        get_mode: Box::new(move || cfg_for_exit.permission_mode.lock().unwrap().to_string()),
-        get_pre_plan_mode: Box::new(move || *cfg_for_exit.pre_plan_mode.lock().unwrap()),
+        get_mode: Box::new(move || cfg_for_exit.permission_mode.lock().unwrap_or_else(|e| e.into_inner()).to_string()),
+        get_pre_plan_mode: Box::new(move || *cfg_for_exit.pre_plan_mode.lock().unwrap_or_else(|e| e.into_inner())),
     });
 }

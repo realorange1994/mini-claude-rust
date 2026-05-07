@@ -131,7 +131,7 @@ fn main() -> Result<()> {
     if let Some(base_url) = args.base_url {
         cfg.base_url = Some(base_url);
     }
-    *cfg.permission_mode.lock().unwrap() = PermissionMode::from_str(&args.mode);
+    *cfg.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) = PermissionMode::from_str(&args.mode);
     cfg.max_turns = args.max_turns;
 
     // Validate: model is required
@@ -441,7 +441,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         let mode_lower = mode.to_lowercase();
                         match mode_lower.as_str() {
                             "ask" | "auto" | "bypass" | "plan" => {
-                                *agent.config.permission_mode.lock().unwrap() = PermissionMode::from_str(&mode_lower);
+                                *agent.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) = PermissionMode::from_str(&mode_lower);
                                 println!("Mode changed to: {}", mode_lower);
                             }
                             _ => {
@@ -449,7 +449,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                             }
                         }
                     } else {
-                        println!("Current mode: {}", agent.config.permission_mode.lock().unwrap());
+                        println!("Current mode: {}", agent.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()));
                         println!("Usage: /mode [ask|auto|bypass|plan]");
                     }
                     continue;

@@ -44,7 +44,7 @@ impl RuleStore {
     /// Add rules from a source with a given behavior
     pub fn add_rules(&self, source: &str, behavior: &str, rules: &[ParsedRule]) {
         let key = format!("{}|{}", source, behavior);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         // Add to rules list
         let existing = inner.rules.iter_mut().find(|(k, _)| k == &key);
@@ -71,7 +71,7 @@ impl RuleStore {
 
     /// Returns true if there's a tool-level deny rule for this tool
     pub fn has_deny_rule(&self, tool_name: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .rules
             .iter()
@@ -85,7 +85,7 @@ impl RuleStore {
 
     /// Returns true if there's a tool-level ask rule for this tool
     pub fn has_ask_rule(&self, tool_name: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .rules
             .iter()
@@ -99,7 +99,7 @@ impl RuleStore {
 
     /// Returns true if there's a tool-level allow rule for this tool
     pub fn has_allow_rule(&self, tool_name: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .rules
             .iter()
@@ -118,7 +118,7 @@ impl RuleStore {
         content: &str,
         behavior: &str,
     ) -> Option<ParsedRule> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for (key, rules) in &inner.rules {
             if !key.ends_with(&format!("|{}", behavior)) {
                 continue;
@@ -137,7 +137,7 @@ impl RuleStore {
 
     /// Get all rules with the given behavior
     pub fn get_all_rules(&self, behavior: &str) -> Vec<ParsedRule> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .rules
             .iter()
@@ -148,7 +148,7 @@ impl RuleStore {
 
     /// Get all rules applicable to a tool (tool-level only)
     pub fn get_rules_for_tool(&self, tool_name: &str) -> Vec<ParsedRule> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner
             .rules
             .iter()
@@ -160,7 +160,7 @@ impl RuleStore {
     /// Strip dangerous allow rules and return them as a stash.
     /// Returns Vec of (key, stripped_rules) tuples.
     pub fn strip_dangerous_allow_rules(&self) -> Vec<(String, Vec<ParsedRule>)> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut stash = Vec::new();
 
         for (key, rules) in &mut inner.rules {
@@ -213,7 +213,7 @@ impl RuleStore {
 
     /// Restore stripped rules back into the store
     pub fn restore_stripped_rules(&self, stash: Vec<(String, Vec<ParsedRule>)>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         for (key, rules) in stash {
             let existing = inner.rules.iter_mut().find(|(k, _)| k == &key);

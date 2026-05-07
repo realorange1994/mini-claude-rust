@@ -692,7 +692,7 @@ impl AutoModeClassifier {
                     "required": ["decision", "reason"]
                 }
             }],
-            "tool_choice": { "type": "tool", "name": "classify_action" }
+            "tool_choice": { "type": "auto" }
         });
 
         let url = format!("{}/v1/messages", self.base_url);

@@ -271,7 +271,7 @@ impl AgentLoop {
         let mut gate = PermissionGate::new(config.clone());
 
         // Wire auto mode classifier if enabled
-        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Auto {
+        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) == crate::permissions::PermissionMode::Auto {
             let classifier_model = if config.auto_classifier_model.is_empty() {
                 config.model.clone()
             } else {
@@ -294,7 +294,7 @@ impl AgentLoop {
         let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
         let transcript = Transcript::new(&transcript_path);
         // Write system entry with model/mode info (matching Go format)
-        let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode.lock().unwrap()));
+        let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner())));
 
         // Initialize compactor with config values
         let session_memory = config.session_memory.clone();
@@ -397,7 +397,7 @@ impl AgentLoop {
             let _ = std::fs::create_dir_all(&transcript_dir);
             let path = transcript_dir.join(format!("{}.jsonl", session_id));
             let t = Transcript::new(&path);
-            let _ = t.add_system(format!("model={}, mode={}", config.model, *config.permission_mode.lock().unwrap()));
+            let _ = t.add_system(format!("model={}, mode={}", config.model, *config.permission_mode.lock().unwrap_or_else(|e| e.into_inner())));
             let _ = t.add_user(format!(
                 "Resumed from {} ({} messages restored)",
                 transcript_path.display(),
@@ -438,7 +438,7 @@ impl AgentLoop {
         let context = Arc::new(RwLock::new(context));
 
         // Wire auto mode classifier if enabled
-        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Auto {
+        if config.auto_classifier_enabled && *config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) == crate::permissions::PermissionMode::Auto {
             let classifier_model = if config.auto_classifier_model.is_empty() {
                 config.model.clone()
             } else {
@@ -723,7 +723,7 @@ impl AgentLoop {
         }
         let tracker = self.skill_tracker.blocking_read();
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
-        let mode = *self.config.permission_mode.lock().unwrap();
+        let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
         // Use cached system prompt for prefix caching benefits.
         let prompt = self.cached_system_prompt.get_or_build(
             &*self.registry.blocking_read(),
@@ -764,7 +764,7 @@ impl AgentLoop {
         }
         let tracker = self.skill_tracker.read().await;
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
-        let mode = *self.config.permission_mode.lock().unwrap();
+        let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
         // Use cached system prompt: only rebuilds when marked dirty (e.g., after compaction).
         // Critical for Anthropic prefix caching to avoid rebuilding identical content each turn.
         let prompt = self.cached_system_prompt.get_or_build(
@@ -2936,7 +2936,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
         // --- Plan mode recovery ---
         // If in plan mode, remind the model to continue planning without executing.
-        if *self.config.permission_mode.lock().unwrap() == crate::permissions::PermissionMode::Plan {
+        if *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) == crate::permissions::PermissionMode::Plan {
             let mut ctx_mut = self.context.write().await;
             ctx_mut.add_attachment(
                 "## Plan Mode Active\n\nYou are in plan mode. Do NOT execute any tools without first presenting your plan to the user and getting their approval. Continue planning — do not execute.".to_string()
@@ -3560,13 +3560,13 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         use crate::permissions::PermissionMode;
         match mode_change {
             crate::tools::ModeChange::EnterPlan => {
-                let current = *self.config.permission_mode.lock().unwrap();
-                *self.config.pre_plan_mode.lock().unwrap() = Some(current);
-                *self.config.permission_mode.lock().unwrap() = PermissionMode::Plan;
+                let current = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
+                *self.config.pre_plan_mode.lock().unwrap_or_else(|e| e.into_inner()) = Some(current);
+                *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) = PermissionMode::Plan;
                 agent_emit!("[mode] Entered plan mode");
             }
             crate::tools::ModeChange::ExitPlan { restore_mode } => {
-                *self.config.permission_mode.lock().unwrap() = restore_mode;
+                *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) = restore_mode;
                 agent_emit!("[mode] Exited plan mode, restored to {}", restore_mode);
             }
         }
@@ -3998,7 +3998,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let _ = std::fs::create_dir_all(&transcript_dir);
         let transcript_path = transcript_dir.join(format!("{}.jsonl", session_id));
         let transcript = Transcript::new(&transcript_path);
-        let _ = transcript.add_system(format!("sub-agent: model={}, mode={}", gate.config.model, *gate.config.permission_mode.lock().unwrap()));
+        let _ = transcript.add_system(format!("sub-agent: model={}, mode={}", gate.config.model, *gate.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner())));
 
         let session_memory = config.session_memory.clone();
         let compactor = RwLock::new(

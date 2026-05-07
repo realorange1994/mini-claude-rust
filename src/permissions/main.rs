@@ -366,7 +366,7 @@ impl PermissionGate {
                 if !v_result.allowed {
                     // Bypass mode: allow all path access (skip validation)
                     // Auto mode: skip path validation — let classifier decide
-                    let mode = *self.config.permission_mode.lock().unwrap();
+                    let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
                     if mode == PermissionMode::Bypass || mode == PermissionMode::Auto {
                         // Fall through to allow / classifier evaluation
                     } else {
@@ -391,7 +391,7 @@ impl PermissionGate {
 
         // STEP 1d: Tool-level ask rule (bypass-immune)
         // Bypass mode: skip ask rules, allow through
-        let mode = *self.config.permission_mode.lock().unwrap();
+        let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
         if mode != PermissionMode::Bypass {
             if let Some(rule) = self.find_tool_level_ask(&upstream_name) {
                 restore_stripped();
@@ -439,7 +439,7 @@ impl PermissionGate {
         // Step 2e: ask from safetyCheck is bypass-immune
         // Step 2f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
         // Bypass mode: skip, allow through
-        let mode = *self.config.permission_mode.lock().unwrap();
+        let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
         if mode != PermissionMode::Bypass && result.behavior == PermissionBehavior::Ask {
             restore_stripped();
             if self.should_avoid_prompts() {
@@ -494,7 +494,7 @@ impl PermissionGate {
         }
 
         // Step 2a: bypass mode — allow all (only reached if 1d-1g didn't return)
-        match *self.config.permission_mode.lock().unwrap() {
+        match *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) {
             PermissionMode::Bypass => {
                 restore_stripped();
                 // Bypass mode: allow all tools directly.
@@ -573,13 +573,13 @@ impl PermissionGate {
     /// Get current permission mode
     #[allow(dead_code)]
     pub fn mode(&self) -> PermissionMode {
-        *self.config.permission_mode.lock().unwrap()
+        *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set permission mode
     #[allow(dead_code)]
     pub fn set_mode(&mut self, mode: PermissionMode) {
-        *self.config.permission_mode.lock().unwrap() = mode;
+        *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
     }
 
     /// Auto mode permission check using the classifier.
@@ -679,7 +679,7 @@ impl PermissionGate {
             params: compact,
             expires: Instant::now() + Duration::from_secs(120),
         };
-        let mut approved = self.recently_approved.lock().unwrap();
+        let mut approved = self.recently_approved.lock().unwrap_or_else(|e| e.into_inner());
         approved.push(action);
         // Trim expired entries
         let now = Instant::now();
@@ -690,7 +690,7 @@ impl PermissionGate {
     fn tool_matches_recent_approval(&self, tool_name: &str, params: &std::collections::HashMap<String, serde_json::Value>) -> bool {
         let compact = compact_params(tool_name, params);
         let now = Instant::now();
-        let approved = self.recently_approved.lock().unwrap();
+        let approved = self.recently_approved.lock().unwrap_or_else(|e| e.into_inner());
         for a in approved.iter() {
             if a.expires > now && a.tool_name == tool_name && a.params == compact {
                 return true;
@@ -752,7 +752,7 @@ impl Clone for PermissionGate {
 impl PermissionGate {
     /// Try to strip dangerous allow rules in auto mode
     fn try_strip_dangerous_rules(&self) -> bool {
-        let mode = *self.config.permission_mode.lock().unwrap();
+        let mode = *self.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner());
         if mode != PermissionMode::Auto {
             return false;
         }
@@ -763,7 +763,7 @@ impl PermissionGate {
             return false;
         }
 
-        let mut guard = self.stripped_rules.lock().unwrap();
+        let mut guard = self.stripped_rules.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
             return false; // Already stripped
         }
