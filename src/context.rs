@@ -497,6 +497,7 @@ pub struct ConversationContext {
     messages: Vec<Message>,
     #[allow(dead_code)]
     system_prompt: String,
+    last_assistant_time: Option<std::time::Instant>, // used for time-based microcompact
 }
 
 /// Set of tool names whose results should be cleared during micro-compaction.
@@ -528,6 +529,7 @@ impl ConversationContext {
             config,
             messages: Vec::new(),
             system_prompt: String::new(),
+            last_assistant_time: None,
         }
     }
 
@@ -539,6 +541,19 @@ impl ConversationContext {
     #[allow(dead_code)]
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// Returns true when the time gap since the last assistant message exceeds
+    /// gap_minutes. A gap_minutes of 0 means always fire (legacy count-based
+    /// behavior for backward compatibility).
+    pub fn should_time_based_micro_compact(&self, gap_minutes: u64) -> bool {
+        if gap_minutes == 0 {
+            return true; // disabled — fire every turn
+        }
+        match self.last_assistant_time {
+            None => true, // no assistant yet — fire
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(gap_minutes * 60),
+        }
     }
 
     /// Add a user text message
@@ -559,6 +574,7 @@ impl ConversationContext {
             MessageRole::Assistant,
             MessageContent::Text(text),
         ));
+        self.last_assistant_time = Some(std::time::Instant::now());
         self.truncate_if_needed();
     }
 
@@ -568,6 +584,7 @@ impl ConversationContext {
             MessageRole::Assistant,
             MessageContent::ToolUseBlocks(tool_calls),
         ));
+        self.last_assistant_time = Some(std::time::Instant::now());
         self.truncate_if_needed();
     }
 

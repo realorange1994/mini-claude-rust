@@ -1,5 +1,5 @@
 use crate::compact::{Compactor, estimate_tokens};
-use crate::config::Config;
+use crate::config::{Config, CachedSystemPrompt};
 use crate::context::{ConversationContext, ConversationEntry, Message, MessageContent, MessageRole, ToolUseBlock, ToolResultBlock, ToolResultContent};
 use crate::filehistory::FileHistory;
 use crate::permissions::PermissionGate;
@@ -233,6 +233,10 @@ pub struct AgentLoop {
     /// When a transient error occurs and text was already delivered, we fall back
     /// to non-streaming to avoid text duplication.
     last_deltas_state: std::cell::RefCell<DeltasState>,
+    /// Cached system prompt with dirty-flag mechanism.
+    /// Caches the system prompt and only rebuilds it when marked dirty
+    /// (e.g., after compaction events). Critical for Anthropic prefix caching.
+    cached_system_prompt: CachedSystemPrompt,
 }
 
 impl AgentLoop {
@@ -340,6 +344,7 @@ impl AgentLoop {
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
+            cached_system_prompt: CachedSystemPrompt::new(),
         })
     }
 
@@ -480,6 +485,7 @@ impl AgentLoop {
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
+            cached_system_prompt: CachedSystemPrompt::new(),
         })
     }
 
@@ -714,7 +720,8 @@ impl AgentLoop {
         let tracker = self.skill_tracker.blocking_read();
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
         let mode = *self.config.permission_mode.lock().unwrap();
-        let prompt = crate::config::build_system_prompt(
+        // Use cached system prompt for prefix caching benefits.
+        let prompt = self.cached_system_prompt.get_or_build(
             &*self.registry.blocking_read(),
             &mode,
             &self.config.project_dir,
@@ -754,7 +761,9 @@ impl AgentLoop {
         let tracker = self.skill_tracker.read().await;
         let session_memory = self.config.session_memory.as_ref().map(|sm| sm.as_ref());
         let mode = *self.config.permission_mode.lock().unwrap();
-        let prompt = crate::config::build_system_prompt(
+        // Use cached system prompt: only rebuilds when marked dirty (e.g., after compaction).
+        // Critical for Anthropic prefix caching to avoid rebuilding identical content each turn.
+        let prompt = self.cached_system_prompt.get_or_build(
             &*self.registry.read().await,
             &mode,
             &self.config.project_dir,
@@ -946,23 +955,27 @@ impl AgentLoop {
             // Run compaction before API call (matching Go's CompactContext)
             // Uses async LLM-driven compaction when threshold is reached
 
-            // Phase 0: Micro-compact — clear old tool results every turn (cheap, no LLM call)
+            // Phase 0: Micro-compact — clear old tool results (cheap, no LLM call)
+            // Time-based trigger: only fire when gap since last assistant > threshold (default 60 min).
+            // When gap_minutes=0, fires every turn (legacy count-based behavior).
             if self.config.micro_compact_enabled {
-                let keep_recent = self.config.micro_compact_keep_recent;
-                let placeholder = self.config.micro_compact_placeholder.clone();
                 let mut ctx = self.context.write().await;
-                let cleared = ctx.micro_compact_entries(keep_recent, &placeholder, self.config.micro_compact_min_char_count);
-                if cleared > 0 {
-                    agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
-                    // NOTE: do NOT call tool_state_tracker.on_compaction() here.
-                    // Micro-compact clears OLD tool results (beyond keepRecent threshold) by
-                    // replacing their text with placeholders. This is lightweight text replacement,
-                    // not a structural context compaction. The files and searches themselves
-                    // remain relevant — only the detailed output is trimmed. Incrementing the
-                    // epoch here would incorrectly mark all files and searches as stale, causing
-                    // the Session State note to say "RE-READ if needed" for files whose
-                    // content is still in context. The epoch advances only during real compaction
-                    // (where context is structurally reduced and the summary may miss details).
+                if ctx.should_time_based_micro_compact(self.config.micro_compact_gap_minutes) {
+                    let keep_recent = self.config.micro_compact_keep_recent;
+                    let placeholder = self.config.micro_compact_placeholder.clone();
+                    let cleared = ctx.micro_compact_entries(keep_recent, &placeholder, self.config.micro_compact_min_char_count);
+                    if cleared > 0 {
+                        agent_emit!("[micro-compact] Cleared {} old tool results", cleared);
+                        // NOTE: do NOT call tool_state_tracker.on_compaction() here.
+                        // Micro-compact clears OLD tool results (beyond keepRecent threshold) by
+                        // replacing their text with placeholders. This is lightweight text replacement,
+                        // not a structural context compaction. The files and searches themselves
+                        // remain relevant — only the detailed output is trimmed. Incrementing the
+                        // epoch here would incorrectly mark all files and searches as stale, causing
+                        // the Session State note to say "RE-READ if needed" for files whose
+                        // content is still in context. The epoch advances only during real compaction
+                        // (where context is structurally reduced and the summary may miss details).
+                    }
                 }
             }
 
@@ -2959,8 +2972,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         self.skill_tracker.write().await.reset_post_compact();
 
         // Invalidate cached system prompt so it rebuilds fresh with post-compact state.
-        // Note: CachedSystemPrompt exists in config.rs but is not wired into AgentLoop
-        // in the Rust version yet. When it is, call cached.mark_dirty() here.
+        self.cached_system_prompt.mark_dirty();
 
         // Clear tool state conclusions. Compacted messages had conclusions from
         // pre-compact tool results; those results may no longer be in context.
@@ -3976,10 +3988,9 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
+            cached_system_prompt: CachedSystemPrompt::new(),
         })
     }
-
-    /// Set the function used to drain pending messages from the parent agent.
     /// Called at tool-round boundaries so the sub-agent can process messages
     /// sent via send_message without interrupting in-flight tool calls.
     pub fn set_drain_pending_messages(&mut self, f: Arc<dyn Fn() -> Vec<String> + Send + Sync>) {

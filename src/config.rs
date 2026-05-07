@@ -36,6 +36,7 @@ pub struct Config {
     pub micro_compact_keep_recent: usize,
     pub micro_compact_placeholder: String,
     pub micro_compact_min_char_count: usize,
+    pub micro_compact_gap_minutes: u64, // time gap (minutes) since last assistant before triggering; 0 = disabled (run every turn)
     // Post-compact recovery config (Phase 2)
     pub post_compact_recover_files: bool,
     pub post_compact_max_files: usize,
@@ -123,6 +124,7 @@ impl Default for Config {
             micro_compact_keep_recent: 5,
             micro_compact_placeholder: "[Old tool result content cleared]".to_string(),
             micro_compact_min_char_count: 2000,
+            micro_compact_gap_minutes: 60, // trigger when gap > 60 min; matches server cache TTL
             post_compact_recover_files: true,
             post_compact_max_files: 5,
             post_compact_max_file_chars: 50_000, // legacy
