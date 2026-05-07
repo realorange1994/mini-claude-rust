@@ -104,14 +104,20 @@ impl SkillTracker {
 
     /// Reset skill discovery state after compaction.
     /// This clears:
-    /// - shown_skills: system prompt will be rebuilt, all skills re-announced
-    /// - read_skills: skill content was injected via attachments; re-injecting
-    ///   full skill listing is pure cache creation, so we reset read state too
+    ///   - read_skills: skill content was re-injected via attachments; the attachments
+    ///     survive in the transcript, so re-injecting full skill listing is pure
+    ///     cache creation (~4K tokens). We reset read state to prevent re-injection.
+    ///   - shown_skills is PRESERVED: re-injecting the full skill_listing (~4K tokens)
+    ///     post-compact is pure cache creation with marginal benefit. The model still
+    ///     has SkillTool in schema, invoked_skills preserves used skill content, and
+    ///     dynamic additions are handled by the skill change detector.
     ///
     /// used_skills is preserved because a skill being "used" is a durable fact
-    /// about the conversation. Matches upstream's postCompactCleanup.ts logic.
+    /// about the conversation. Matches upstream's postCompactCleanup.ts rationale
+    /// (it intentionally does NOT call resetSentSkillNames).
     pub fn reset_post_compact(&mut self) {
-        self.shown_skills.clear();
+        // Only reset read_skills to prevent re-injecting full skill listing.
+        // shown_skills is preserved so the ~4K token skill listing is not re-announced.
         self.read_skills.clear();
     }
 

@@ -13,7 +13,7 @@ use regex::Regex;
 
 use crate::context::{
     CompactTrigger, ConversationContext, Message, MessageContent, MessageRole,
-    ToolResultContent, ToolUseBlock, ToolResultBlock,
+    ToolResultContent,
 };
 use crate::session_memory::SessionMemory;
 
@@ -179,6 +179,105 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len])
     }
+}
+
+/// Calculate adaptive tail size based on token budgets and message counts.
+/// Walking backward from the boundary index, collects entries until:
+///   - At least minTokens tokens are accumulated (enough context for recovery)
+///   - At least minTextMsgs text messages are included (model visibility)
+///   - At most maxTokens (cap to prevent tail bloat)
+/// Then adjusts backward for tool_use/tool_result pairing integrity.
+/// Returns (tail_start_index, tail_messages).
+fn calculate_adaptive_tail(
+    messages: &[Message],
+    boundary_idx: usize,
+    min_tokens: usize,
+    min_text_msgs: usize,
+    max_tokens: usize,
+) -> (usize, Vec<Message>) {
+    if boundary_idx == 0 || messages.is_empty() {
+        return (messages.len(), vec![]);
+    }
+
+    let mut tail: Vec<Message> = Vec::new();
+    let mut accum_tokens: usize = 0;
+    let mut text_msg_count: usize = 0;
+
+    for i in (0..boundary_idx).rev() {
+        let msg = &messages[i];
+
+        // Skip meta entries (these are filtered out during rebuild)
+        match &msg.content {
+            MessageContent::CompactBoundary { .. } | MessageContent::Summary(_)
+            | MessageContent::Attachment(_) => continue,
+            _ => {}
+        }
+
+        let msg_tokens = estimate_message_tokens(msg);
+
+        // Prepend to tail (we're walking backward)
+        tail.insert(0, msg.clone());
+        accum_tokens += msg_tokens;
+
+        if matches!(msg.content, MessageContent::Text(_)) {
+            text_msg_count += 1;
+        }
+
+        // Check constraints
+        if accum_tokens >= min_tokens && text_msg_count >= min_text_msgs {
+            break; // met minimum requirements
+        }
+        if accum_tokens >= max_tokens {
+            break; // cap reached
+        }
+    }
+
+    // Adjust backward for tool_use/tool_result pairing integrity
+    let tail_start_in_original = boundary_idx.saturating_sub(tail.len());
+    let mut missing_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for msg in &tail {
+        if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
+            for block in blocks {
+                missing_ids.insert(block.tool_use_id.clone());
+            }
+        }
+    }
+    for msg in &tail {
+        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+            for block in blocks {
+                missing_ids.remove(&block.id);
+            }
+        }
+    }
+
+    if !missing_ids.is_empty() {
+        for i in (0..tail_start_in_original).rev() {
+            if let MessageContent::ToolUseBlocks(blocks) = &messages[i].content {
+                let mut has_match = false;
+                for block in blocks {
+                    if missing_ids.remove(&block.id) {
+                        has_match = true;
+                    }
+                }
+                if has_match {
+                    tail.insert(0, messages[i].clone());
+                }
+            }
+            if missing_ids.is_empty() {
+                break;
+            }
+        }
+        if !missing_ids.is_empty() {
+            eprintln!(
+                "[sm-compact] {} tool_use blocks missing in tail, will be cleaned by validate_tool_pairing",
+                missing_ids.len()
+            );
+        }
+    }
+
+    let actual_tail_start = boundary_idx.saturating_sub(tail.len());
+    (actual_tail_start, tail)
 }
 
 /// Generate a detailed summary of conversation entries, matching Go's entriesToSummaryText.
@@ -1195,13 +1294,17 @@ pub async fn compact_conversation(
     let mut last_err: Option<anyhow::Error> = None;
 
     for _attempt in 0..=MAX_PTL_RETRIES {
-        let result = do_compact_llm_call(&current_messages, client, model, api_key, base_url, trigger, is_auto, last_summary, transcript_path).await;
+        let result = do_compact_llm_call_with_retry(
+            &current_messages, client, model, api_key, base_url,
+            trigger, is_auto, last_summary, transcript_path,
+        ).await;
         match result {
             Ok(r) => return Ok(r),
             Err(e) => {
                 let err_str = e.to_string();
-                if !crate::error_types::is_context_length_error(&err_str) {
-                    // Non-PTL error — bail out
+
+                // Permanent errors: auth, model not found, etc. — bail out
+                if is_permanent_error(&err_str) {
                     return Err(e);
                 }
 
@@ -1220,8 +1323,10 @@ pub async fn compact_conversation(
                         current_messages.len() / 5 // fallback: drop 20%
                     }
                 } else {
-                    // Gap unparseable: drop 20% fallback
-                    current_messages.len() / 5
+                    // Non-PTL error: transient error already retried by streaming
+                    // retry wrapper, so no point retrying again without changes.
+                    // Break to return the final error from streaming retry.
+                    break;
                 };
 
                 if drop_count < 1 || current_messages.len() - drop_count < 2 {
@@ -1247,7 +1352,11 @@ pub async fn compact_conversation(
         }
     }
 
-    Err(anyhow::anyhow!("Compact API error: prompt too long after {} retries, {}", MAX_PTL_RETRIES, last_err.unwrap_or_else(|| anyhow::anyhow!("unknown error"))))
+    Err(anyhow::anyhow!(
+        "Compact API error after {} retries: {}",
+        MAX_PTL_RETRIES,
+        last_err.unwrap_or_else(|| anyhow::anyhow!("unknown error"))
+    ))
 }
 
 /// Single attempt at the LLM compaction API call.
@@ -1359,11 +1468,13 @@ async fn do_compact_llm_call(
 
     let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
 
+    // Stream the compact response to collect text incrementally.
     let response = client
         .post(&url)
         .header("x-api-key", api_key)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
         .header("anthropic-version", "2023-06-01")
         .json(&payload)
         .send()
@@ -1376,17 +1487,63 @@ async fn do_compact_llm_call(
         anyhow::bail!("Compact API error {}: {}", status, body);
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse compact response: {}", e))?;
+    // Collect streaming response text incrementally via SSE.
+    let mut stream = response.bytes_stream();
+    let mut accumulated = String::new();
+    let mut byte_buf: Vec<u8> = Vec::new();
+
+    use futures::StreamExt;
+    while let Some(chunk_result) = stream.next().await {
+        let bytes = match chunk_result {
+            Ok(b) => b,
+            Err(e) => {
+                // SSE stream error — signal retry to caller
+                anyhow::bail!("Compact streaming error: {}", e);
+            }
+        };
+
+        for b in bytes {
+            if b == b'\n' {
+                let line_bytes = byte_buf.trim_ascii().to_vec();
+                byte_buf.clear();
+                if line_bytes.is_empty() {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
+                if !line.starts_with("data:") {
+                    continue;
+                }
+                let data = line.strip_prefix("data:").unwrap().trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(delta) = event.get("delta") {
+                        if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                accumulated.push_str(text);
+                            }
+                        }
+                    }
+                }
+            } else {
+                byte_buf.push(b);
+            }
+        }
+    }
+
+    if accumulated.is_empty() {
+        anyhow::bail!("Compact stream ended without receiving any events");
+    }
 
     // Extract the summary text from the response, strip analysis blocks,
     // extract <summary> content, and redact sensitive info
-    let summary_text = extract_summary_text(&body)
-        .map(|t| extract_summary_from_compact_output(&t))
-        .map(|t| redact_sensitive_text(&t))
-        .ok_or_else(|| anyhow::anyhow!("No summary text in compact response"))?;
+    let summary_text = extract_summary_from_compact_output(&accumulated);
+    let summary_text = redact_sensitive_text(&summary_text);
+    if summary_text.trim().is_empty() {
+        anyhow::bail!("No summary text in compact response");
+    }
 
     // Build the compaction result
     let boundary = make_compact_boundary_message(trigger, pre_compact_tokens);
@@ -1427,6 +1584,107 @@ async fn do_compact_llm_call(
         pre_compact_tokens,
         post_compact_tokens,
     })
+}
+
+/// Returns true if err is a transient failure that warrants retrying
+/// the streaming compaction call.
+fn is_transient_compact_error(err_str: &str) -> bool {
+    err_str.contains("rate_limit")
+        || err_str.contains("429")
+        || err_str.contains("timeout")
+        || err_str.contains("deadline exceeded")
+        || err_str.contains("connection reset")
+        || err_str.contains("network")
+        || err_str.contains("context deadline exceeded")
+        || err_str.contains("context canceled")
+        || err_str.contains("server_error")
+        || err_str.contains("service_unavailable")
+        || err_str.contains("Compact stream ended without receiving any events")
+        || err_str.contains("Compact streaming error")
+}
+
+/// Returns true if err is a permanent failure that should not be retried.
+/// These are errors where retrying will never succeed.
+fn is_permanent_error(err_str: &str) -> bool {
+    err_str.contains("invalid_api_key")
+        || err_str.contains("authentication")
+        || err_str.contains("unauthorized")
+        || err_str.contains("401")
+        || err_str.contains("403")
+        || err_str.contains("model_not_found")
+        || err_str.contains("model not found")
+        || err_str.contains("streaming not supported")
+        || err_str.contains("invalid request")
+}
+
+/// Wraps do_compact_llm_call with retry logic for transient failures.
+/// Retries up to MAX_COMPACT_STREAMING_RETRIES times with exponential backoff,
+/// matching upstream's streamCompactSummary retry behavior.
+const MAX_COMPACT_STREAMING_RETRIES: usize = 2;
+
+async fn do_compact_llm_call_with_retry(
+    messages: &[Message],
+    client: &reqwest::Client,
+    model: &str,
+    api_key: &str,
+    base_url: &str,
+    trigger: CompactTrigger,
+    is_auto: bool,
+    last_summary: Option<&str>,
+    transcript_path: Option<&str>,
+) -> anyhow::Result<CompactionResult> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 0..=MAX_COMPACT_STREAMING_RETRIES {
+        if attempt > 0 {
+            // Exponential backoff: 5s, 15s, 45s...
+            let delay_secs = 5 * attempt * attempt;
+            let delay = std::time::Duration::from_secs(delay_secs.max(5) as u64);
+            eprintln!(
+                "[Compaction] streaming retry {}/{} after {:?}...",
+                attempt, MAX_COMPACT_STREAMING_RETRIES, delay
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        match do_compact_llm_call(
+            messages,
+            client,
+            model,
+            api_key,
+            base_url,
+            trigger,
+            is_auto,
+            last_summary,
+            transcript_path,
+        )
+        .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                let err_str = e.to_string();
+
+                // Do NOT retry on PTL errors — let the PTL loop handle them
+                if crate::error_types::is_context_length_error(&err_str) {
+                    return Err(e);
+                }
+
+                // Retry on transient failures; bail on definitive errors
+                if !is_transient_compact_error(&err_str) {
+                    // Permanent failure (auth, model not found, etc.)
+                    return Err(e);
+                }
+
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Compact streaming failed after {} retries: {}",
+        MAX_COMPACT_STREAMING_RETRIES,
+        last_err.unwrap_or_else(|| anyhow::anyhow!("unknown error"))
+    ))
 }
 
 /// Extract summary text from the API response
@@ -1608,58 +1866,12 @@ pub fn try_sm_compact(
         MessageContent::Summary(summary_content),
     );
 
-    // Keep the last few messages as tail to maintain context continuity.
-    // 4 was too small: a single tool_use + tool_result = 2 messages, so 4 only
-    // preserved 2 recent tool pairs. After SM-compact the model would forget the
-    // tool results from just 2 turns back, causing re-execution.
-    // 8 gave 4 tool pairs (~2 turns of back-and-forth) which matched upstream's
-    // keepLast default in SmartCompact.
-    // 12 gives 6 tool pairs (~3 turns) — better context retention after compaction
-    // without excessive token usage.
-    const TAIL_SIZE: usize = 12;
-    let tail_start = messages.len().saturating_sub(TAIL_SIZE);
-    let mut tail: Vec<Message> = messages[tail_start..].to_vec();
-
-    // Adjust tail backwards to include missing tool_use blocks.
-    // If tail starts with a ToolResultBlocks that references a tool_use NOT in the tail,
-    // walk backwards to include the corresponding tool_use message.
-    // This matches upstream's adjustIndexToPreserveAPIInvariants.
-    let mut missing_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for msg in &tail {
-        if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
-            for block in blocks {
-                missing_ids.insert(block.tool_use_id.clone());
-            }
-        }
-    }
-    for msg in &tail {
-        if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
-            for block in blocks {
-                missing_ids.remove(&block.id);
-            }
-        }
-    }
-    if !missing_ids.is_empty() {
-        for i in (0..tail_start).rev() {
-            if let MessageContent::ToolUseBlocks(blocks) = &messages[i].content {
-                let mut has_match = false;
-                for block in blocks {
-                    if missing_ids.remove(&block.id) {
-                        has_match = true;
-                    }
-                }
-                if has_match {
-                    tail.insert(0, messages[i].clone());
-                }
-            }
-            if missing_ids.is_empty() {
-                break;
-            }
-        }
-        if !missing_ids.is_empty() {
-            eprintln!("[sm-compact] {} tool_use blocks missing in tail, will be cleaned by validate_tool_pairing", missing_ids.len());
-        }
-    }
+    // Calculate adaptive tail using token budgets instead of fixed entry count.
+    // Min: 2K tokens / 4 text msgs, Max: 12K tokens.
+    let (_, mut tail) = calculate_adaptive_tail(
+        &messages, messages.len(),
+        2000, 4, 12_000,
+    );
 
     let mut new_messages = vec![boundary, summary];
     new_messages.extend(tail);
@@ -2155,16 +2367,11 @@ impl Compactor {
                     self.phase = CompactPhase::None;
 
                     // Replace context with boundary + summary + recent tail messages.
-                    // This preserves the most recent conversation context while
-                    // replacing older messages with the summary, matching the
-                    // pattern used by hermes and the Go version.
-                    // Keep the last few messages as "tail" to maintain context
-                    // continuity after compaction.
-                    // 4 was too small (only ~2 tool pairs); 8 was OK but still
-                    // caused context loss. Use 12 for ~3 turns of back-and-forth.
-                    const TAIL_SIZE: usize = 12;
-                    let tail_start = messages.len().saturating_sub(TAIL_SIZE);
-                    let mut tail: Vec<Message> = messages[tail_start..].to_vec();
+                    // Use adaptive token-budget-based tail instead of fixed message count.
+                    // This preserves recent conversation context while replacing older
+                    // messages with the summary.
+                    let (tail_start, mut tail) =
+                        calculate_adaptive_tail(&messages, messages.len(), 2000, 4, 12000);
 
                     // Adjust tail backwards to include missing tool_use blocks.
                     // If tail starts with a ToolResultBlocks that references a tool_use NOT in the tail,
