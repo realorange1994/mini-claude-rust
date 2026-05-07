@@ -112,7 +112,7 @@ Usage:
                     if info.is_partial {
                         drop(fr);
                         return ToolResult::error(
-                            "Error: file was only partially read. You must do a fresh full read (without offset/limit) before editing.".to_string()
+                            "Error: file was only partially read (with offset/limit). You must do a fresh full read (read_file without offset/limit parameters) before editing.".to_string()
                         );
                     }
                     if let Ok(meta) = fs::metadata(&path) {
@@ -147,7 +147,7 @@ Usage:
                 } else {
                     drop(fr);
                     return ToolResult::error(
-                        "Error: file has not been read yet. Read it first before editing it.".to_string()
+                        "Error: file has not been read. For existing files, you MUST use read_file first before edit_file. To modify an existing file: 1) read_file to read it, 2) edit_file for small changes or write_file for complete rewrites.".to_string()
                     );
                 }
             }

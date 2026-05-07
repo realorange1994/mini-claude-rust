@@ -43,7 +43,7 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\n- Prefer the edit_file tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
+        "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.\n- To modify an existing file: use read_file first, then use edit_file (preferred for small changes) or write_file (for complete rewrites).\n- To create a new file: write_file works directly — no read needed.\n- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -108,14 +108,14 @@ impl Tool for FileWriteTool {
                     if info.is_partial {
                         drop(fr);
                         return ToolResult::error(
-                            "Error: file was only partially read. You must do a fresh full read (without offset/limit) before writing.".to_string()
+                            "Error: file was only partially read (with offset/limit). You must do a fresh full read (read_file without offset/limit parameters) before writing.".to_string()
                         );
                     }
                 } else {
                     // File was not read first
                     drop(fr);
                     return ToolResult::error(
-                        "Error: file has not been read yet. Read it first before writing to it.".to_string()
+                        "Error: file has not been read. For existing files, you MUST use read_file first before write_file/edit_file. For new files, write_file works directly without reading. To modify an existing file: 1) read_file to read it, 2) edit_file for small changes or write_file for complete rewrites.".to_string()
                     );
                 }
             }

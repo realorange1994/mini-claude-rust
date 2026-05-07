@@ -364,43 +364,36 @@ impl PermissionGate {
             };
             if let Some(v_result) = v_result {
                 if !v_result.allowed {
-                    restore_stripped();
-                    if v_result.reason == "safetyCheck" || v_result.reason == "rule" {
-                        if self.should_avoid_prompts() {
-                            return Some(ToolResult::error(format!(
-                                "Permission denied: {} (interactive prompts disabled for sub-agent)",
-                                v_result.message
-                            )));
-                        }
-                        if !self.ask_user(tool_name, &params, Some(&v_result.message)) {
-                            return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
-                        }
+                    // Bypass mode: allow all path access (skip validation)
+                    // Auto mode: skip path validation — let classifier decide
+                    let mode = *self.config.permission_mode.lock().unwrap();
+                    if mode == PermissionMode::Bypass || mode == PermissionMode::Auto {
+                        // Fall through to allow / classifier evaluation
                     } else {
-                        return Some(ToolResult::error(format!("Permission denied: {}", v_result.message)));
+                        restore_stripped();
+                        if v_result.reason == "safetyCheck" || v_result.reason == "rule" {
+                            if self.should_avoid_prompts() {
+                                return Some(ToolResult::error(format!(
+                                    "Permission denied: {} (interactive prompts disabled for sub-agent)",
+                                    v_result.message
+                                )));
+                            }
+                            if !self.ask_user(tool_name, &params, Some(&v_result.message)) {
+                                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                            }
+                        } else {
+                            return Some(ToolResult::error(format!("Permission denied: {}", v_result.message)));
+                        }
                     }
                 }
             }
         }
 
         // STEP 1d: Tool-level ask rule (bypass-immune)
-        if let Some(rule) = self.find_tool_level_ask(&upstream_name) {
-            restore_stripped();
-            if self.should_avoid_prompts() {
-                return Some(ToolResult::error(format!(
-                    "Permission denied: {} requires confirmation (interactive prompts disabled for sub-agent)",
-                    rule
-                )));
-            }
-            let msg = format!("Tool requires confirmation by rule: {}", rule);
-            if !self.ask_user(tool_name, &params, Some(&msg)) {
-                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
-            }
-            return None;
-        }
-
-        // STEP 1e: Content-specific ask rule (bypass-immune)
-        if !content.is_empty() {
-            if let Some(rule) = self.find_content_ask(&upstream_name, &content) {
+        // Bypass mode: skip ask rules, allow through
+        let mode = *self.config.permission_mode.lock().unwrap();
+        if mode != PermissionMode::Bypass {
+            if let Some(rule) = self.find_tool_level_ask(&upstream_name) {
                 restore_stripped();
                 if self.should_avoid_prompts() {
                     return Some(ToolResult::error(format!(
@@ -413,6 +406,24 @@ impl PermissionGate {
                     return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
                 }
                 return None;
+            }
+
+            // STEP 1e: Content-specific ask rule (bypass-immune)
+            if !content.is_empty() {
+                if let Some(rule) = self.find_content_ask(&upstream_name, &content) {
+                    restore_stripped();
+                    if self.should_avoid_prompts() {
+                        return Some(ToolResult::error(format!(
+                            "Permission denied: {} requires confirmation (interactive prompts disabled for sub-agent)",
+                            rule
+                        )));
+                    }
+                    let msg = format!("Tool requires confirmation by rule: {}", rule);
+                    if !self.ask_user(tool_name, &params, Some(&msg)) {
+                        return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+                    }
+                    return None;
+                }
             }
         }
 
@@ -427,7 +438,9 @@ impl PermissionGate {
 
         // Step 2e: ask from safetyCheck is bypass-immune
         // Step 2f: ask from tool rules (non-safetyCheck) — also bypass-immune per upstream
-        if result.behavior == PermissionBehavior::Ask {
+        // Bypass mode: skip, allow through
+        let mode = *self.config.permission_mode.lock().unwrap();
+        if mode != PermissionMode::Bypass && result.behavior == PermissionBehavior::Ask {
             restore_stripped();
             if self.should_avoid_prompts() {
                 return Some(ToolResult::error(format!(
