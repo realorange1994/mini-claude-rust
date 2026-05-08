@@ -1376,6 +1376,7 @@ pub async fn compact_conversation(
     model: &str,
     api_key: &str,
     base_url: &str,
+    system_prompt: &str,
     trigger: CompactTrigger,
     is_auto: bool,
     last_summary: Option<&str>,
@@ -1393,7 +1394,7 @@ pub async fn compact_conversation(
     for _attempt in 0..=MAX_PTL_RETRIES {
         let result = do_compact_llm_call_with_retry(
             &current_messages, client, model, api_key, base_url,
-            trigger, is_auto, last_summary, transcript_path,
+            system_prompt, trigger, is_auto, last_summary, transcript_path,
         ).await;
         match result {
             Ok(r) => return Ok(r),
@@ -1463,6 +1464,7 @@ async fn do_compact_llm_call(
     model: &str,
     api_key: &str,
     base_url: &str,
+    system_prompt: &str,
     trigger: CompactTrigger,
     is_auto: bool,
     last_summary: Option<&str>,
@@ -1540,7 +1542,7 @@ async fn do_compact_llm_call(
     payload.insert("model".to_string(), serde_json::json!(model));
     payload.insert("max_tokens".to_string(), serde_json::json!(20000));
     // Build system prompt with cache_control for prompt caching efficiency
-    let mut system_json = serde_json::json!([{"type": "text", "text": COMPACT_SYSTEM_PROMPT}]);
+    let mut system_json = serde_json::json!([{"type": "text", "text": system_prompt}]);
     crate::prompt_caching::cache_system_prompt(&mut system_json);
     payload.insert("system".to_string(), system_json);
     // Disable extended thinking during compaction to prevent wasting output
@@ -1738,6 +1740,7 @@ async fn do_compact_llm_call_with_retry(
     model: &str,
     api_key: &str,
     base_url: &str,
+    system_prompt: &str,
     trigger: CompactTrigger,
     is_auto: bool,
     last_summary: Option<&str>,
@@ -1763,6 +1766,7 @@ async fn do_compact_llm_call_with_retry(
             model,
             api_key,
             base_url,
+            system_prompt,
             trigger,
             is_auto,
             last_summary,
@@ -2361,6 +2365,7 @@ impl Compactor {
         model: &str,
         api_key: &str,
         base_url: &str,
+        system_prompt: &str,
     ) -> CompactStats {
         let messages = context.messages().to_vec();
         let entries_before = context.len();
@@ -2450,6 +2455,7 @@ impl Compactor {
                 model,
                 api_key,
                 base_url,
+                system_prompt,
                 CompactTrigger::Auto,
                 true,
                 self.last_summary.as_deref(), // A2: iterative summary

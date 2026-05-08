@@ -154,6 +154,7 @@ pub struct PermissionGate {
     classifier: Option<AutoModeClassifier>,
     transcript_src: Option<Arc<tokio::sync::RwLock<ConversationContext>>>,
     denial_count: AtomicUsize,
+    total_denial_count: AtomicUsize, // session-level total denial cap
     recently_approved: std::sync::Mutex<Vec<ApprovedAction>>,
     /// Rule store for permission rules loaded from settings
     rule_store: Option<Arc<RuleStore>>,
@@ -170,6 +171,7 @@ impl PermissionGate {
             classifier: None,
             transcript_src: None,
             denial_count: AtomicUsize::new(0),
+            total_denial_count: AtomicUsize::new(0),
             recently_approved: std::sync::Mutex::new(Vec::new()),
             rule_store: None,
             project_dir: None,
@@ -202,6 +204,7 @@ impl PermissionGate {
             approved.clear();
         }
         self.denial_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.total_denial_count.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check if a command is safe (read-only, no approval needed)
@@ -649,6 +652,7 @@ impl PermissionGate {
 
         if !result.allow {
             let count = self.denial_count.fetch_add(1, Ordering::SeqCst) + 1;
+            self.total_denial_count.fetch_add(1, Ordering::SeqCst);
             let denial_limit = self.config.auto_denial_limit;
             // After consecutive denials, fall back to interactive prompt
             if count >= denial_limit && !self.should_avoid_prompts() {
@@ -656,6 +660,21 @@ impl PermissionGate {
                     "  [auto-classifier] {} consecutive denials, falling back to manual approval",
                     count
                 );
+                if self.ask_user(tool_name, params, None) {
+                    self.denial_count.store(0, Ordering::SeqCst);
+                    return None;
+                }
+                return Some(ToolResult::error("Permission denied: user rejected.".to_string()));
+            }
+            // Session-level cap: after 20 total denials, force interactive review
+            // to prevent the classifier from silently blocking all work.
+            let total = self.total_denial_count.load(Ordering::SeqCst);
+            if total >= 20 && !self.should_avoid_prompts() {
+                eprintln!(
+                    "  [auto-classifier] {} total denials this session, requiring manual review",
+                    total
+                );
+                self.total_denial_count.store(0, Ordering::SeqCst);
                 if self.ask_user(tool_name, params, None) {
                     self.denial_count.store(0, Ordering::SeqCst);
                     return None;
@@ -739,6 +758,7 @@ impl Clone for PermissionGate {
             classifier: None, // Classifiers are not cloned (they hold HTTP clients)
             transcript_src: self.transcript_src.clone(),
             denial_count: AtomicUsize::new(self.denial_count.load(Ordering::SeqCst)),
+            total_denial_count: AtomicUsize::new(self.total_denial_count.load(Ordering::SeqCst)),
             recently_approved: std::sync::Mutex::new(Vec::new()), // Don't clone pending approvals
             rule_store: None,
             project_dir: None,

@@ -277,7 +277,8 @@ impl AgentLoop {
             } else {
                 config.auto_classifier_model.clone()
             };
-            let classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            let mut classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            classifier.set_claude_md(crate::auto_classifier::load_claude_md(&config.project_dir.to_string_lossy()));
             if classifier.is_enabled() {
                 agent_emit!("  [auto-classifier] enabled (model={})", classifier_model);
             } else {
@@ -444,7 +445,8 @@ impl AgentLoop {
             } else {
                 config.auto_classifier_model.clone()
             };
-            let classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            let mut classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            classifier.set_claude_md(crate::auto_classifier::load_claude_md(&config.project_dir.to_string_lossy()));
             gate.set_classifier(classifier);
             gate.set_transcript_source(Arc::clone(&context));
         }
@@ -1007,6 +1009,7 @@ impl AgentLoop {
                         &self.config.model,
                         &self.api_key,
                         &self.base_url,
+                        &system_prompt,
                     ).await;
                     compactor.set_compact_threshold(saved_threshold); // restore threshold
                     if stats.phase != crate::compact::CompactPhase::None {
@@ -1064,6 +1067,7 @@ impl AgentLoop {
                             &self.config.model,
                             &self.api_key,
                             &self.base_url,
+                            &system_prompt,
                         ).await;
                         if stats.phase != crate::compact::CompactPhase::None {
                             agent_emit!("[Compaction] {:?}: {} -> {} entries, ~{} tokens saved",
@@ -1773,6 +1777,7 @@ impl AgentLoop {
                                 &self.config.model,
                                 &self.api_key,
                                 &self.base_url,
+                                &system_prompt,
                             ).await;
                         } else if context_errors == 2 {
                             let pre_tokens = {
@@ -3990,7 +3995,21 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
         let context = ConversationContext::new(config.clone());
-        let gate = PermissionGate::new(config.clone());
+        let mut gate = PermissionGate::new(config.clone());
+        let context = Arc::new(RwLock::new(context));
+
+        // Wire auto mode classifier for sub-agent if enabled
+        if config.auto_classifier_enabled {
+            let classifier_model = if config.auto_classifier_model.is_empty() {
+                config.model.clone()
+            } else {
+                config.auto_classifier_model.clone()
+            };
+            let mut classifier = AutoModeClassifier::new(&api_key, &base_url, &classifier_model);
+            classifier.set_claude_md(crate::auto_classifier::load_claude_md(&config.project_dir.to_string_lossy()));
+            gate.set_classifier(classifier);
+            gate.set_transcript_source(Arc::clone(&context));
+        }
 
         // Create sub-agent transcript in separate directory
         let session_id = chrono::Local::now().format("%Y%m%d-%H%M%S-sub").to_string();
@@ -4019,7 +4038,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
             gate,
-            context: Arc::new(RwLock::new(context)),
+            context: context,
             client,
             use_stream,
             max_tool_chars: 50000,

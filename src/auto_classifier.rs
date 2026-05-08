@@ -5,6 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// Load CLAUDE.md from the project directory.
+/// Returns empty string if file doesn't exist.
+pub fn load_claude_md(project_dir: &str) -> String {
+    let p = if project_dir.is_empty() {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        project_dir.to_string()
+    };
+    let path = Path::new(&p).join("CLAUDE.md");
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
 /// Result of a classification decision.
 #[derive(Debug, Clone)]
 pub struct ClassifierResult {
@@ -30,6 +44,7 @@ pub struct AutoModeClassifier {
     api_key: String,
     cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
     enabled: bool,
+    claude_md: String, // project CLAUDE.md content for user intent context
 }
 
 /// Tools that are always allowed in auto mode without classifier evaluation.
@@ -538,6 +553,7 @@ impl AutoModeClassifier {
                 api_key: String::new(),
                 cache: Arc::new(RwLock::new(HashMap::new())),
                 enabled: false,
+                claude_md: String::new(),
             };
         }
 
@@ -557,6 +573,7 @@ impl AutoModeClassifier {
             api_key: api_key.to_string(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             enabled: true,
+            claude_md: String::new(),
         }
     }
 
@@ -571,6 +588,12 @@ impl AutoModeClassifier {
         if let Ok(mut cache) = self.cache.write() {
             cache.clear();
         }
+    }
+
+    /// Set the project CLAUDE.md content to be included in classifier context.
+    /// This helps the classifier understand user intent from project config.
+    pub fn set_claude_md(&mut self, content: String) {
+        self.claude_md = content;
     }
 
     /// Determine whether a tool call should be allowed in auto mode.
@@ -630,7 +653,18 @@ impl AutoModeClassifier {
     ) -> ClassifierResult {
         let action_desc = format_action_for_classifier(tool_name, tool_input);
 
-        let mut user_msg = String::from("## Recent conversation transcript:\n");
+        let mut user_msg = String::new();
+        if !self.claude_md.is_empty() {
+            user_msg.push_str(concat!(
+                "The following is the project CLAUDE.md configuration. ",
+                "These are instructions the user provided and should be treated as ",
+                "part of the user's intent when evaluating actions.\n\n"
+            ));
+            user_msg.push_str("<user_claude_md>\n");
+            user_msg.push_str(&self.claude_md);
+            user_msg.push_str("\n</user_claude_md>\n\n");
+        }
+        user_msg.push_str("## Recent conversation transcript:\n");
         if !transcript.is_empty() {
             // Truncate transcript to avoid exceeding context
             let truncated = if transcript.len() > 4000 {
@@ -671,7 +705,11 @@ impl AutoModeClassifier {
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": AUTO_CLASSIFIER_SYSTEM_PROMPT,
+            "system": [{
+                "type": "text",
+                "text": AUTO_CLASSIFIER_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}
+            }],
             "messages": messages,
             "tools": [{
                 "name": "classify_action",
