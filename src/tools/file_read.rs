@@ -99,7 +99,15 @@ impl Tool for FileReadTool {
         let metadata = match fs::metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return ToolResult::error(format!("Error: file not found: {}", path.display()))
+                // Retry: when write_file and read_file are called concurrently in the same
+                // tool batch, the file may not be visible yet (Windows directory entry delay).
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                match fs::metadata(&path) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        return ToolResult::error(format!("Error: file not found: {}", path.display()))
+                    }
+                }
             }
             Err(e) => return ToolResult::error(format!("Error: {}", e)),
         };

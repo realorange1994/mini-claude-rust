@@ -32,7 +32,7 @@ impl Tool for FileOpsTool {
     }
 
     fn description(&self) -> &str {
-        "File and directory operations. Supports mkdir, rm, rmrf (recursive remove), mv, cp, cpdir (recursive copy), chmod, and ln (symbolic/hard links)."
+        "File and directory operations. Supports mkdir, rm (delete, remove), rmrf/rmdir (recursive remove), mv, cp, cpdir (recursive copy), chmod, and ln (symbolic/hard links)."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -42,7 +42,7 @@ impl Tool for FileOpsTool {
                 "operation": {
                     "type": "string",
                     "description": "Operation: mkdir, rm, rmrf, mv, cp, cpdir, chmod, ln",
-                    "enum": ["mkdir", "rm", "rmrf", "mv", "cp", "cpdir", "chmod", "ln"]
+                    "enum": ["mkdir", "rm", "delete", "remove", "rmrf", "rmdir", "mv", "cp", "cpdir", "chmod", "ln"]
                 },
                 "path": {
                     "type": "string",
@@ -98,8 +98,8 @@ impl Tool for FileOpsTool {
 
         match operation {
             "mkdir" => self.op_mkdir(&path, params),
-            "rm" => self.op_remove(&path),
-            "rmrf" => self.op_remove_all(&path),
+            "rm" | "delete" | "remove" => self.op_remove(&path),
+            "rmrf" | "rmdir" => self.op_remove_all(&path),
             "mv" => self.op_move(&path, params),
             "cp" => self.op_copy(&path, params),
             "cpdir" => self.op_copy_dir(&path, params),
@@ -135,10 +135,18 @@ impl FileOpsTool {
     }
 
     fn op_remove(&self, path: &Path) -> ToolResult {
-        if let Err(e) = fs::remove_file(path) {
-            return ToolResult::error(format!("Error removing: {}", e));
+        // Retry: when write_file and fileops rm are called concurrently in the same
+        // tool batch, the file may not be visible yet (Windows directory entry delay).
+        for attempt in 0..2 {
+            match fs::remove_file(path) {
+                Ok(()) => return ToolResult::ok(format!("Removed: {}", path.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt == 0 => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return ToolResult::error(format!("Error removing: {}", e)),
+            }
         }
-        ToolResult::ok(format!("Removed: {}", path.display()))
+        unreachable!()
     }
 
     fn op_remove_all(&self, path: &Path) -> ToolResult {
