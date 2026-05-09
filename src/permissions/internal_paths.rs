@@ -1,7 +1,5 @@
 //! Internal paths - Check Claude internal paths (plans, scratchpad, memory, etc.)
 
-use std::path::Path;
-
 /// Check if a path is Claude Code's internal editable path
 /// that should bypass dangerous-directory checks.
 pub fn is_internal_editable_path(path: &str, cwd: &str) -> bool {

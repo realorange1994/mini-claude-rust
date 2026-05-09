@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! MCP Client - stdio JSON-RPC 2.0 and HTTP+SSE communication with MCP servers
 
 use super::{Tool, ToolResult, ToolResultContent};

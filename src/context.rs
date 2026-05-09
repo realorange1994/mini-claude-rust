@@ -59,7 +59,7 @@ impl TodoList {
         const TURNS_SINCE_WRITE: usize = 10;
         const TURNS_BETWEEN_REMINDERS: usize = 10;
 
-        let prev_write = self.turns_since_last_write.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _prev_write = self.turns_since_last_write.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.turns_since_last_remind
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1052,10 +1052,8 @@ impl ConversationContext {
                             // Only consider compactable if the result is large enough to justify clearing.
                             // Small results (< min_char_count) are preserved to prevent amnesia.
                             let total_chars: usize = b.content.iter().map(|c| {
-                                match c {
-                                    ToolResultContent::Text { text } => text.len(),
-                                    _ => 0,
-                                }
+                                let ToolResultContent::Text { text } = c;
+                                text.len()
                             }).sum();
                             return total_chars >= min_char_count;
                         }
@@ -1078,10 +1076,8 @@ impl ConversationContext {
                         if is_compactable_tool(name) {
                             // Check size threshold: preserve small results to prevent amnesia
                             let total_chars: usize = block.content.iter().map(|c| {
-                                match c {
-                                    ToolResultContent::Text { text } => text.len(),
-                                    _ => 0,
-                                }
+                                let ToolResultContent::Text { text } = c;
+                                text.len()
                             }).sum();
                             if total_chars >= min_char_count {
                                 block.content = vec![ToolResultContent::Text {

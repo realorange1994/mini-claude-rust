@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::rule_parser::{parse_rules, ParsedRule};
+use super::rule_parser::parse_rules;
 use super::rule_store::RuleStore;
 
 /// Permissions config from settings.json

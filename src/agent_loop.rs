@@ -21,8 +21,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-/// Thread-local output capture: when set, all eprintln-like calls redirect to this
-/// callback instead of stderr. Used for background agent output isolation.
+// Thread-local output capture: when set, all eprintln-like calls redirect to this
+// callback instead of stderr. Used for background agent output isolation.
 thread_local! {
     static OUTPUT_CAPTURE: RefCell<Option<Arc<dyn Fn(&str) + Send + Sync>>> = RefCell::new(None);
 }
@@ -267,7 +267,7 @@ impl AgentLoop {
 
         let max_turns = config.max_turns;
         let file_history = config.file_history.clone().unwrap_or_else(|| Arc::new(FileHistory::new()));
-        let mut context = Arc::new(RwLock::new(ConversationContext::new(config.clone())));
+        let context = Arc::new(RwLock::new(ConversationContext::new(config.clone())));
         let mut gate = PermissionGate::new(config.clone());
 
         // Wire auto mode classifier if enabled
@@ -782,7 +782,7 @@ impl AgentLoop {
 
         // Inject tool state tracker session state
         let session_state = self.tool_state_tracker.borrow().build_session_state_note();
-        let mut prompt = format!("{}\n\n{}", prompt, session_state);
+        let prompt = format!("{}\n\n{}", prompt, session_state);
 
         // Inject todo reminder
         let reminder = self.todo_list.build_reminder();
@@ -926,10 +926,11 @@ impl AgentLoop {
         let mut budget = IterationBudget::new(self.max_turns);
         let mut last_transition = Transition::None;
         let mut consecutive_stalls = 0;
-        let mut accumulated_text = String::new(); // Tracks last text for interrupt return (matching Go's finalText)
+        let accumulated_text = String::new(); // Tracks last text for interrupt return (matching Go's finalText)
         let mut context_errors = 0;
         let mut continue_reason = ContinueReason::None;
         let mut max_output_tokens_retries = 0;
+        #[allow(unused_assignments)]
         let mut consecutive_empty_responses = 0;
         let mut consecutive_unrecognized_errors = 0;
         const MAX_CONTEXT_RECOVERY: usize = 3;
@@ -1638,7 +1639,6 @@ impl AgentLoop {
                         budget.refund();
                         // Extract key findings from final answer for next-turn reference
                         self.extract_conclusions(&text);
-                        accumulated_text = text.clone();
                         return Ok(text);
                     } else {
                         // No text and no tool calls -- could be a thinking-only response

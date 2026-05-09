@@ -3,7 +3,6 @@
 //! Matches upstream's CROSS_PLATFORM_CODE_EXEC + DANGEROUS_BASH_PATTERNS.
 
 use super::rule_parser::ParsedRule;
-use super::rule_store::RuleStore;
 
 /// Dangerous shell patterns that should not be auto-allowed
 pub const DANGEROUS_SHELL_PATTERNS: &[&str] = &[

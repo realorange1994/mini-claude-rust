@@ -269,7 +269,7 @@ Usage:
         };
 
         let count = content_norm.matches(&old_str_norm).count();
-        let (mut count, mut old_str_norm, mut new_str_norm) = if count == 0 {
+        let (count, old_str_norm, new_str_norm) = if count == 0 {
             // Try desanitized version (matching official: reverse sanitized tokens)
             let desanitized_old = desanitize(&old_str_norm);
             if desanitized_old != old_str_norm {

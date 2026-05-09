@@ -3,7 +3,6 @@
 use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::process::Command;
 
 pub struct TerminalTool;
 

@@ -3,6 +3,7 @@
 //! Implements multi-layered context management inspired by Claude Code's official implementation:
 //! 1. Micro-compaction (time-based tool result clearing)
 //! 2. LLM-driven compaction (summary generation via API call)
+#![allow(dead_code)]
 //! 3. Progressive truncation (fallback when compaction fails)
 
 use std::collections::hash_map::DefaultHasher;
@@ -317,15 +318,14 @@ pub(crate) fn entries_to_summary_text(messages: &[Message]) -> String {
             MessageContent::ToolResultBlocks(blocks) => {
                 for block in blocks {
                     for content in &block.content {
-                        if let ToolResultContent::Text { text } = content {
-                            let lines = text.lines().count();
-                            let preview = truncate_preview(text, 100);
-                            details.push_str(&format!(
-                                "[tool result: {} lines] {}\n",
-                                lines.saturating_add(1),
-                                preview
-                            ));
-                        }
+                        let ToolResultContent::Text { text } = content;
+                        let lines = text.lines().count();
+                        let preview = truncate_preview(text, 100);
+                        details.push_str(&format!(
+                            "[tool result: {} lines] {}\n",
+                            lines.saturating_add(1),
+                            preview
+                        ));
                     }
                 }
             }
@@ -458,6 +458,7 @@ pub struct CompactStats {
 // --- 3-pass pre-pruning (A1) ---
 
 /// Info about a tool call, indexed by tool_use_id for summarization.
+#[allow(dead_code)]
 struct ToolCallInfo {
     tool_name: String,
     #[allow(dead_code)]
@@ -1983,7 +1984,7 @@ pub fn try_sm_compact(
     // Calculate adaptive tail using token budgets instead of fixed entry count.
     // Min: 10K tokens / 5 text msgs, Max: 40K tokens.
     // Matches upstream's calculateMessagesToKeepIndex thresholds.
-    let (_, mut tail) = calculate_adaptive_tail(
+    let (_, tail) = calculate_adaptive_tail(
         &messages, messages.len(),
         10_000, 5, 40_000,
     );

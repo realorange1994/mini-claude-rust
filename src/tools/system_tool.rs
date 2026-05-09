@@ -282,7 +282,7 @@ impl SystemTool {
                     ToolResult::ok("No users logged in.".to_string())
                 }
             }
-            Err(e) => ToolResult::ok("No users logged in.".to_string()),
+            Err(_e) => ToolResult::ok("No users logged in.".to_string()),
         }
     }
 

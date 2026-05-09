@@ -1,6 +1,7 @@
+#![allow(dead_code)]
 //! GitTool - Git version control operations
 
-use crate::tools::{Tool, ToolResult, ToolPermissionResult, PermissionBehavior};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;

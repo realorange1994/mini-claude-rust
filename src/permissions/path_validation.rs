@@ -1,7 +1,5 @@
 //! Path validation - Validate file paths for dangerous patterns
 
-use std::path::Path;
-
 use super::internal_paths::is_internal_editable_path;
 use super::rule_store::RuleStore;
 

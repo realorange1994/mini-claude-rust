@@ -3,7 +3,6 @@ use crate::context::ConversationContext;
 use crate::tools::{ToolResult, ApprovalRequirement, ToolPermissionResult, PermissionBehavior};
 use super::rule_store::RuleStore;
 use super::path_validation::{validate_path, validate_read_path, OperationType, PathValidationResult};
-use super::auto_strip::is_dangerous_allow_rule;
 use super::rule_parser::ParsedRule;
 use serde::{Deserialize, Serialize};
 use std::fmt;

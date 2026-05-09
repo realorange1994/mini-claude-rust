@@ -1,6 +1,6 @@
 //! BriefTool - Provides communication principles to the agent
 
-use crate::tools::{Tool, ToolResult, ToolPermissionResult, PermissionBehavior};
+use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
 

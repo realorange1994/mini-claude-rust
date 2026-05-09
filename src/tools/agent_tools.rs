@@ -204,7 +204,7 @@ impl Tool for AgentGetTool {
             let lines: Vec<&str> = raw_output.lines().collect();
             let total_lines = lines.len();
             let tail_lines: Vec<&&str> = lines.iter().rev().take(tail).collect();
-            let mut tail_lines: Vec<&&str> = tail_lines.into_iter().rev().collect();
+            let tail_lines: Vec<&&str> = tail_lines.into_iter().rev().collect();
 
             output.push_str(&format!(
                 "\n--- Output (last {}/{} lines) ---\n",
