@@ -42,6 +42,18 @@ pub mod notebook_edit;
 pub mod file_encoding;
 mod path_safety;
 mod filesystem_safety;
+pub mod agent_handle_store;
+pub mod agent_handoff;
+pub mod agent_sidechain;
+pub mod agent_worktree;
+pub mod bg_task_output;
+pub mod chunk_archival;
+pub mod output_cleaner;
+pub mod resource_limit;
+pub mod send_message_tool;
+pub mod task_output_tool;
+pub mod encoding;
+pub mod rgrep;
 mod capabilities;
 
 pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};

@@ -57,6 +57,9 @@ brotli = "3.4"
 
 # Random ID generation
 uuid = { version = "1.6", features = ["v4"] }
+rand = "0.8"
+sha2 = "0.10"
+once_cell = "1.19"
 
 # URL encoding
 urlencoding = "2.1"
