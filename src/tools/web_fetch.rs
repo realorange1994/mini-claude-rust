@@ -341,3 +341,111 @@ fn extract_html_meta(html: &str, name: &str) -> String {
     String::new()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    // ─── WebFetchTool interface ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_web_fetch_tool_name() {
+        let tool = WebFetchTool;
+        assert_eq!(tool.name(), "web_fetch");
+    }
+
+    #[test]
+    fn test_web_fetch_tool_schema() {
+        let tool = WebFetchTool;
+        let schema = tool.input_schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.iter().any(|r| r.as_str() == Some("url")), "expected 'url' in required");
+    }
+
+    #[test]
+    fn test_web_fetch_no_url() {
+        let tool = WebFetchTool;
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "missing url should return error");
+    }
+
+    #[test]
+    fn test_web_fetch_invalid_url() {
+        let tool = WebFetchTool;
+        let result = tool.execute(&serde_json::json!({"url": "not-a-url"}));
+        assert!(result.is_error, "invalid URL should return error");
+    }
+
+    #[test]
+    fn test_web_fetch_tool_permissions_public_url() {
+        let tool = WebFetchTool;
+        let result = tool.check_permissions(&serde_json::json!({"url": "https://example.com"}));
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+
+    // ─── strip_html_simple ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_html_simple_empty() {
+        assert_eq!(strip_html_simple(""), "");
+    }
+
+    #[test]
+    fn test_strip_html_simple_plain_text() {
+        assert_eq!(strip_html_simple("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_html_simple_strip_tags() {
+        assert_eq!(strip_html_simple("<b>hello</b>"), "hello");
+    }
+
+    #[test]
+    fn test_strip_html_simple_strip_all_tags() {
+        assert_eq!(strip_html_simple("<html><body><p>test</p></body></html>"), "test");
+    }
+
+    // ─── extract_html_title ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_html_title_with_title() {
+        let html = "<html><head><title>My Page</title></head><body></body></html>";
+        assert_eq!(extract_html_title(html), "My Page");
+    }
+
+    #[test]
+    fn test_extract_html_title_no_title() {
+        let html = "<html><body></body></html>";
+        assert_eq!(extract_html_title(html), "");
+    }
+
+    #[test]
+    fn test_extract_html_title_empty_title() {
+        assert_eq!(extract_html_title("<title></title>"), "");
+    }
+
+    #[test]
+    fn test_extract_html_title_with_spaces() {
+        assert_eq!(extract_html_title("<title>  Hello World  </title>"), "Hello World");
+    }
+
+    // ─── extract_html_meta ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_html_meta_description() {
+        let html = r#"<html><head><meta name="description" content="A test page"></head></html>"#;
+        assert_eq!(extract_html_meta(html, "description"), "A test page");
+    }
+
+    #[test]
+    fn test_extract_html_meta_property() {
+        let html = r#"<html><head><meta property="og:title" content="OG Title"></head></html>"#;
+        assert_eq!(extract_html_meta(html, "og:title"), "OG Title");
+    }
+
+    #[test]
+    fn test_extract_html_meta_not_found() {
+        let html = "<html><head></head></html>";
+        assert_eq!(extract_html_meta(html, "description"), "");
+    }
+}

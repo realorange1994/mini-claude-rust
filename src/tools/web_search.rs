@@ -203,7 +203,51 @@ fn parse_bing_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     results
 }
 
-fn search_360(query: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_web_search_empty_query() {
+        let tool = WebSearchTool;
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "expected error for empty query");
+    }
+
+    #[test]
+    fn test_web_search_tool_name() {
+        let tool = WebSearchTool;
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn test_web_search_tool_schema() {
+        let tool = WebSearchTool;
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("query"), "expected 'query' in schema");
+    }
+
+    #[test]
+    fn test_web_search_tool_permissions() {
+        let tool = WebSearchTool;
+        let result = tool.check_permissions(&serde_json::json!({"query": "Go programming language"}));
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+
+    #[test]
+    fn test_parse_bing_results_empty() {
+        let results = parse_bing_results("", 10);
+        assert!(results.is_empty(), "empty HTML should return empty results");
+    }
+
+    #[test]
+    fn test_parse_360_results_empty() {
+        let results = parse_360_results("", 10);
+        assert!(results.is_empty(), "empty HTML should return empty results");
+    }
+}fn search_360(query: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()

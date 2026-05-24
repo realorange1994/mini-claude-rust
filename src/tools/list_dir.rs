@@ -135,6 +135,109 @@ fn list_dir_simple(dir: &std::path::Path, max_entries: usize) -> ToolResult {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use std::fs;
+
+    #[test]
+    fn test_list_dir_simple() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.go"), "package a").unwrap();
+        fs::write(dir.path().join("b.txt"), "hello").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({"path": dir.path().to_str().unwrap()}));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("a.go"), "expected a.go in output");
+        assert!(result.output.contains("b.txt"), "expected b.txt in output");
+    }
+
+    #[test]
+    fn test_list_dir_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("sub").join("deep")).unwrap();
+        fs::write(dir.path().join("a.go"), "package a").unwrap();
+        fs::write(dir.path().join("sub").join("b.go"), "package b").unwrap();
+        fs::write(dir.path().join("sub").join("deep").join("c.go"), "package c").unwrap();
+
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({
+            "path": dir.path().to_str().unwrap(),
+            "recursive": true
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("a.go"), "expected a.go");
+    }
+
+    #[test]
+    fn test_list_dir_ignores_git_and_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+        fs::write(dir.path().join("a.go"), "package a").unwrap();
+
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({
+            "path": dir.path().to_str().unwrap(),
+            "recursive": true
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(!result.output.contains(".git"), "should not list .git");
+        assert!(!result.output.contains("node_modules"), "should not list node_modules");
+    }
+
+    #[test]
+    fn test_list_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({"path": dir.path().to_str().unwrap()}));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+
+    #[test]
+    fn test_list_dir_not_found() {
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({"path": "/nonexistent/path"}));
+        assert!(result.is_error, "expected error for nonexistent path");
+    }
+
+    #[test]
+    fn test_list_dir_not_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir.path().join("file.txt");
+        fs::write(&fp, "hello").unwrap();
+
+        let tool = ListDirTool;
+        let result = tool.execute(&serde_json::json!({"path": fp.to_str().unwrap()}));
+        assert!(result.is_error, "expected error for file path");
+    }
+
+    #[test]
+    fn test_list_dir_tool_name() {
+        let tool = ListDirTool;
+        assert_eq!(tool.name(), "list_dir");
+    }
+
+    #[test]
+    fn test_list_dir_tool_schema() {
+        let tool = ListDirTool;
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("path"), "expected 'path' in schema");
+        assert!(props.contains_key("recursive"), "expected 'recursive' in schema");
+    }
+
+    #[test]
+    fn test_list_dir_tool_permissions() {
+        let tool = ListDirTool;
+        let result = tool.check_permissions(&serde_json::json!({}));
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+}
+
 fn list_dir_recursive(dir: &std::path::Path, max_entries: usize) -> ToolResult {
     let mut entries = Vec::new();
     let mut total = 0;

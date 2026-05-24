@@ -144,3 +144,36 @@ impl Tool for SendMessageTool {
         crate::tools::ApprovalRequirement::Auto
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_tool_name() {
+        let store = Arc::new(crate::tools::agent_store::AgentTaskStore::new());
+        let tool = SendMessageTool { store };
+        assert_eq!(tool.name(), "send_message");
+    }
+
+    #[test]
+    fn test_no_agent_id_error() {
+        let store = Arc::new(crate::tools::agent_store::AgentTaskStore::new());
+        let tool = SendMessageTool { store };
+        let result = tool.execute(serde_json::json!({"message": "hello"}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_agent_not_found() {
+        let store = Arc::new(crate::tools::agent_store::AgentTaskStore::new());
+        let tool = SendMessageTool { store };
+        let result = tool.execute(serde_json::json!({
+            "agent_id": "nonexistent",
+            "message": "hello"
+        }).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("not found"));
+    }
+}

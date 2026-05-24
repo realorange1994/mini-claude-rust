@@ -620,6 +620,180 @@ impl Tool for TaskStopTool {
             Err(e) => ToolResult::error(e),
         }
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
 
+    fn mock_create_func() -> WorkTaskCreateFunc {
+        Arc::new(|subject: String, desc: String, _af: String, _md: Option<HashMap<String, Value>>| -> usize {
+            let _ = (&subject, &desc);
+            1
+        })
+    }
+
+    fn mock_list_func() -> WorkTaskListFunc {
+        Arc::new(|| vec![])
+    }
+
+    fn mock_get_func() -> WorkTaskGetFunc {
+        Arc::new(|_id: String| None)
+    }
+
+    fn mock_update_func() -> WorkTaskUpdateFunc {
+        Arc::new(|_id: String, _updates: HashMap<String, Value>| -> Result<(), String> { Ok(()) })
+    }
+
+    fn mock_stop_func() -> WorkTaskStopFunc {
+        Arc::new(|_id: String| -> Result<(), String> { Ok(()) })
+    }
+
+    #[test]
+    fn test_task_create_tool_name() {
+        let tool = TaskCreateTool::new(mock_create_func());
+        assert_eq!(tool.name(), "task_create");
+    }
+
+    #[test]
+    fn test_task_create_requires_subject() {
+        let tool = TaskCreateTool::new(mock_create_func());
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("subject"));
+    }
+
+    #[test]
+    fn test_task_create_requires_description() {
+        let tool = TaskCreateTool::new(mock_create_func());
+        let result = tool.execute(serde_json::json!({"subject": "test"}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("description"));
+    }
+
+    #[test]
+    fn test_task_create_success() {
+        let tool = TaskCreateTool::new(mock_create_func());
+        let result = tool.execute(serde_json::json!({
+            "subject": "Test task",
+            "description": "A test task description"
+        }).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("created successfully"));
+    }
+
+    #[test]
+    fn test_task_list_tool_name() {
+        let tool = TaskListTool::new(mock_list_func());
+        assert_eq!(tool.name(), "task_list");
+    }
+
+    #[test]
+    fn test_task_list_empty() {
+        let tool = TaskListTool::new(mock_list_func());
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("No tasks"));
+    }
+
+    #[test]
+    fn test_task_get_tool_name() {
+        let tool = TaskGetTool::new(mock_get_func());
+        assert_eq!(tool.name(), "task_get");
+    }
+
+    #[test]
+    fn test_task_get_requires_id() {
+        let tool = TaskGetTool::new(mock_get_func());
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("task_id"));
+    }
+
+    #[test]
+    fn test_task_get_not_found() {
+        let tool = TaskGetTool::new(mock_get_func());
+        let result = tool.execute(serde_json::json!({"task_id": "1"}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("not found"));
+    }
+
+    #[test]
+    fn test_task_update_tool_name() {
+        let tool = TaskUpdateTool::new(mock_update_func());
+        assert_eq!(tool.name(), "task_update");
+    }
+
+    #[test]
+    fn test_task_update_requires_id() {
+        let tool = TaskUpdateTool::new(mock_update_func());
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("task_id"));
+    }
+
+    #[test]
+    fn test_task_update_no_fields() {
+        let tool = TaskUpdateTool::new(mock_update_func());
+        let result = tool.execute(serde_json::json!({"task_id": "1"}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("no update fields"));
+    }
+
+    #[test]
+    fn test_task_update_success() {
+        let tool = TaskUpdateTool::new(mock_update_func());
+        let result = tool.execute(serde_json::json!({
+            "task_id": "1",
+            "status": "completed"
+        }).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Updated task"));
+    }
+
+    #[test]
+    fn test_task_stop_tool_name() {
+        let tool = TaskStopTool::new(mock_stop_func());
+        assert_eq!(tool.name(), "task_stop");
+    }
+
+    #[test]
+    fn test_task_stop_requires_id() {
+        let tool = TaskStopTool::new(mock_stop_func());
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_task_stop_success() {
+        let tool = TaskStopTool::new(mock_stop_func());
+        let result = tool.execute(serde_json::json!({"task_id": "1"}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("stopped successfully"));
+    }
+
+    #[test]
+    fn test_coerce_scalar_to_array_string() {
+        let result = coerce_scalar_to_array(&Value::String("1".to_string()));
+        assert_eq!(result, Value::Array(vec![Value::String("1".to_string())]));
+    }
+
+    #[test]
+    fn test_coerce_scalar_to_array_number() {
+        let result = coerce_scalar_to_array(&Value::Number(serde_json::Number::from(42)));
+        assert_eq!(result, Value::Array(vec![Value::String("42".to_string())]));
+    }
+
+    #[test]
+    fn test_coerce_scalar_to_array_strip_hash() {
+        let result = coerce_scalar_to_array(&Value::String("#3".to_string()));
+        assert_eq!(result, Value::Array(vec![Value::String("3".to_string())]));
+    }
+
+    #[test]
+    fn test_coerce_scalar_to_array_already_array() {
+        let result = coerce_scalar_to_array(&Value::Array(vec![Value::String("1".to_string())]));
+        assert_eq!(result, Value::Array(vec![Value::String("1".to_string())]));
+    }
 }

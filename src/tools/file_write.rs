@@ -161,3 +161,106 @@ impl Tool for FileWriteTool {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Read;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_write_new_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+
+        let result = FileWriteTool::new()
+            .execute({
+                let mut params = HashMap::new();
+                params.insert("file_path".into(), Value::String(file_path.to_str().unwrap().to_string()));
+                params.insert("content".into(), Value::String("Hello, World!".to_string()));
+                params
+            })
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("Wrote"));
+        
+        // Verify file content
+        let mut content = String::new();
+        File::open(&file_path).unwrap().read_to_string(&mut content).unwrap();
+        assert_eq!(content, "Hello, World!");
+    }
+
+    #[test]
+    fn test_tool_name() {
+        let tool = FileWriteTool::new();
+        assert_eq!(tool.name(), "write_file");
+    }
+
+    #[test]
+    fn test_tool_description() {
+        let tool = FileWriteTool::new();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_tool_input_schema() {
+        let tool = FileWriteTool::new();
+        let schema = tool.input_schema();
+        assert!(schema.contains_key("properties"));
+        assert!(schema["properties"].as_object().unwrap().contains_key("file_path"));
+        assert!(schema["properties"].as_object().unwrap().contains_key("content"));
+    }
+
+    #[test]
+    fn test_creates_parent_directories() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("a").join("b").join("c").join("nested.txt");
+
+        let result = FileWriteTool::new()
+            .execute({
+                let mut params = HashMap::new();
+                params.insert("file_path".into(), Value::String(file_path.to_str().unwrap().to_string()));
+                params.insert("content".into(), Value::String("nested content".to_string()));
+                params
+            })
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(file_path.exists());
+    }
+
+    #[test]
+    fn test_content_too_large() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("large.txt");
+        
+        // Create 10MB + 1 content
+        let large_content = "x".repeat(10 * 1024 * 1024 + 1);
+
+        let result = FileWriteTool::new()
+            .execute({
+                let mut params = HashMap::new();
+                params.insert("file_path".into(), Value::String(file_path.to_str().unwrap().to_string()));
+                params.insert("content".into(), Value::String(large_content));
+                params
+            });
+
+        assert!(result.is_err() || result.unwrap().is_error);
+    }
+
+    #[test]
+    fn test_unc_path_blocked() {
+        let tool = FileWriteTool::new();
+        let result = tool.execute({
+            let mut params = HashMap::new();
+            params.insert("file_path".into(), Value::String(r"\\server\share\file.txt".to_string()));
+            params.insert("content".into(), Value::String("test".to_string()));
+            params
+        });
+
+        let result = result.unwrap();
+        assert!(result.is_error);
+        assert!(result.content.contains("UNC path access deferred"));
+    }
+}

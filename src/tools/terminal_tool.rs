@@ -3,6 +3,7 @@
 use crate::tools::{Tool, ToolResult, ToolPermissionResult};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::process::Command;
 
 pub struct TerminalTool;
 
@@ -223,5 +224,71 @@ impl TerminalTool {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_terminal_tool_name() {
+        let tool = TerminalTool;
+        assert_eq!(tool.name(), "terminal");
+    }
+
+    #[test]
+    fn test_terminal_tool_schema() {
+        let tool = TerminalTool;
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("operation"), "expected 'operation' in schema");
+        assert!(props.contains_key("manager"), "expected 'manager' in schema");
+        assert!(props.contains_key("session"), "expected 'session' in schema");
+        assert!(props.contains_key("command"), "expected 'command' in schema");
+        assert!(props.contains_key("cwd"), "expected 'cwd' in schema");
+    }
+
+    #[test]
+    fn test_terminal_tool_permissions() {
+        let tool = TerminalTool;
+        let result = tool.check_permissions(&serde_json::json!({}));
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+
+    #[test]
+    fn test_terminal_no_operation() {
+        let tool = TerminalTool;
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "missing operation should return error");
+    }
+
+    #[test]
+    fn test_terminal_unknown_operation() {
+        let tool = TerminalTool;
+        let result = tool.execute(&serde_json::json!({"operation": "explode"}));
+        assert!(result.is_error, "unknown operation should return error");
+    }
+
+    #[test]
+    fn test_terminal_kill_no_session() {
+        let tool = TerminalTool;
+        let result = tool.execute(&serde_json::json!({"operation": "kill", "manager": "tmux"}));
+        assert!(result.is_error, "kill without session should return error");
+    }
+
+    #[test]
+    fn test_terminal_rename_no_session() {
+        let tool = TerminalTool;
+        let result = tool.execute(&serde_json::json!({"operation": "rename", "manager": "tmux", "new_name": "new"}));
+        assert!(result.is_error, "rename without session should return error");
+    }
+
+    #[test]
+    fn test_terminal_rename_no_new_name() {
+        let tool = TerminalTool;
+        let result = tool.execute(&serde_json::json!({"operation": "rename", "manager": "tmux", "session": "old"}));
+        assert!(result.is_error, "rename without new_name should return error");
     }
 }

@@ -631,3 +631,231 @@ fn get_type_map() -> HashMap<String, Vec<String>> {
 fn glob_match(pattern: &str, name: &str) -> bool {
     glob::Pattern::new(pattern).map(|p| p.matches(name)).unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use std::fs;
+
+    // ─── split_glob_patterns ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_glob_patterns_single() {
+        let parts = split_glob_patterns("*.go");
+        assert_eq!(parts, vec!["*.go"]);
+    }
+
+    #[test]
+    fn test_split_glob_patterns_comma_sep() {
+        let parts = split_glob_patterns("*.ts, *.js");
+        assert_eq!(parts, vec!["*.ts", "*.js"]);
+    }
+
+    #[test]
+    fn test_split_glob_patterns_space_sep() {
+        let parts = split_glob_patterns("*.py *.rs");
+        assert_eq!(parts, vec!["*.py", "*.rs"]);
+    }
+
+    #[test]
+    fn test_split_glob_patterns_empty() {
+        let parts = split_glob_patterns("");
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn test_split_glob_patterns_whitespace() {
+        let parts = split_glob_patterns("   ");
+        assert!(parts.is_empty());
+    }
+
+    // ─── truncate_line ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_line_short() {
+        let line: String = "x".repeat(100);
+        let result = truncate_line(&line);
+        assert_eq!(result, line, "short line should not be truncated");
+    }
+
+    #[test]
+    fn test_truncate_line_long() {
+        let line: String = "x".repeat(600);
+        let result = truncate_line(&line);
+        assert!(result.len() <= 503, "truncated line too long: {} chars", result.len());
+        assert!(result.ends_with("..."), "truncated line should end with ...");
+    }
+
+    // ─── get_type_map ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_type_map_go() {
+        let exts = get_type_map().get("go").unwrap();
+        assert_eq!(exts, &vec![".go".to_string()]);
+    }
+
+    #[test]
+    fn test_type_map_py() {
+        let exts = get_type_map().get("py").unwrap();
+        assert!(exts.contains(&".py".to_string()));
+        assert!(exts.contains(&".pyi".to_string()));
+    }
+
+    #[test]
+    fn test_type_map_ts() {
+        let exts = get_type_map().get("ts").unwrap();
+        assert!(exts.len() >= 2, "ts should have at least 2 extensions");
+    }
+
+    #[test]
+    fn test_type_map_yaml() {
+        let exts = get_type_map().get("yaml").unwrap();
+        assert!(exts.len() >= 2, "yaml should have at least 2 extensions");
+    }
+
+    // ─── GrepTool interface ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_grep_tool_name() {
+        let tool = GrepTool;
+        assert_eq!(tool.name(), "grep");
+    }
+
+    #[test]
+    fn test_grep_tool_schema() {
+        let tool = GrepTool;
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("pattern"), "expected 'pattern' in schema");
+        assert!(props.contains_key("path"), "expected 'path' in schema");
+        assert!(props.contains_key("glob"), "expected 'glob' in schema");
+        assert!(props.contains_key("output_mode"), "expected 'output_mode' in schema");
+    }
+
+    #[test]
+    fn test_grep_tool_permissions() {
+        let tool = GrepTool;
+        let result = tool.check_permissions(&serde_json::json!({}));
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+
+    #[test]
+    fn test_grep_no_pattern() {
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "missing pattern should return error");
+    }
+
+    #[test]
+    fn test_grep_invalid_output_mode() {
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "hello",
+            "output_mode": "invalid_mode"
+        }));
+        assert!(result.is_error, "expected error for invalid output_mode");
+    }
+
+    #[test]
+    fn test_grep_valid_output_modes() {
+        for mode in &["content", "files_with_matches", "count"] {
+            let dir = tempfile::tempdir().unwrap();
+            let tool = GrepTool;
+            let result = tool.execute(&serde_json::json!({
+                "pattern": "nonexistent_xyz",
+                "output_mode": *mode,
+                "path": dir.path().to_str().unwrap()
+            }));
+            assert!(!result.is_error, "valid mode '{}' should not error, got: {}", mode, result.output);
+        }
+    }
+
+    // ─── glob_match ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("*.go", "main.go"));
+        assert!(glob_match("*.go", "test.go"));
+        assert!(!glob_match("*.go", "main.rs"));
+    }
+
+    // ─── grep execute basic ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_grep_content_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "hello world\nfoo bar\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "hello",
+            "path": dir.path().to_str().unwrap(),
+            "output_mode": "content"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("hello"), "expected 'hello' in output");
+    }
+
+    #[test]
+    fn test_grep_files_with_matches_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "hello",
+            "path": dir.path().to_str().unwrap(),
+            "output_mode": "files_with_matches"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("test.txt"), "expected 'test.txt' in output");
+    }
+
+    #[test]
+    fn test_grep_count_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "hello\nhello again\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "hello",
+            "path": dir.path().to_str().unwrap(),
+            "output_mode": "count"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+
+    #[test]
+    fn test_grep_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.txt"), "hello world\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "nonexistent_pattern_xyz",
+            "path": dir.path().to_str().unwrap(),
+            "output_mode": "content"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+
+    #[test]
+    fn test_grep_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("src").join("vendor")).unwrap();
+        fs::create_dir_all(base.join("src").join("main")).unwrap();
+        fs::write(base.join("src").join("vendor").join("lib.go"), "package lib").unwrap();
+        fs::write(base.join("src").join("main").join("app.go"), "package main").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "package",
+            "path": base.to_str().unwrap(),
+            "output_mode": "files_with_matches",
+            "glob": "!**/vendor/**"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+}

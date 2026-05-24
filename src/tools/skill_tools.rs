@@ -320,3 +320,86 @@ fn format_results(
 
     ToolResult::ok(output.trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_score_skill_name_exact_match() {
+        let skill = crate::skills::SkillInfo {
+            name: "git".to_string(),
+            description: "Git version control".to_string(),
+            when_to_use: Some("When you need git".to_string()),
+            tags: vec!["vcs".to_string()],
+            available: true,
+            always: false,
+            missing_deps: vec![],
+        };
+        let score = score_skill(&skill, &["git"]);
+        assert!(score >= 100.0);
+    }
+
+    #[test]
+    fn test_score_skill_name_contains() {
+        let skill = crate::skills::SkillInfo {
+            name: "git_tool".to_string(),
+            description: "Git operations".to_string(),
+            when_to_use: None,
+            tags: vec![],
+            available: true,
+            always: false,
+            missing_deps: vec![],
+        };
+        let score = score_skill(&skill, &["git"]);
+        assert!(score >= 50.0);
+    }
+
+    #[test]
+    fn test_score_skill_description_match() {
+        let skill = crate::skills::SkillInfo {
+            name: "searcher".to_string(),
+            description: "Search files for patterns".to_string(),
+            when_to_use: None,
+            tags: vec![],
+            available: true,
+            always: false,
+            missing_deps: vec![],
+        };
+        let score = score_skill(&skill, &["search"]);
+        assert!(score >= 20.0);
+    }
+
+    #[test]
+    fn test_score_skill_no_match() {
+        let skill = crate::skills::SkillInfo {
+            name: "git".to_string(),
+            description: "Git version control".to_string(),
+            when_to_use: None,
+            tags: vec![],
+            available: true,
+            always: false,
+            missing_deps: vec![],
+        };
+        let score = score_skill(&skill, &["cooking"]);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_format_results() {
+        let skill = crate::skills::SkillInfo {
+            name: "git".to_string(),
+            description: "Git version control".to_string(),
+            when_to_use: Some("When you need git".to_string()),
+            tags: vec!["vcs".to_string()],
+            available: true,
+            always: false,
+            missing_deps: vec![],
+        };
+        let scored = [(&skill, 100.0)];
+        let result = format_results(&scored, "git");
+        assert!(!result.is_error);
+        assert!(result.output.contains("git"));
+        assert!(result.output.contains("Found 1 skill"));
+    }
+}

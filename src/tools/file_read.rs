@@ -416,6 +416,76 @@ fn is_binary_magic(header: &[u8]) -> bool {
     false
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_read_simple_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "Hello, World!").unwrap();
+
+        let result = ReadTool {}
+            .execute(ReadInput {
+                path: file_path.to_str().unwrap().to_string(),
+                offset: None,
+                limit: None,
+                encoding: None,
+            })
+            .unwrap();
+
+        assert!(result.tool_output.content.contains("Hello, World!"));
+        assert_eq!(result.tool_output.error, None);
+    }
+
+    #[test]
+    fn test_read_with_offset_and_limit() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "Line 1").unwrap();
+        writeln!(file, "Line 2").unwrap();
+        writeln!(file, "Line 3").unwrap();
+
+        let result = ReadTool {}
+            .execute(ReadInput {
+                path: file_path.to_str().unwrap().to_string(),
+                offset: Some(1),
+                limit: Some(1),
+                encoding: None,
+            })
+            .unwrap();
+
+        assert!(result.tool_output.content.contains("Line 2"));
+        assert!(!result.tool_output.content.contains("Line 1"));
+    }
+
+    #[test]
+    fn test_tool_name() {
+        let tool = ReadTool {};
+        assert_eq!(tool.name(), "read");
+    }
+
+    #[test]
+    fn test_tool_input_schema() {
+        let tool = ReadTool {};
+        let schema = tool.input_schema();
+        assert!(schema.contains("path"));
+        assert!(schema.contains("offset"));
+        assert!(schema.contains("limit"));
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = ReadTool {};
+        assert_eq!(tool.permissions(), vec!["filesystem:read"]);
+    }
+}
 /// Checks if a path is a special device file that should be blocked from reading.
 /// These files would block indefinitely (/dev/zero, /dev/stdin) or produce infinite output.
 /// Matches official Claude Code behavior.

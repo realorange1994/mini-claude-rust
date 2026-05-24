@@ -75,3 +75,56 @@ impl Tool for EnterPlanModeTool {
         ToolResult::ok(msg).with_mode_change(ModeChange::EnterPlan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    fn make_tool(mode: &str) -> EnterPlanModeTool {
+        let mode = mode.to_string();
+        EnterPlanModeTool {
+            get_mode: Box::new(move || mode.clone()),
+        }
+    }
+
+    #[test]
+    fn test_tool_name() {
+        let tool = make_tool("auto");
+        assert_eq!(tool.name(), "EnterPlanMode");
+    }
+
+    #[test]
+    fn test_enter_plan_mode_from_auto() {
+        let tool = make_tool("auto");
+        let result = tool.execute(serde_json::json!({"reason": "test"}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("plan mode"));
+        assert!(result.mode_change.is_some());
+    }
+
+    #[test]
+    fn test_enter_plan_mode_already_in_plan() {
+        let tool = make_tool("plan");
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Already in plan mode"));
+        assert!(result.mode_change.is_none());
+    }
+
+    #[test]
+    fn test_enter_plan_mode_with_reason() {
+        let tool = make_tool("auto");
+        let result = tool.execute(serde_json::json!({"reason": "Fix complex bug"}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Fix complex bug"));
+    }
+
+    #[test]
+    fn test_enter_plan_mode_without_reason() {
+        let tool = make_tool("auto");
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("read-only"));
+    }
+}

@@ -205,3 +205,134 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         Err(_) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use std::fs;
+
+    fn setup_glob_test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("sub").join("deep")).unwrap();
+        fs::write(base.join("a.go"), "package a").unwrap();
+        fs::write(base.join("b.py"), "# b").unwrap();
+        fs::write(base.join("sub").join("c.go"), "package c").unwrap();
+        fs::write(base.join("sub").join("deep").join("d.go"), "package d").unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_glob_recursive() {
+        let dir = setup_glob_test_dir();
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "**/*.go",
+            "path": dir.path().to_str().unwrap()
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("a.go"), "expected a.go in output");
+        assert!(result.output.contains("c.go"), "expected c.go in output");
+        assert!(result.output.contains("d.go"), "expected d.go in output");
+    }
+
+    #[test]
+    fn test_glob_no_match() {
+        let dir = setup_glob_test_dir();
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "*.rust",
+            "path": dir.path().to_str().unwrap()
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("No files matched"), "expected 'No files matched', got: {}", result.output);
+    }
+
+    #[test]
+    fn test_glob_invalid_directory() {
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "*.go",
+            "path": "/nonexistent/path/xyz"
+        }));
+        assert!(result.is_error, "expected error for nonexistent directory");
+    }
+
+    #[test]
+    fn test_glob_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "**/*",
+            "path": dir.path().to_str().unwrap()
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(result.output.contains("No files matched"), "expected 'No files matched' for empty directory");
+    }
+
+    #[test]
+    fn test_glob_name() {
+        let tool = GlobTool;
+        assert_eq!(tool.name(), "Glob");
+    }
+
+    #[test]
+    fn test_glob_input_schema() {
+        let tool = GlobTool;
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("pattern"), "expected 'pattern' in schema");
+        assert!(props.contains_key("path"), "expected 'path' in schema");
+    }
+
+    #[test]
+    fn test_glob_returns_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "x").unwrap();
+        fs::write(dir.path().join("b.txt"), "y").unwrap();
+
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "*.txt",
+            "path": dir.path().to_str().unwrap()
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+
+        for line in result.output.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('(') {
+                continue;
+            }
+            assert!(std::path::Path::new(line).is_absolute(), "expected absolute path, got relative: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_glob_excludes_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        fs::create_dir_all(base.join("src").join("vendor").join("pkg")).unwrap();
+        fs::create_dir_all(base.join("src").join("main")).unwrap();
+        fs::write(base.join("src").join("vendor").join("pkg").join("lib.go"), "package lib").unwrap();
+        fs::write(base.join("src").join("main").join("app.go"), "package main").unwrap();
+
+        let tool = GlobTool;
+        let result = tool.execute(&serde_json::json!({
+            "pattern": "**/*.go",
+            "path": base.to_str().unwrap(),
+            "excludes": ["vendor"]
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert!(!result.output.contains("lib.go"), "vendor files should be excluded");
+        assert!(result.output.contains("app.go"), "expected app.go in output");
+    }
+
+    #[test]
+    fn test_glob_match_function() {
+        assert!(glob_match("*.go", "main.go"));
+        assert!(glob_match("*.go", "test.go"));
+        assert!(!glob_match("*.go", "main.rs"));
+        assert!(glob_match("**/*.go", "src/main.go"));
+    }
+}

@@ -539,3 +539,50 @@ impl Tool for McpServerStatus {
         ToolResult::ok(output.trim().to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_list_mcp_tools_name() {
+        let manager = Arc::new(McpManager::new());
+        let tool = ListMcpTools::new(manager);
+        assert_eq!(tool.name(), "list_mcp_tools");
+    }
+
+    #[test]
+    fn test_mcp_tool_caller_name() {
+        let manager = Arc::new(McpManager::new());
+        let task_store = Arc::new(crate::task_store::TaskStore::new());
+        let tool = McpToolCaller::new(manager, task_store);
+        assert_eq!(tool.name(), "mcp_call_tool");
+    }
+
+    #[test]
+    fn test_mcp_caller_requires_tool() {
+        let manager = Arc::new(McpManager::new());
+        let task_store = Arc::new(crate::task_store::TaskStore::new());
+        let tool = McpToolCaller::new(manager, task_store);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("tool"));
+    }
+
+    #[test]
+    fn test_mcp_server_status_name() {
+        let manager = Arc::new(McpManager::new());
+        let tool = McpServerStatus::new(manager);
+        assert_eq!(tool.name(), "mcp_server_status");
+    }
+
+    #[test]
+    fn test_mcp_server_status_no_servers() {
+        let manager = Arc::new(McpManager::new());
+        let tool = McpServerStatus::new(manager);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("No MCP servers"));
+    }
+}

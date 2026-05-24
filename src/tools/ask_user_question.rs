@@ -200,3 +200,94 @@ impl Tool for AskUserQuestionTool {
         crate::tools::ApprovalRequirement::Auto
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use serde_json::json;
+
+    #[test]
+    fn test_tool_name() {
+        let tool = AskUserQuestionTool;
+        assert_eq!(tool.name(), "AskUserQuestion");
+    }
+
+    #[test]
+    fn test_tool_schema() {
+        let tool = AskUserQuestionTool;
+        let schema = tool.input_schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "questions");
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("questions"));
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = AskUserQuestionTool;
+        // Should be passthrough (Auto approval)
+        let perms = tool.permissions();
+        assert!(!perms.is_empty());
+    }
+
+    #[test]
+    fn test_execute_no_questions() {
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({}).as_object().unwrap().clone());
+        assert!(result.is_error, "missing questions should return error");
+    }
+
+    #[test]
+    fn test_execute_not_array() {
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({"questions": "not an array"}).as_object().unwrap().clone());
+        assert!(result.is_error, "non-array questions should return error");
+    }
+
+    #[test]
+    fn test_execute_empty_array() {
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({"questions": []}).as_object().unwrap().clone());
+        assert!(result.is_error, "empty questions array should return error");
+    }
+
+    #[test]
+    fn test_execute_too_many_questions() {
+        let questions: Vec<serde_json::Value> = (0..5).map(|_| {
+            json!({
+                "question": "Q?",
+                "header": "H",
+                "options": [
+                    {"label": "A", "description": "desc a"},
+                    {"label": "B", "description": "desc b"}
+                ]
+            })
+        }).collect();
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({"questions": questions}).as_object().unwrap().clone());
+        assert!(result.is_error, "more than 4 questions should return error");
+        assert!(result.output.contains("4"), "should mention 4 limit, got: {}", result.output);
+    }
+
+    #[test]
+    fn test_execute_too_few_options() {
+        let questions = json!([{
+            "question": "Q?",
+            "header": "H",
+            "options": [{"label": "A", "description": "only one"}]
+        }]);
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({"questions": questions}).as_object().unwrap().clone());
+        assert!(result.is_error, "fewer than 2 options should return error");
+    }
+
+    #[test]
+    fn test_execute_no_options_key() {
+        let questions = json!([{"question": "Q?", "header": "H"}]);
+        let tool = AskUserQuestionTool;
+        let result = tool.execute(json!({"questions": questions}).as_object().unwrap().clone());
+        assert!(result.is_error, "missing options should return error");
+    }
+}

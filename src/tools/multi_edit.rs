@@ -349,3 +349,147 @@ fn truncate(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..end])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use std::fs;
+
+    #[test]
+    fn test_multi_edit_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir.path().join("test.go");
+        fs::write(&fp, "package main\n\nfunc foo() {}\n\nfunc bar() {}\n").unwrap();
+
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({
+            "file_path": fp.to_str().unwrap(),
+            "edits": [
+                {"old_string": "func foo()", "new_string": "func Foo()"},
+                {"old_string": "func bar()", "new_string": "func Bar()"}
+            ]
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+
+        let data = fs::read_to_string(&fp).unwrap();
+        assert!(data.contains("func Foo()"), "expected Foo(), got:\n{}", data);
+        assert!(data.contains("func Bar()"), "expected Bar(), got:\n{}", data);
+    }
+
+    #[test]
+    fn test_multi_edit_atomic_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir.path().join("atomic.go");
+        let original = "package main\n\nfunc foo() {}\n\nfunc bar() {}\n";
+        fs::write(&fp, original).unwrap();
+
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({
+            "file_path": fp.to_str().unwrap(),
+            "edits": [
+                {"old_string": "func foo()", "new_string": "func Foo()"},
+                {"old_string": "func missing()", "new_string": "func nope()"}
+            ]
+        }));
+        assert!(result.is_error, "expected error for edit with non-existent old_string");
+
+        let data = fs::read_to_string(&fp).unwrap();
+        assert_eq!(data, original, "file should be unchanged after failed atomic edit");
+    }
+
+    #[test]
+    fn test_multi_edit_file_not_found() {
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({
+            "file_path": "/nonexistent/file.go",
+            "edits": [{"old_string": "x", "new_string": "y"}]
+        }));
+        assert!(result.is_error, "expected error for nonexistent file");
+    }
+
+    #[test]
+    fn test_multi_edit_empty_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir.path().join("empty.go");
+        fs::write(&fp, "package main").unwrap();
+
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({
+            "file_path": fp.to_str().unwrap(),
+            "edits": []
+        }));
+        assert!(result.is_error, "expected error for empty edits array");
+    }
+
+    #[test]
+    fn test_multi_edit_missing_required_params() {
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "expected error for missing required params");
+    }
+
+    #[test]
+    fn test_multi_edit_chained_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = dir.path().join("chained.go");
+        fs::write(&fp, "package main\n\nconst foo = \"hello\"\n\nfunc bar() { return 2 }\n").unwrap();
+
+        let tool = MultiEditTool::new();
+        let result = tool.execute(&serde_json::json!({
+            "file_path": fp.to_str().unwrap(),
+            "edits": [
+                {"old_string": "func bar()", "new_string": "func Bar()"},
+                {"old_string": "\"hello\"", "new_string": "\"world\""}
+            ]
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+
+        let data = fs::read_to_string(&fp).unwrap();
+        assert!(data.contains("func Bar()"), "expected first edit applied");
+        assert!(data.contains("\"world\""), "expected second edit applied");
+    }
+
+    #[test]
+    fn test_multi_edit_tool_name() {
+        let tool = MultiEditTool::new();
+        assert_eq!(tool.name(), "multi_edit");
+    }
+
+    #[test]
+    fn test_multi_edit_tool_schema() {
+        let tool = MultiEditTool::new();
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("file_path"), "expected 'file_path' in schema");
+        assert!(props.contains_key("edits"), "expected 'edits' in schema");
+    }
+
+    // ─── Helper function tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_short() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        let long = "x".repeat(100);
+        let result = truncate(&long, 50);
+        assert!(result.len() <= 53, "truncated too long");
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_desanitize() {
+        assert_eq!(desanitize("\\n"), "\n");
+        assert_eq!(desanitize("\\t"), "\t");
+        assert_eq!(desanitize("\\\\"), "\\");
+    }
+
+    #[test]
+    fn test_normalize_quotes() {
+        assert_eq!(normalize_quotes("'hello'"), "\"hello\"");
+        assert_eq!(normalize_quotes("\"hello\""), "\"hello\"");
+    }
+}

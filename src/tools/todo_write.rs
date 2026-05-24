@@ -163,3 +163,87 @@ impl Tool for TodoWriteTool {
         crate::tools::ApprovalRequirement::Auto
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{TodoList, TodoStatus, TodoItem};
+    use crate::tools::Tool;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_new_todo_list() {
+        let list = TodoList::new();
+        assert!(list.items().is_empty(), "new list should be empty");
+    }
+
+    #[test]
+    fn test_todo_list_update() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(Arc::clone(&list));
+
+        let result = tool.execute(serde_json::json!({
+            "todos": [
+                {"content": "Task 1", "status": "pending"},
+                {"content": "Task 2", "status": "in_progress"}
+            ]
+        }).as_object().unwrap().clone());
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert_eq!(list.items().len(), 2);
+        assert_eq!(list.items()[0].content, "Task 1");
+    }
+
+    #[test]
+    fn test_todo_write_missing_todos() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(list);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error, "missing todos should return error");
+    }
+
+    #[test]
+    fn test_todo_write_invalid_todos() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(Arc::clone(&list));
+
+        let result = tool.execute(serde_json::json!({
+            "todos": [
+                "not a map",
+                {"content": "Valid", "status": "pending"}
+            ]
+        }).as_object().unwrap().clone());
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+        assert_eq!(list.items().len(), 1, "should have 1 valid item");
+    }
+
+    #[test]
+    fn test_todo_write_tool_name() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(list);
+        assert_eq!(tool.name(), "TodoWrite");
+    }
+
+    #[test]
+    fn test_todo_write_tool_schema() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(list);
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("todos"), "expected 'todos' in schema");
+    }
+
+    #[test]
+    fn test_todo_write_tool_permissions() {
+        let list = Arc::new(TodoList::new());
+        let tool = TodoWriteTool::new(list);
+        let result = tool.check_permissions(&serde_json::json!({}).as_object().unwrap().clone());
+        assert_eq!(result.behavior, crate::tools::PermissionBehavior::Passthrough);
+    }
+
+    #[test]
+    fn test_todo_status_constants() {
+        assert_eq!(TodoStatus::Pending, TodoStatus::Pending);
+        assert_eq!(TodoStatus::InProgress, TodoStatus::InProgress);
+        assert_eq!(TodoStatus::Completed, TodoStatus::Completed);
+    }
+}

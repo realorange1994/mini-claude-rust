@@ -684,3 +684,88 @@ impl SystemTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_system_info() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "info"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system info failed: {}", result.output);
+        assert!(result.output.contains("OS:") || result.output.contains("Memory:") || result.output.contains("CPU:"),
+            "expected system info in output, got: {}", result.output);
+    }
+
+    #[test]
+    fn test_system_uname() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "uname"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system uname failed: {}", result.output);
+        assert!(!result.output.is_empty(), "expected non-empty output from uname");
+    }
+
+    #[test]
+    fn test_system_who() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "who"}).as_object().unwrap().clone());
+        // who may succeed or fail depending on environment
+        if !result.is_error {
+            assert!(!result.output.is_empty(), "expected non-empty output from who");
+        }
+    }
+
+    #[test]
+    fn test_system_unknown_operation() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "invalid"}).as_object().unwrap().clone());
+        assert!(result.is_error, "expected error for unknown operation");
+    }
+
+    #[test]
+    fn test_system_hostname() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "hostname"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system hostname failed: {}", result.output);
+        assert!(!result.output.is_empty(), "expected non-empty output from hostname");
+    }
+
+    #[test]
+    fn test_system_uptime() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "uptime"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system uptime failed: {}", result.output);
+        assert!(!result.output.is_empty(), "expected non-empty output from uptime");
+    }
+
+    #[test]
+    fn test_system_df() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "df"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system df failed: {}", result.output);
+        assert!(!result.output.is_empty(), "expected non-empty output from df");
+    }
+
+    #[test]
+    fn test_system_arch() {
+        let tool = SystemTool;
+        let result = tool.execute(serde_json::json!({"operation": "arch"}).as_object().unwrap().clone());
+        assert!(!result.is_error, "system arch failed: {}", result.output);
+        assert!(!result.output.is_empty(), "expected non-empty output from arch");
+    }
+
+    #[test]
+    fn test_tool_name() {
+        let tool = SystemTool;
+        assert_eq!(tool.name(), "system");
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = SystemTool;
+        let perms = tool.permissions();
+        assert!(perms.contains(&crate::tools::Permission::Read));
+    }
+}

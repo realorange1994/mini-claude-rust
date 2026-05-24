@@ -345,3 +345,39 @@ fn copy_path(src: &Path, dest: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_ensure_dir_exists() {
+        let dir = tempdir().unwrap();
+        let test_path = dir.path().join("test").join("subdir");
+        assert!(!test_path.exists());
+        ensure_dir_exists(&test_path).unwrap();
+        assert!(test_path.exists());
+    }
+
+    #[test]
+    fn test_file_ops_tool_name() {
+        let tool = FileOpsTool {};
+        assert_eq!(tool.name(), "fileops");
+    }
+
+    #[test]
+    fn test_file_ops_tool_permissions() {
+        let tool = FileOpsTool {};
+        assert_eq!(tool.permissions().allow, PermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn test_file_ops_tool_description() {
+        let tool = FileOpsTool {};
+        let desc = tool.description();
+        assert!(desc.contains("chmod"));
+        assert!(desc.contains("chown"));
+        assert!(desc.contains("ln"));
+    }
+}

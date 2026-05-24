@@ -106,3 +106,38 @@ fn rust_version() -> String {
     }
     "unknown".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use serde_json::json;
+
+    #[test]
+    fn test_tool_name() {
+        let tool = RuntimeInfoTool;
+        assert_eq!(tool.name(), "runtime_info");
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = RuntimeInfoTool;
+        let perms = tool.permissions();
+        assert!(!perms.is_empty());
+    }
+
+    #[test]
+    fn test_execute_returns_info() {
+        let tool = RuntimeInfoTool;
+        let result = tool.execute(json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error, "runtime_info failed: {}", result.output);
+        assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn test_rust_version() {
+        let v = rust_version();
+        // Should return something like "rustc 1.xx.x"
+        assert!(!v.is_empty());
+    }
+}

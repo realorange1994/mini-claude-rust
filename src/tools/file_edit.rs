@@ -551,3 +551,96 @@ fn encode_utf16le(s: &str) -> Vec<u8> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_restore_crlf_basic() {
+        let result = restore_crlf("line1\nline2\n");
+        assert_eq!(result, "line1\r\nline2\r\n");
+    }
+
+    #[test]
+    fn test_restore_crlf_already_crlf() {
+        let input = "line1\r\nline2\r\n";
+        let result = restore_crlf(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_restore_crlf_empty() {
+        assert_eq!(restore_crlf(""), "");
+    }
+
+    #[test]
+    fn test_apply_replacement_single() {
+        let result = apply_replacement("hello world", "world", "there", false);
+        assert_eq!(result, "hello there");
+    }
+
+    #[test]
+    fn test_apply_replacement_all() {
+        let result = apply_replacement("aaa", "a", "b", true);
+        assert_eq!(result, "bbb");
+    }
+
+    #[test]
+    fn test_apply_replacement_not_all() {
+        let result = apply_replacement("aaa", "a", "b", false);
+        assert_eq!(result, "baa");
+    }
+
+    #[test]
+    fn test_apply_replacement_no_match() {
+        let result = apply_replacement("hello", "xyz", "abc", false);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_encode_utf16le() {
+        let input = "AB";
+        let result = encode_utf16le(input);
+        // BOM + 'A' + 'B' in UTF-16 LE
+        assert_eq!(result.len(), 6); // 2 BOM + 2*2 chars
+        assert_eq!(result[0], 0xFF);
+        assert_eq!(result[1], 0xFE);
+    }
+
+    #[test]
+    fn test_encode_decode_round_trip() {
+        let input = "Hello, 世界!";
+        let encoded = encode_utf16le(input);
+        // Skip BOM and decode
+        let u16s: Vec<u16> = encoded[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        let decoded = String::from_utf16_lossy(&u16s);
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn test_file_edit_tool_name() {
+        let tool = FileEditTool::new();
+        assert_eq!(tool.name(), "edit_file");
+    }
+
+    #[test]
+    fn test_file_edit_tool_input_schema() {
+        let tool = FileEditTool::new();
+        let schema = tool.input_schema();
+        let required = schema.get("required").and_then(|v| v.as_array());
+        assert!(required.is_some());
+        let required = required.unwrap();
+        assert_eq!(required.len(), 3);
+        let props = schema.get("properties").and_then(|v| v.as_object());
+        assert!(props.is_some());
+        let props = props.unwrap();
+        assert!(props.contains_key("file_path"));
+        assert!(props.contains_key("old_string"));
+        assert!(props.contains_key("new_string"));
+        assert!(props.contains_key("replace_all"));
+    }
+}

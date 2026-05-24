@@ -1760,3 +1760,115 @@ fn parse_duration(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use crate::filehistory::FileHistory;
+    use std::path::PathBuf;
+
+    fn make_history() -> Arc<FileHistory> {
+        Arc::new(FileHistory::new())
+    }
+
+    #[test]
+    fn test_file_history_tool_name() {
+        let history = make_history();
+        let tool = FileHistoryTool::new(history);
+        assert_eq!(tool.name(), "file_history");
+    }
+
+    #[test]
+    fn test_file_history_read_tool_name() {
+        let history = make_history();
+        let tool = FileHistoryReadTool::new(history);
+        assert_eq!(tool.name(), "file_history_read");
+    }
+
+    #[test]
+    fn test_file_history_grep_tool_name() {
+        let history = make_history();
+        let tool = FileHistoryGrepTool::new(history);
+        assert_eq!(tool.name(), "file_history_grep");
+    }
+
+    #[test]
+    fn test_file_restore_tool_name() {
+        let history = make_history();
+        let tool = FileRestoreTool::new(history);
+        assert_eq!(tool.name(), "file_restore");
+    }
+
+    #[test]
+    fn test_file_rewind_tool_name() {
+        let history = make_history();
+        let tool = FileRewindTool::new(history);
+        assert_eq!(tool.name(), "file_rewind");
+    }
+
+    #[test]
+    fn test_file_history_diff_tool_name() {
+        let history = make_history();
+        let tool = FileHistoryDiffTool::new(history);
+        assert_eq!(tool.name(), "file_history_diff");
+    }
+
+    #[test]
+    fn test_file_history_read_requires_path() {
+        let history = make_history();
+        let tool = FileHistoryReadTool::new(history);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_file_restore_requires_path() {
+        let history = make_history();
+        let tool = FileRestoreTool::new(history);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_file_rewind_requires_path_and_steps() {
+        let history = make_history();
+        let tool = FileRewindTool::new(history);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_file_history_grep_requires_pattern() {
+        let history = make_history();
+        let tool = FileHistoryGrepTool::new(history);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_file_history_diff_requires_path() {
+        let history = make_history();
+        let tool = FileHistoryDiffTool::new(history);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn test_parse_relative_time() {
+        // Test valid formats
+        assert!(parse_relative_time("1h").is_some());
+        assert!(parse_relative_time("30m").is_some());
+        assert!(parse_relative_time("2d").is_some());
+        // Test invalid formats
+        assert!(parse_relative_time("invalid").is_none());
+        assert!(parse_relative_time("").is_none());
+    }
+
+    #[test]
+    fn test_truncate_at() {
+        assert_eq!(truncate_at("hello world", 5), "hello");
+        assert_eq!(truncate_at("hi", 10), "hi");
+        assert_eq!(truncate_at("", 5), "");
+    }
+}

@@ -38,6 +38,8 @@ pub mod agent_tool;
 pub mod todo_write;
 pub mod send_message;
 pub mod ask_user_question;
+pub mod notebook_edit;
+pub mod file_encoding;
 mod path_safety;
 mod filesystem_safety;
 mod capabilities;
@@ -61,6 +63,8 @@ pub use git_tool::GitTool;
 pub use git_tool::{find_git_root, get_branch, is_bare_repo, is_git_repo, get_git_status, has_uncommitted_changes, get_default_branch, get_current_commit_hash, is_dirty, get_git_context, get_git_context_for_prompt};
 pub use runtime_info::RuntimeInfoTool;
 pub use web_search::WebSearchTool;
+pub use notebook_edit::NotebookEditTool;
+pub use file_encoding::FileEncodingTool;
 
 use crate::config::Config;
 use serde_json;
@@ -503,6 +507,12 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(exa_search::ExaSearchTool);
     registry.register(brief_tool::BriefTool::new());
     registry.register(ask_user_question::AskUserQuestionTool::new());
+    registry.register(notebook_edit::NotebookEditTool::with_files_read(
+        Some(registry.files_read_handle()),
+    ));
+    registry.register(file_encoding::FileEncodingTool::with_files_read(
+        Some(registry.files_read_handle()),
+    ));
 
     // ToolSearchTool: uses a shared tools list that gets populated
     // after all tools are registered (see finalize_tool_search).

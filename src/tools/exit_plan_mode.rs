@@ -91,3 +91,78 @@ impl Tool for ExitPlanModeTool {
         ToolResult::ok(msg).with_mode_change(ModeChange::ExitPlan { restore_mode })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    fn make_tool(mode: &str, pre_plan: Option<PermissionMode>) -> ExitPlanModeTool {
+        let mode = mode.to_string();
+        let pre_plan = pre_plan;
+        ExitPlanModeTool {
+            get_mode: Box::new(move || mode.clone()),
+            get_pre_plan_mode: Box::new(move || pre_plan),
+        }
+    }
+
+    #[test]
+    fn test_tool_name() {
+        let tool = make_tool("plan", None);
+        assert_eq!(tool.name(), "ExitPlanMode");
+    }
+
+    #[test]
+    fn test_exit_plan_mode_not_in_plan() {
+        let tool = make_tool("auto", None);
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Not in plan mode"));
+        assert!(result.mode_change.is_none());
+    }
+
+    #[test]
+    fn test_exit_plan_mode_not_approved() {
+        let tool = make_tool("plan", None);
+        let result = tool.execute(serde_json::json!({"approved": false}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("not yet approved"));
+        assert!(result.mode_change.is_none());
+    }
+
+    #[test]
+    fn test_exit_plan_mode_approved() {
+        let tool = make_tool("plan", Some(PermissionMode::Auto));
+        let result = tool.execute(serde_json::json!({"approved": true}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Exited plan mode"));
+        assert!(result.mode_change.is_some());
+    }
+
+    #[test]
+    fn test_exit_plan_mode_with_summary() {
+        let tool = make_tool("plan", Some(PermissionMode::Auto));
+        let result = tool.execute(
+            serde_json::json!({"approved": true, "summary": "Implement feature X"})
+                .as_object().unwrap().clone(),
+        );
+        assert!(!result.is_error);
+        assert!(result.output.contains("Implement feature X"));
+    }
+
+    #[test]
+    fn test_exit_plan_mode_restores_pre_plan_mode() {
+        let tool = make_tool("plan", Some(PermissionMode::Bypass));
+        let result = tool.execute(serde_json::json!({"approved": true}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Bypass"));
+    }
+
+    #[test]
+    fn test_exit_plan_mode_defaults_to_auto() {
+        let tool = make_tool("plan", None);
+        let result = tool.execute(serde_json::json!({"approved": true}).as_object().unwrap().clone());
+        assert!(!result.is_error);
+        assert!(result.output.contains("Auto"));
+    }
+}

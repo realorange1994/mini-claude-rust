@@ -1163,7 +1163,7 @@ impl ExecTool {
                 Ok(None) => {
                     if std::time::Instant::now().duration_since(start) >= timeout {
                         // Kill the entire process group (matching upstream's tree-kill)
-                        let _pid = child.id();
+                        let pid = child.id();
                         #[cfg(unix)]
                         unsafe {
                             // Negative PID = process group. Cast to i32 for Unix kill.
@@ -1909,4 +1909,536 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── detect_command_substitution ──────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_command_substitution_blocked() {
+        let blocked = vec![
+            "echo $(whoami)",
+            "curl `ls`",
+            "cat /etc/passwd | $(grep root)",
+            "diff <(ls) <(ls /)",
+            "echo $((1+$(whoami)))",
+        ];
+        for cmd in blocked {
+            let reason = detect_command_substitution(cmd);
+            assert!(reason.is_some(), "expected detection for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_detect_command_substitution_allowed() {
+        let allowed = vec![
+            "echo $HOME",
+            "echo ${HOME}",
+            "echo $USER",
+            "cd $PWD",
+            "echo $CI",
+            "echo $?",
+            "echo $$",
+            "echo $!",
+            "echo $1",
+            "echo $2",
+            "echo $#",
+            "echo $@",
+            "echo $*",
+            "echo ${HOME:-/default}",
+            "env FOO=bar ./script.sh",
+        ];
+        for cmd in allowed {
+            let reason = detect_command_substitution(cmd);
+            assert!(reason.is_none(), "expected no detection for: {}, got: {:?}", cmd, reason);
+        }
+    }
+
+    #[test]
+    fn test_detect_command_substitution_dangerous_vars() {
+        let dangerous = vec![
+            "echo ${IFS}",
+            "echo ${!VAR}",
+            "echo ${BASH_VERSION}",
+            "echo ${DANGER_VAR}",
+            "echo ${PATH}",
+            "echo ${GOPATH}",
+            "git commit -m ${GIT_AUTHOR_NAME}",
+        ];
+        for cmd in dangerous {
+            let reason = detect_command_substitution(cmd);
+            assert!(reason.is_some(), "expected detection for: {}", cmd);
+        }
+    }
+
+    // ─── strip_safe_wrappers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_safe_wrappers() {
+        let cases = vec![
+            ("timeout 30 rm -rf /tmp", "rm -rf /tmp"),
+            ("nice -n 10 make build", "make build"),
+            ("nohup ./script.sh &", "./script.sh &"),
+            ("time make test", "make test"),
+            ("stdbuf -oL grep pattern file", "grep pattern file"),
+            ("ionice -c 3 make build", "make build"),
+            ("env FOO=bar ./script.sh", "./script.sh"),
+            ("env FOO=bar BAR=baz ./script.sh", "./script.sh"),
+            ("command ls -la", "ls -la"),
+            ("builtin echo hello", "echo hello"),
+            ("unbuffer ssh host cmd", "ssh host cmd"),
+            ("rm -rf /tmp", "rm -rf /tmp"),
+            ("ls -la", "ls -la"),
+        ];
+        for (input, expected) in cases {
+            let result = strip_safe_wrappers(input);
+            assert_eq!(result, expected, "strip_safe_wrappers({:?}): expected {:?}, got {:?}", input, expected, result);
+        }
+    }
+
+    // ─── split_compound_command ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_split_compound_command() {
+        let cases = vec![
+            ("cmd1; cmd2", vec!["cmd1", "cmd2"]),
+            ("cmd1 && cmd2", vec!["cmd1", "cmd2"]),
+            ("cmd1 || cmd2", vec!["cmd1", "cmd2"]),
+            ("cmd1 | cmd2", vec!["cmd1", "cmd2"]),
+            ("cmd1\ncmd2", vec!["cmd1", "cmd2"]),
+            ("cmd1 | cmd2 && cmd3; cmd4", vec!["cmd1", "cmd2", "cmd3", "cmd4"]),
+            ("ls", vec!["ls"]),
+        ];
+        for (input, expected) in cases {
+            let result = split_compound_command(input);
+            assert_eq!(result, expected, "split_compound_command({:?}): expected {:?}, got {:?}", input, expected, result);
+        }
+    }
+
+    #[test]
+    fn test_split_compound_command_empty() {
+        let result = split_compound_command("");
+        assert!(result.is_empty(), "expected empty for empty input");
+        let result = split_compound_command("   ");
+        assert!(result.is_empty(), "expected empty for whitespace input");
+    }
+
+    #[test]
+    fn test_split_compound_command_preserves_quotes() {
+        let result = split_compound_command(r#"echo "hello; world""#);
+        assert_eq!(result, vec![r#"echo "hello; world""#]);
+        let result = split_compound_command("echo 'hello && world'");
+        assert_eq!(result, vec!["echo 'hello && world'"]);
+    }
+
+    // ─── detect_expansion ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_expansion_destructive() {
+        let destructive = vec![
+            "rm -rf *.txt",
+            "rm file?.log",
+            "mv *.bak /backup/",
+            "cp file[0-9].dat /dest/",
+            "chmod 777 {a,b,c}",
+            "chown user:group {1..10}",
+            "git rm *.tmp",
+            "git clean -f *.log",
+        ];
+        for cmd in destructive {
+            let reason = detect_expansion(cmd);
+            assert!(reason.is_some(), "expected expansion detection for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_detect_expansion_safe() {
+        let safe = vec![
+            "ls *.go",
+            "find . -name '*.txt'",
+            "grep pattern *.log",
+            "echo *.txt",
+            "cat config.ini",
+        ];
+        for cmd in safe {
+            let reason = detect_expansion(cmd);
+            assert!(reason.is_none(), "expected no detection for: {}, got: {:?}", cmd, reason);
+        }
+    }
+
+    #[test]
+    fn test_detect_expansion_quoted() {
+        let quoted = vec![
+            r#"ls "*.go""#,
+            "grep pattern '*.txt'",
+            r#"find . -name "*.log""#,
+        ];
+        for cmd in quoted {
+            let reason = detect_expansion(cmd);
+            assert!(reason.is_none(), "expected no detection for quoted: {}, got: {:?}", cmd, reason);
+        }
+    }
+
+    // ─── is_read_only_command ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_read_only_command() {
+        let read_only = vec![
+            "ls",
+            "ls -la",
+            "cat file.txt",
+            "head -n 10 file.txt",
+            "tail -f log.txt",
+            "less file.txt",
+            "more file.txt",
+            "wc -l file.txt",
+            "file binary.bin",
+            "stat file.txt",
+            "du -sh .",
+            "df -h",
+            "find . -name '*.go'",
+            "which go",
+            "whereis go",
+            "locate go.mod",
+            "grep pattern file.go",
+            "rg pattern",
+            "pwd",
+            "whoami",
+            "id",
+            "hostname",
+            "uname -a",
+            "date",
+            "env",
+            "echo hello",
+            "printf '%s' hello",
+            "jq '.foo' data.json",
+            "tree",
+        ];
+        for cmd in read_only {
+            assert!(is_read_only_command(cmd), "expected {} to be read-only", cmd);
+        }
+    }
+
+    #[test]
+    fn test_is_read_only_command_not() {
+        let not_read_only = vec![
+            "echo hello > out.txt",
+            "echo hello >> out.txt",
+            "ls > files.txt",
+        ];
+        for cmd in not_read_only {
+            assert!(!is_read_only_command(cmd), "expected {} to NOT be read-only", cmd);
+        }
+    }
+
+    #[test]
+    fn test_is_read_only_command_safe_wrappers() {
+        assert!(is_read_only_command("timeout 30 ls"));
+        assert!(is_read_only_command("nice -n 10 ls -la"));
+    }
+
+    #[test]
+    fn test_is_read_only_command_git() {
+        // Git read-only
+        let git_readonly = vec![
+            "git status",
+            "git log",
+            "git diff",
+            "git blame file.go",
+            "git ls-files",
+            "git branch",
+            "git branch -v",
+            "git remote",
+            "git remote -v",
+            "git stash list",
+            "git stash show",
+            "git tag",
+            "git tag -l",
+            "git rev-parse HEAD",
+        ];
+        for cmd in git_readonly {
+            assert!(is_read_only_command(cmd), "expected {} to be read-only", cmd);
+        }
+
+        // Git mutation
+        let git_mutation = vec![
+            "git branch -d old-branch",
+            "git branch -D force-branch",
+            "git branch -m old new",
+            "git remote add origin url",
+            "git remote rm origin",
+            "git stash pop",
+            "git stash drop",
+            "git stash save message",
+            "git tag -d old-tag",
+            "git tag -a v1.0 -m 'message'",
+        ];
+        for cmd in git_mutation {
+            assert!(!is_read_only_command(cmd), "expected {} to NOT be read-only", cmd);
+        }
+    }
+
+    // ─── extract_deletion_targets ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_deletion_targets() {
+        let cases = vec![
+            (vec!["-rf", "file.txt"], vec!["file.txt"]),
+            (vec!["-rf", "--", "file.txt"], vec!["file.txt"]),
+            (vec!["--", "-f"], vec!["-f"]),
+            (vec!["--", "-/../secret"], vec!["-/../secret"]),
+            (vec!["-rf", "a.txt", "b.txt"], vec!["a.txt", "b.txt"]),
+            (vec!["--", "file1", "-rf"], vec!["file1", "-rf"]),
+        ];
+        for (args, expected) in cases {
+            let result = extract_deletion_targets(&args.join(" "));
+            assert_eq!(result, expected, "extract_deletion_targets({:?}): expected {:?}, got {:?}", args, expected, result);
+        }
+    }
+
+    // ─── validate_deletion_paths ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_paths_dangerous() {
+        let dangerous = vec![
+            "rm -rf /",
+            "rm -rf /home",
+            "rm -rf /tmp",
+            "rm -rf /etc",
+            "rm -rf /usr",
+            "rm -rf /bin",
+            "rm -rf /sbin",
+            "rm -rf /var",
+            "rm -rf /root",
+            "rm -rf /opt",
+            "rm -rf /boot",
+            "rm -rf /sys",
+            "rm -rf /proc",
+            "rm -rf /dev",
+            "rm -rf /lib",
+            "rm -rf /lib64",
+            "rm -rf ~",
+            "rm -rf ~/Downloads",
+            "rm -rf $HOME",
+        ];
+        for cmd in dangerous {
+            let reason = validate_deletion_paths(cmd);
+            assert!(reason.is_some(), "expected path validation for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_validate_paths_safe() {
+        let safe = vec![
+            "rm -rf .",
+            "rm file.txt",
+            "rm ./file.txt",
+            "rm -rf node_modules",
+            "rm -rf src/build",
+            "rmdir build/dist",
+        ];
+        for cmd in safe {
+            let reason = validate_deletion_paths(cmd);
+            assert!(reason.is_none(), "expected no path validation for: {}, got: {:?}", cmd, reason);
+        }
+    }
+
+    // ─── escape_xml ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_escape_xml() {
+        assert_eq!(escape_xml("hello"), "hello");
+        assert_eq!(escape_xml("a & b"), "a &amp; b");
+        assert_eq!(escape_xml("a < b"), "a &lt; b");
+        assert_eq!(escape_xml("a > b"), "a &gt; b");
+        assert_eq!(escape_xml("a \"b\" c"), "a &quot;b&quot; c");
+        assert_eq!(escape_xml("a 'b' c"), "a &apos;b&apos; c");
+        assert_eq!(escape_xml("<tag attr=\"val\">&amp;</tag>"), "&lt;tag attr=&quot;val&quot;&gt;&amp;amp;&lt;/tag&gt;");
+    }
+
+    // ─── is_safe_variable ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_safe_variable() {
+        let safe = vec!["HOME", "USER", "PWD", "SHELL", "LANG", "CI", "TERM", "PATH"];
+        for var in safe {
+            assert!(is_safe_variable(var), "expected {} to be safe", var);
+        }
+    }
+
+    #[test]
+    fn test_is_safe_variable_unsafe() {
+        let unsafe_vars = vec!["IFS", "BASH_VERSION", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"];
+        for var in unsafe_vars {
+            assert!(!is_safe_variable(var), "expected {} to be unsafe", var);
+        }
+    }
+
+    // ─── ExecTool interface ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_exec_tool_name() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        assert_eq!(tool.name(), "Bash");
+    }
+
+    #[test]
+    fn test_exec_tool_input_schema_has_command() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let schema = tool.input_schema();
+        assert!(schema.get("properties").is_some());
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("command"), "expected 'command' in schema");
+        assert!(props.contains_key("run_in_background"), "expected 'run_in_background' in schema");
+    }
+
+    // ─── Permission checks ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_check_permissions_deny_rm_rf() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let dangerous = vec![
+            "rm -rf /",
+            "rm -rf ~",
+            "sudo rm -rf /",
+        ];
+        for cmd in dangerous {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_deny_power_commands() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let cmds = vec!["shutdown -h now", "reboot", "poweroff"];
+        for cmd in cmds {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_deny_mkfs() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let result = tool.check_permissions(&serde_json::json!({"command": "mkfs.ext4 /dev/sda"}));
+        assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+            "expected denial for mkfs");
+    }
+
+    #[test]
+    fn test_check_permissions_deny_redirect_to_dev() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let result = tool.check_permissions(&serde_json::json!({"command": "echo bad > /dev/sda"}));
+        assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+            "expected denial for redirect to /dev/sda");
+    }
+
+    #[test]
+    fn test_check_permissions_deny_command_substitution() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let dangerous = vec![
+            "echo $(whoami)",
+            "cat `ls`",
+            "diff <(ls) <(ls /)",
+            "echo $((1+$(id)))",
+        ];
+        for cmd in dangerous {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_deny_compound_dangerous() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let dangerous = vec![
+            "echo hello; rm -rf /",
+            "ls && rm -rf /tmp",
+        ];
+        for cmd in dangerous {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for compound command: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_deny_wrapper_stripping() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let dangerous = vec![
+            "timeout 5 rm -rf /tmp/test",
+            "nice -n 10 rm -rf /tmp/test",
+            "nohup rm -rf /tmp/test",
+        ];
+        for cmd in dangerous {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for wrapped command: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_deny_critical_project_files() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let dangerous = vec![
+            "rm -rf .git",
+            "rm .gitignore",
+            "rm .gitconfig",
+            "rm go.mod",
+            "rm package.json",
+            "rm Cargo.toml",
+            "rm Makefile",
+            "rm -rf .claude",
+        ];
+        for cmd in dangerous {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior != crate::tools::PermissionBehavior::Passthrough,
+                "expected denial for critical project file: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_check_permissions_allow_safe_commands() {
+        let tool = ExecTool::new(Arc::new(crate::task_store::TaskStore::new()), None, None);
+        let safe = vec![
+            "echo hello",
+            "ls -la",
+            "pwd",
+            "cat file.txt",
+            "grep pattern file",
+            "git status",
+        ];
+        for cmd in safe {
+            let result = tool.check_permissions(&serde_json::json!({"command": cmd}));
+            assert!(result.behavior == crate::tools::PermissionBehavior::Passthrough,
+                "expected allowance for: {}, got: {:?}", cmd, result.behavior);
+        }
+    }
+
+    // ─── contains_vulnerable_unc_path ─────────────────────────────────────────────
+
+    #[test]
+    fn test_contains_vulnerable_unc_path() {
+        assert!(contains_vulnerable_unc_path("rm -rf \\\\server\\share"));
+        assert!(contains_vulnerable_unc_path("cat \\\\?\\UNC\\server\\share"));
+        assert!(!contains_vulnerable_unc_path("ls /tmp"));
+        assert!(!contains_vulnerable_unc_path("echo hello"));
+    }
+
+    // ─── contains_path_escape ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_contains_path_escape() {
+        assert!(contains_path_escape("-/../secret"));
+        assert!(contains_path_escape("foo/../../etc/passwd"));
+        assert!(!contains_path_escape("normal/path"));
+        assert!(!contains_path_escape("file.txt"));
+    }
 }

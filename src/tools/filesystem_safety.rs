@@ -250,3 +250,133 @@ fn is_claude_config_path(path: &str) -> bool {
         p.ends_with(pattern) || p.contains(&format!("/{}", pattern))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_permission_behavior_allow() {
+        let result = ToolPermissionResult::allow();
+        assert_eq!(result.behavior, PermissionBehavior::Allow);
+        assert!(!result.is_bypass_immune());
+    }
+
+    #[test]
+    fn test_permission_behavior_deny() {
+        let result = ToolPermissionResult::deny("test deny");
+        assert_eq!(result.behavior, PermissionBehavior::Deny);
+        assert!(result.is_bypass_immune());
+    }
+
+    #[test]
+    fn test_permission_behavior_ask() {
+        let result = ToolPermissionResult::ask("test ask", "tool");
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+        assert!(!result.is_bypass_immune());
+    }
+
+    #[test]
+    fn test_permission_behavior_ask_safety_check() {
+        let result = ToolPermissionResult::ask("test ask", "safetyCheck");
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+        assert!(result.is_bypass_immune());
+    }
+
+    #[test]
+    fn test_permission_behavior_ask_not_classifiable() {
+        let result = ToolPermissionResult::ask_not_classifiable("test", "safetyCheck");
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+        assert!(!result.classifier_approvable);
+    }
+
+    #[test]
+    fn test_permission_behavior_passthrough() {
+        let result = ToolPermissionResult::passthrough();
+        assert_eq!(result.behavior, PermissionBehavior::Passthrough);
+        assert!(!result.is_bypass_immune());
+    }
+
+    #[test]
+    fn test_dangerous_file_path_gitconfig() {
+        let result = is_dangerous_file_path(".gitconfig");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("sensitive"));
+    }
+
+    #[test]
+    fn test_dangerous_file_path_bashrc() {
+        let result = is_dangerous_file_path(".bashrc");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_dangerous_file_path_safe() {
+        let result = is_dangerous_file_path("main.rs");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_dangerous_directory_git() {
+        let result = is_dangerous_file_path(".git/config");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_suspicious_windows_path_ads() {
+        let result = has_suspicious_windows_path_pattern("C:\\file.txt:Zone.Identifier");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_suspicious_windows_path_short_name() {
+        let result = has_suspicious_windows_path_pattern("CLAUDE~1");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_suspicious_windows_path_trailing_dot() {
+        let result = has_suspicious_windows_path_pattern("file.");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_suspicious_windows_path_dos_device() {
+        let result = has_suspicious_windows_path_pattern("file.CON");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_suspicious_windows_path_safe() {
+        let result = has_suspicious_windows_path_pattern("/home/user/file.txt");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_path_safety_safe() {
+        let result = check_path_safety_for_auto_edit("main.rs");
+        assert_eq!(result.behavior, PermissionBehavior::Passthrough);
+    }
+
+    #[test]
+    fn test_check_path_safety_dangerous() {
+        let result = check_path_safety_for_auto_edit(".gitconfig");
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+    }
+
+    #[test]
+    fn test_check_path_safety_suspicious() {
+        let result = check_path_safety_for_auto_edit("file.CON");
+        assert_eq!(result.behavior, PermissionBehavior::Ask);
+        assert!(!result.classifier_approvable);
+    }
+
+    #[test]
+    fn test_is_claude_config_path() {
+        assert!(is_claude_config_path(".claude/settings.json"));
+        assert!(is_claude_config_path(".claude/settings.local.json"));
+        assert!(is_claude_config_path("/home/user/.claude/commands/test.md"));
+        assert!(!is_claude_config_path("main.rs"));
+        assert!(!is_claude_config_path(".claude/worktrees/abc123"));
+    }
+}

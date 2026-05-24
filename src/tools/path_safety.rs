@@ -174,3 +174,80 @@ impl WorkspaceTrust {
         std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_escapes_workspace_dotdot() {
+        assert!(path_escapes_workspace("../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_path_escapes_workspace_deep_dotdot() {
+        assert!(path_escapes_workspace("foo/../../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_path_does_not_escape_safe() {
+        assert!(!path_escapes_workspace("src/main.rs"));
+    }
+
+    #[test]
+    fn test_path_does_not_escape_with_dotdot_cancel() {
+        // foo/.. cancels out, not escaping
+        assert!(!path_escapes_workspace("foo/../bar"));
+    }
+
+    #[test]
+    fn test_path_does_not_escape_absolute() {
+        // Absolute paths are not considered escaping since they don't traverse
+        assert!(!path_escapes_workspace("/home/user/project/src/main.rs"));
+    }
+
+    #[test]
+    fn test_path_escapes_workspace_dot_only() {
+        assert!(!path_escapes_workspace("./main.rs"));
+    }
+
+    #[test]
+    fn test_path_escapes_workspace_empty() {
+        assert!(!path_escapes_workspace(""));
+    }
+
+    #[test]
+    fn test_path_escapes_windows_backslash() {
+        assert!(path_escapes_workspace("..\\..\\windows\\system32"));
+    }
+
+    #[test]
+    fn test_resolve_path_within_workspace() {
+        let workspace = std::env::current_dir().unwrap();
+        let result = resolve_path("src/main.rs", &workspace);
+        assert!(result.is_ok());
+        let resolved = result.unwrap();
+        assert!(resolved.starts_with(&workspace));
+    }
+
+    #[test]
+    fn test_resolve_path_escapes_workspace() {
+        let workspace = std::env::current_dir().unwrap();
+        let result = resolve_path("../../etc/passwd", &workspace);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_workspace_trust_default() {
+        let trust = WorkspaceTrust::default();
+        assert!(trust.trusted_paths.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_trust_permits_empty() {
+        let trust = WorkspaceTrust::default();
+        let cwd = std::env::current_dir().unwrap();
+        // Default trust list should not permit anything
+        assert!(!trust.permits(&cwd));
+    }
+}

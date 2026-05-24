@@ -163,3 +163,121 @@ impl Tool for MemorySearchTool {
 
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use crate::context::SessionMemory;
+    use std::sync::Arc;
+
+    fn make_memory() -> Arc<SessionMemory> {
+        Arc::new(SessionMemory::new())
+    }
+
+    // ─── MemoryAddTool ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_add_tool_name() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(Arc::clone(&mem));
+        assert_eq!(tool.name(), "memory_add");
+    }
+
+    #[test]
+    fn test_memory_add_tool_schema() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(Arc::clone(&mem));
+        let schema = tool.input_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(props.contains_key("category"), "expected 'category' in schema");
+        assert!(props.contains_key("content"), "expected 'content' in schema");
+    }
+
+    #[test]
+    fn test_memory_add_execute_valid() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(Arc::clone(&mem));
+        let result = tool.execute(&serde_json::json!({
+            "category": "preference",
+            "content": "user likes dark mode"
+        }));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+
+    #[test]
+    fn test_memory_add_missing_category() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(mem);
+        let result = tool.execute(&serde_json::json!({"content": "test"}));
+        assert!(result.is_error, "missing category should return error");
+    }
+
+    #[test]
+    fn test_memory_add_missing_content() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(mem);
+        let result = tool.execute(&serde_json::json!({"category": "state"}));
+        assert!(result.is_error, "missing content should return error");
+    }
+
+    #[test]
+    fn test_memory_add_invalid_category() {
+        let mem = make_memory();
+        let tool = MemoryAddTool::new(mem);
+        let result = tool.execute(&serde_json::json!({
+            "category": "bug",
+            "content": "test"
+        }));
+        assert!(result.is_error, "invalid category should return error");
+    }
+
+    // ─── MemorySearchTool ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_memory_search_tool_name() {
+        let mem = make_memory();
+        let tool = MemorySearchTool::new(Arc::clone(&mem));
+        assert_eq!(tool.name(), "memory_search");
+    }
+
+    #[test]
+    fn test_memory_search_tool_schema() {
+        let mem = make_memory();
+        let tool = MemorySearchTool::new(Arc::clone(&mem));
+        let schema = tool.input_schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.iter().any(|r| r.as_str() == Some("query")), "expected 'query' in required");
+    }
+
+    #[test]
+    fn test_memory_search_no_results() {
+        let mem = make_memory();
+        let tool = MemorySearchTool::new(mem);
+        let result = tool.execute(&serde_json::json!({"query": "nothing"}));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+
+    #[test]
+    fn test_memory_search_missing_query() {
+        let mem = make_memory();
+        let tool = MemorySearchTool::new(mem);
+        let result = tool.execute(&serde_json::json!({}));
+        assert!(result.is_error, "missing query should return error");
+    }
+
+    #[test]
+    fn test_memory_search_with_results() {
+        let mem = make_memory();
+        // First add something
+        let add_tool = MemoryAddTool::new(Arc::clone(&mem));
+        add_tool.execute(&serde_json::json!({
+            "category": "state",
+            "content": "working on feature"
+        }));
+
+        let search_tool = MemorySearchTool::new(Arc::clone(&mem));
+        let result = search_tool.execute(&serde_json::json!({"query": "feature"}));
+        assert!(!result.is_error, "unexpected error: {}", result.output);
+    }
+}

@@ -477,3 +477,50 @@ fn sanitize_ps_input(s: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use serde_json::json;
+
+    #[test]
+    fn test_tool_name() {
+        let tool = ProcessTool;
+        assert_eq!(tool.name(), "process");
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = ProcessTool;
+        let perms = tool.permissions();
+        assert!(!perms.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_ps_input() {
+        assert_eq!(sanitize_ps_input("hello"), "hello");
+        assert_eq!(sanitize_ps_input("hello; rm -rf"), "hello rm -rf");
+        assert_eq!(sanitize_ps_input("$HOME"), "HOME");
+        assert_eq!(sanitize_ps_input("a&b|c"), "abc");
+        assert_eq!(sanitize_ps_input("normal text 123"), "normal text 123");
+        assert_eq!(sanitize_ps_input("$(whoami)"), "(whoami)");
+        assert_eq!(sanitize_ps_input("cmd`whoami`"), "cmdwhoami");
+    }
+
+    #[test]
+    fn test_list_operation() {
+        let tool = ProcessTool;
+        let result = tool.execute(json!({"operation": "list"}).as_object().unwrap().clone());
+        // Should succeed on a Linux system
+        assert!(!result.is_error, "process list failed: {}", result.output);
+        assert!(!result.output.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_operation() {
+        let tool = ProcessTool;
+        let result = tool.execute(json!({"operation": "invalid"}).as_object().unwrap().clone());
+        assert!(result.is_error, "expected error for unknown operation");
+    }
+}

@@ -2,6 +2,7 @@
 
 use crate::context::ConversationContext;
 use crate::tools::{Tool, ToolResult, ToolPermissionResult};
+use crate::tools::filesystem_safety::PermissionBehavior;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -200,4 +201,71 @@ fn extract_string_list(value: Option<&Value>) -> Vec<String> {
     arr.iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_tool_name() {
+        let tool = AgentTool::new();
+        assert_eq!(tool.name(), "agent");
+    }
+
+    #[test]
+    fn test_tool_description_not_empty() {
+        let tool = AgentTool::new();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn test_input_schema_has_required() {
+        let tool = AgentTool::new();
+        let schema = tool.input_schema();
+        assert!(schema.contains_key("required"));
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("prompt")));
+        assert!(required.iter().any(|v| v.as_str() == Some("description")));
+    }
+
+    #[test]
+    fn test_execute_without_spawn_func() {
+        let tool = AgentTool::new();
+        let result = tool.execute(serde_json::json!({"prompt": "test"}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("not initialized"));
+    }
+
+    #[test]
+    fn test_execute_without_prompt() {
+        let tool = AgentTool::new();
+        let result = tool.execute(serde_json::json!({}).as_object().unwrap().clone());
+        assert!(result.is_error);
+        assert!(result.output.contains("prompt"));
+    }
+
+    #[test]
+    fn test_extract_string_list() {
+        assert_eq!(extract_string_list(None), Vec::<String>::new());
+        assert_eq!(extract_string_list(Some(&serde_json::json!(null))), Vec::<String>::new());
+        assert_eq!(extract_string_list(Some(&serde_json::json!([]))), Vec::<String>::new());
+        assert_eq!(
+            extract_string_list(Some(&serde_json::json!(["a", "b"]))),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // Non-string values are filtered out
+        assert_eq!(
+            extract_string_list(Some(&serde_json::json!(["a", 1, "b"]))),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_check_permissions() {
+        let tool = AgentTool::new();
+        let result = tool.check_permissions(&HashMap::new());
+        assert!(matches!(result.behavior, PermissionBehavior::Passthrough));
+    }
 }

@@ -1,6 +1,7 @@
 //! ExaSearchTool - Exa deep web search
 
 use crate::tools::{Tool, ToolResult, ToolPermissionResult, contains_internal_url, strip_tags};
+use crate::tools::filesystem_safety::PermissionBehavior;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -215,5 +216,32 @@ fn fallback_bing_search(query: &str, num_results: usize) -> String {
     }
 
     output.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn test_tool_name() {
+        let tool = ExaSearchTool;
+        assert_eq!(tool.name(), "exa_search");
+    }
+
+    #[test]
+    fn test_strip_tags() {
+        assert_eq!(strip_tags("<b>Hello</b>"), "Hello");
+        assert_eq!(strip_tags("<a href='x'>Link</a>"), "Link");
+        assert_eq!(strip_tags("No tags here"), "No tags here");
+        assert_eq!(strip_tags("<p>Line1</p><p>Line2</p>"), "Line1Line2");
+    }
+
+    #[test]
+    fn test_tool_permissions() {
+        let tool = ExaSearchTool;
+        let perms = tool.check_permissions(&HashMap::new());
+        assert!(matches!(perms.behavior, PermissionBehavior::Passthrough));
+    }
 }
 
