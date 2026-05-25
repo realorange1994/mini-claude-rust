@@ -508,10 +508,21 @@ pub struct ConversationContext {
     cleared_tool_results: std::collections::HashSet<String>,
     // Tracks compression level for progressive summarization
     compression_level: usize,
+    // Whether context has been compacted at least once
+    is_compacted: bool,
     // Disk persistence for oversized tool results (None = feature disabled)
     tool_result_store: Option<ToolResultStore>,
     // Replacement state tracker for prompt cache stability
     content_replacement_state: Option<Arc<ContentReplacementState>>,
+}
+
+/// Represents a detected turn interruption in the conversation.
+#[derive(Debug, Clone)]
+pub struct TurnInterruption {
+    /// Index of the interrupted assistant message
+    pub interrupted_at: usize,
+    /// Index of the new user message that caused the interruption
+    pub user_message_idx: usize,
 }
 
 /// Set of tool names whose results should be cleared during micro-compaction.
@@ -549,6 +560,7 @@ impl ConversationContext {
             tool_result_replacements: HashMap::new(),
             cleared_tool_results: std::collections::HashSet::new(),
             compression_level: 0,
+            is_compacted: false,
             tool_result_store: None,
             content_replacement_state: None,
         }
@@ -1352,6 +1364,260 @@ impl ConversationContext {
             }
         }
         String::new()
+    }
+
+    // ─── Injection Methods (system-injected prefix for cache stability) ─────
+
+    /// Inject the current date/time as a user message with the system-injected prefix.
+    /// This replaces the time injection that was previously inside the system prompt.
+    /// By keeping it as a separate injected message, the system prompt remains fully
+    /// static and cacheable, and the time message can be skipped for cache breakpoint
+    /// placement.
+    pub fn inject_time_context(&mut self) {
+        let now = chrono::Local::now();
+        let current_time = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let offset = now.offset();
+        let timezone = offset.to_string();
+        let time_msg = format!("{}[Current time: {} ({})]", SYSTEM_INJECTED_PREFIX, current_time, timezone);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(time_msg)));
+    }
+
+    /// Inject the current todo list as a user message with the system-injected prefix.
+    /// This replaces the previous approach of appending the todo reminder to the
+    /// system prompt, which changed the system prompt every turn and broke prompt caching.
+    pub fn inject_todo_reminder(&mut self, reminder: &str) {
+        if reminder.is_empty() {
+            return;
+        }
+        let msg = format!(
+            "{}{}\n\n## Important\nUse TodoWrite tool to keep the above task list up to date as you work.",
+            SYSTEM_INJECTED_PREFIX, reminder
+        );
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Inject a TodoWrite idle nudge as a user message with the system-injected prefix.
+    /// Used when the model hasn't used TodoWrite for a while and has no task list.
+    pub fn inject_idle_reminder(&mut self, idle_msg: &str) {
+        if idle_msg.is_empty() {
+            return;
+        }
+        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, idle_msg);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Inject session state (tracked files, search patterns, etc.) as a user message
+    /// with the system-injected prefix. This replaces the previous approach of
+    /// appending to the system prompt, which changed the system prompt every turn
+    /// and broke prompt caching.
+    pub fn inject_session_state(&mut self, state: &str) {
+        if state.is_empty() {
+            return;
+        }
+        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, state);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Add anti-replay rules as a user message with the system-injected prefix.
+    /// These rules prevent the model from repeating actions it has already taken.
+    pub fn add_anti_replay_rules(&mut self, rules: &str) {
+        if rules.is_empty() {
+            return;
+        }
+        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, rules);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Add a goal block as a user message with the system-injected prefix.
+    pub fn add_goal_block(&mut self, content: &str) {
+        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, content);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Add compression instruction as a user message with the system-injected prefix.
+    pub fn add_compression_instruction(&mut self, level: usize) {
+        let instruction = match level {
+            0 => "Compress the conversation history, keeping recent turns intact.".to_string(),
+            1 => "Aggressively compress the conversation history. Keep only the most recent turn and critical context.".to_string(),
+            _ => "Maximum compression: keep only the bare minimum of context needed to continue.".to_string(),
+        };
+        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, instruction);
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+    }
+
+    /// Add a compressed summary as a user message with the system-injected prefix.
+    pub fn add_compressed_summary(&mut self, summary: &str, topics: &str, chunk_path: &str) {
+        let mut text = format!("{}{}", SYSTEM_INJECTED_PREFIX, summary);
+        if !topics.is_empty() {
+            text.push_str(&format!("\nTopics: {}", topics));
+        }
+        if !chunk_path.is_empty() {
+            text.push_str(&format!("\n\nCurrent chunk archived at: `{}`\nUse `file_reader` tool to recall details from this chunk.", chunk_path));
+        }
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(text)));
+    }
+
+    /// Check if a compression instruction has already been added.
+    pub fn has_compression_instruction(&self) -> bool {
+        self.messages.iter().any(|m| {
+            if let MessageContent::Text(t) = &m.content {
+                t.contains("Compress the conversation history")
+                    || t.contains("Aggressively compress")
+                    || t.contains("Maximum compression")
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Get the next compression level (incrementing).
+    pub fn next_compression_level(&self) -> usize {
+        self.compression_level + 1
+    }
+
+    /// Pull back the last k entries from history and return them.
+    /// Used for two-layer context overflow recovery.
+    pub fn pull_back_from_tail(&mut self, k: usize) -> Vec<Message> {
+        if k == 0 || self.messages.len() <= 1 {
+            return Vec::new();
+        }
+        let k = k.min(self.messages.len() - 1);
+        let split_point = self.messages.len() - k;
+        self.messages.split_off(split_point)
+    }
+
+    /// Re-append previously pulled-back entries to the end of history.
+    pub fn re_append_entries(&mut self, entries: Vec<Message>) {
+        self.messages.extend(entries);
+    }
+
+    /// Build a compact transcript for the compaction API call.
+    pub fn build_compact_transcript(&self, max_messages: usize) -> String {
+        let mut lines = Vec::new();
+        let start = if self.messages.len() > max_messages {
+            self.messages.len() - max_messages
+        } else {
+            0
+        };
+        for msg in &self.messages[start..] {
+            let role = msg.role.as_str();
+            let text = msg.content_to_text();
+            if !text.is_empty() {
+                lines.push(format!("[{}] {}", role, text));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Detect turn interruption in the conversation.
+    /// A turn is considered interrupted if the last message is from the user
+    /// and was sent while the model was still responding.
+    pub fn detect_turn_interruption(&self) -> Option<TurnInterruption> {
+        let msgs = &self.messages;
+        if msgs.len() < 3 {
+            return None;
+        }
+        // Check if last two messages are: assistant (incomplete) + user (new)
+        let last = msgs.last()?;
+        let second_last = msgs.get(msgs.len() - 2)?;
+        if last.role == MessageRole::User && second_last.role == MessageRole::Assistant {
+            // Check if the assistant message was incomplete (no stop reason or stop_reason != "end_turn")
+            let text = second_last.content_to_text();
+            if text.ends_with("...") || text.ends_with("[interrupted]") {
+                return Some(TurnInterruption {
+                    interrupted_at: msgs.len() - 2,
+                    user_message_idx: msgs.len() - 1,
+                });
+            }
+        }
+        None
+    }
+
+    /// Apply turn interruption resume: mark the interrupted assistant turn
+    /// and add a system-injected message noting the interruption.
+    pub fn apply_turn_interruption_resume(&mut self, interruption: &TurnInterruption) {
+        // Mark the interrupted assistant turn
+        if let Some(msg) = self.messages.get_mut(interruption.interrupted_at) {
+            if let MessageContent::Text(t) = &mut msg.content {
+                if !t.ends_with("[interrupted]") {
+                    t.push_str("\n[interrupted]");
+                }
+            }
+        }
+        // Add a resume marker as a system-injected message
+        let resume_msg = format!(
+            "{}The previous turn was interrupted. The user has sent a new message. \
+             Please continue from where you left off, or respond to the new message.",
+            SYSTEM_INJECTED_PREFIX
+        );
+        // Insert after the interrupted message, before the user message
+        self.messages.insert(interruption.user_message_idx, Message::new(
+            MessageRole::User,
+            MessageContent::Text(resume_msg),
+        ));
+    }
+
+    /// Build messages for the compaction API call.
+    /// Returns only the messages that should be compacted (excluding system
+    /// message and recent turns that should be preserved).
+    pub fn entries_to_compaction_messages(&self, preserve_recent: usize) -> Vec<Message> {
+        if self.messages.len() <= preserve_recent + 1 {
+            return Vec::new();
+        }
+        // Skip system message (index 0) and last `preserve_recent` messages
+        let end = self.messages.len() - preserve_recent;
+        self.messages[1..end].to_vec()
+    }
+
+    /// Get the compaction boundary marker.
+    /// Returns the index where the next compaction should start from.
+    pub fn last_compact_boundary(&self) -> usize {
+        self.api_token_anchor as usize
+    }
+
+    /// Set the compaction boundary marker.
+    pub fn set_compact_boundary(&mut self, idx: usize) {
+        self.api_token_anchor = idx as i64;
+        self.api_anchor_entries = idx;
+    }
+
+    /// Compact the context by replacing old messages with a summary.
+    /// This is the main entry point for context compaction.
+    pub fn compact_context(&mut self, summary: &str, keep_recent: usize) -> usize {
+        let removed = self.entries_to_compaction_messages(keep_recent);
+        let removed_count = removed.len();
+        if removed_count == 0 {
+            return 0;
+        }
+
+        // Replace old messages with the summary
+        let boundary = self.last_compact_boundary();
+        let new_boundary = boundary + removed_count;
+
+        // Add compressed summary at the boundary
+        self.add_compressed_summary(summary, "", "");
+
+        // Remove old messages between boundary and new_boundary
+        if new_boundary < self.messages.len() {
+            self.messages.drain(boundary..new_boundary);
+        }
+
+        // Update the compaction boundary
+        self.set_compact_boundary(new_boundary);
+        self.compression_level += 1;
+        self.is_compacted = true;
+
+        removed_count
+    }
+
+    /// Check if the context has been compacted at least once.
+    pub fn is_compacted(&self) -> bool {
+        self.is_compacted
+    }
+
+    /// Set the compacted flag.
+    pub fn set_compacted(&mut self, compacted: bool) {
+        self.is_compacted = compacted;
     }
 
     /// Removes trailing assistant entries that contain ToolUseBlocks with no

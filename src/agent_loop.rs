@@ -225,6 +225,10 @@ pub struct AgentLoop {
     notification_rx: Option<std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     /// Shared agent task store for tracking background sub-agents.
     /// Used during compaction to inject running agent status.
+
+    /// Cache break detector for KV cache hit rate monitoring.
+    /// Records cache changes and detects when cache reuse drops significantly.
+    pub(crate) cache_break_detector: std::sync::Arc<crate::prompt_caching::CacheBreakDetector>,
     agent_task_store: Option<crate::tools::agent_store::SharedAgentTaskStore>,
     /// Cumulative token usage across all turns (for accurate sub-agent reporting).
     total_input_tokens: std::sync::atomic::AtomicI64,
@@ -344,6 +348,7 @@ impl AgentLoop {
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
             agent_task_store: None,
+            cache_break_detector: std::sync::Arc::new(crate::prompt_caching::CacheBreakDetector::new()),
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
@@ -487,6 +492,7 @@ impl AgentLoop {
             todo_list: todo_list.unwrap_or_else(|| Arc::new(crate::context::TodoList::new())),
             notification_rx: None,
             agent_task_store: None,
+            cache_break_detector: std::sync::Arc::new(crate::prompt_caching::CacheBreakDetector::new()),
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
@@ -676,6 +682,8 @@ impl AgentLoop {
             let mut ctx = self.context.blocking_write();
             ctx.add_user_message(processed_msg);
         }
+        self.cache_break_detector.record_change(
+            crate::prompt_caching::CacheChangeCategory::UserMessage);
 
         // Log user message to transcript
         let _ = self.transcript.add_user(user_message.to_string());
@@ -1581,6 +1589,10 @@ impl AgentLoop {
                         let mut ctx = self.context.write().await;
                         ctx.add_assistant_tool_calls(tool_use_blocks);
                         ctx.add_tool_results(tool_result_blocks);
+
+                        // Track change for cache break detection
+                        self.cache_break_detector.record_change(
+                            crate::prompt_caching::CacheChangeCategory::ToolResult);
 
                         // Update prev_turn_tokens for reactive compact detection
                         let current_tokens = crate::compact::estimate_total_tokens(ctx.messages());
@@ -2498,6 +2510,29 @@ impl AgentLoop {
             body.get("usage").and_then(|u| u.get("output_tokens")).and_then(|v| v.as_i64()),
         ) {
             self.record_token_usage(input_tokens, output_tokens);
+        }
+
+        // Cache break detection: check if cache_read_input_tokens dropped significantly
+        if let Some(cache_read) = body.get("usage")
+            .and_then(|u| u.get("cache_read_input_tokens"))
+            .and_then(|v| v.as_i64())
+        {
+            if cache_read > 0 {
+                if self.cache_break_detector.detect_break(cache_read).is_some() {
+                    let baseline = self.cache_break_detector.last_baseline();
+                    let baseline_val = baseline.unwrap_or(0);
+                    let detail = format!(
+                        "cache_read dropped: baseline={} → current={} (delta={})",
+                        baseline_val, cache_read, baseline_val - cache_read
+                    );
+                    agent_emit!("[cache-break] {}", detail);
+                    let fpath = self.cache_break_detector.write_diagnostic_file(baseline, cache_read, &detail);
+                    if !fpath.is_empty() {
+                        agent_emit!("[cache-break] diagnostic written to: {}", fpath);
+                    }
+                }
+                self.cache_break_detector.update_baseline(cache_read);
+            }
         }
 
         Ok((tool_calls, text))
@@ -4063,6 +4098,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             todo_list: Arc::new(crate::context::TodoList::new()),
             notification_rx: None,
             agent_task_store: None,
+            cache_break_detector: std::sync::Arc::new(crate::prompt_caching::CacheBreakDetector::new()),
             total_input_tokens: std::sync::atomic::AtomicI64::new(0),
             total_output_tokens: std::sync::atomic::AtomicI64::new(0),
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),

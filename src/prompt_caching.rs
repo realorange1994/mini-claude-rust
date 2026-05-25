@@ -4,12 +4,25 @@
 //! the conversation prefix. Uses 4 cache_control breakpoints:
 //!   1. System prompt (stable across all turns)
 //!   2-4. Last 3 non-system messages (rolling window)
+//!
+//! Also provides category-based cache break detection, cache_reference
+//! mechanism, content normalization/hoisting for prefix stability,
+//! boundary-cached system prompts with global scope, and pinned cache edits.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Apply system_and_3 caching strategy to messages.
 /// Places up to 4 cache_control breakpoints: system + last 3 non-system messages.
 pub fn apply_prompt_caching(messages: &mut [serde_json::Value], ttl: &str) {
     if messages.is_empty() {
         return;
+    }
+
+    // Normalize and hoist for prefix stability.
+    for msg in messages.iter_mut() {
+        normalize_content_to_array(msg);
+        hoist_tool_result_cache(msg);
     }
 
     let marker = match ttl {
@@ -163,6 +176,19 @@ pub fn apply_prompt_caching_with_config(
         return;
     }
 
+    // Phase 1: Content normalization for prefix stability.
+    // Convert string content to array format to prevent shape mutations
+    // when cache breakpoints shift across turns.
+    for msg in messages.iter_mut() {
+        normalize_content_to_array(msg);
+    }
+
+    // Phase 2: Hoist cache_control from inner tool_result blocks to message level.
+    // Prevents nested content shape mutations that break KV cache.
+    for msg in messages.iter_mut() {
+        hoist_tool_result_cache(msg);
+    }
+
     let marker = match ttl {
         "1h" => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
         _ => serde_json::json!({"type": "ephemeral"}),
@@ -188,6 +214,11 @@ pub fn apply_prompt_caching_with_config(
 
     for &idx in &non_sys_indices[adjusted_start..] {
         apply_cache_marker(&mut messages[idx], &marker);
+    }
+
+    // Phase 4: Add cache_reference to tool results before the cache breakpoint.
+    if let Some(&last_idx) = non_sys_indices.last() {
+        add_cache_reference(messages, last_idx);
     }
 
     for msg in messages.iter_mut() {
@@ -216,6 +247,471 @@ pub fn apply_system_prompt_caching(system: &mut Value, ttl: &str) {
             "cache_control": marker
         }]);
     }
+}
+
+// ─── Content Normalization ────────────────────────────────────────────────
+
+/// Convert string content to array format `[{"type":"text","text":"..."}]`.
+/// Prevents string-to-array flips when cache breakpoints shift across turns,
+/// which would break KV cache prefix stability.
+pub fn normalize_content_to_array(msg: &mut Value) {
+    let Some(content) = msg.get_mut("content") else { return };
+
+    if content.is_string() {
+        let text = content.as_str().unwrap_or("").to_string();
+        *content = serde_json::json!([{
+            "type": "text",
+            "text": text
+        }]);
+    }
+}
+
+/// Hoist cache_control from inner text sub-blocks to the tool_result level.
+/// Converts nested `tool_result.content = [{type:"text", text:"...", cache_control:{...}}]`
+/// into `tool_result = {cache_control:{...}, content: "..."}` (flat string).
+/// This prevents content shape mutations that break KV cache prefix stability.
+pub fn hoist_tool_result_cache(msg: &mut Value) {
+    let Some(content) = msg.get_mut("content") else { return };
+    let Some(arr) = content.as_array_mut() else { return };
+
+    for block in arr.iter_mut() {
+        if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+            continue;
+        }
+
+        let Some(inner_content) = block.get_mut("content") else { continue };
+        let Some(inner_arr) = inner_content.as_array_mut() else { continue };
+
+        if inner_arr.len() == 1 {
+            let inner = &inner_arr[0];
+            if inner.get("cache_control").is_some()
+                && inner.get("type").and_then(|t| t.as_str()) == Some("text")
+            {
+                let cache_ctrl = inner.get("cache_control").cloned();
+                let text = inner.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+
+                if let Some(cc) = cache_ctrl {
+                    block["cache_control"] = cc;
+                }
+                block["content"] = serde_json::json!(text);
+            }
+        }
+    }
+}
+
+/// Add cache_reference (using tool_use_id) to tool_result blocks that are
+/// before the last cache_control marker. This maintains KV cache continuity
+/// across turns by ensuring tool results reference their tool_use blocks.
+pub fn add_cache_reference(messages: &mut [Value], last_cache_idx: usize) {
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if i >= last_cache_idx {
+            continue;
+        }
+
+        let Some(content) = msg.get_mut("content") else { continue };
+        let Some(arr) = content.as_array_mut() else { continue };
+
+        for block in arr.iter_mut() {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            if block.get("cache_reference").is_some() {
+                continue;
+            }
+            if let Some(tool_use_id) = block.get("tool_use_id").and_then(|t| t.as_str()) {
+                block["cache_reference"] = serde_json::json!(tool_use_id);
+            }
+        }
+    }
+}
+
+/// Return the last content block in a message, for cache_control detection.
+pub fn get_last_block_content(msg: &Value) -> Option<&Value> {
+    let content = msg.get("content")?;
+    let arr = content.as_array()?;
+    arr.last()
+}
+
+// ─── Cache Change Categories ────────────────────────────────────────────
+
+/// Categories of changes that can affect the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CacheChangeCategory {
+    ToolResult,
+    Thinking,
+    Image,
+    Pdf,
+    Attachment,
+    SystemPrompt,
+    Compaction,
+    Edit,
+    UserMessage,
+    ToolUse,
+    Normalization,
+    Other,
+}
+
+impl CacheChangeCategory {
+    /// Parse a category from its string name.
+    pub fn from_str_name(s: &str) -> CacheChangeCategory {
+        match s {
+            "tool_result" => CacheChangeCategory::ToolResult,
+            "thinking" => CacheChangeCategory::Thinking,
+            "image" => CacheChangeCategory::Image,
+            "pdf" => CacheChangeCategory::Pdf,
+            "attachment" => CacheChangeCategory::Attachment,
+            "system_prompt" => CacheChangeCategory::SystemPrompt,
+            "compaction" => CacheChangeCategory::Compaction,
+            "edit" => CacheChangeCategory::Edit,
+            "user_message" => CacheChangeCategory::UserMessage,
+            "tool_use" => CacheChangeCategory::ToolUse,
+            "normalization" => CacheChangeCategory::Normalization,
+            _ => CacheChangeCategory::Other,
+        }
+    }
+
+    /// Return the string name of this category.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            CacheChangeCategory::ToolResult => "tool_result",
+            CacheChangeCategory::Thinking => "thinking",
+            CacheChangeCategory::Image => "image",
+            CacheChangeCategory::Pdf => "pdf",
+            CacheChangeCategory::Attachment => "attachment",
+            CacheChangeCategory::SystemPrompt => "system_prompt",
+            CacheChangeCategory::Compaction => "compaction",
+            CacheChangeCategory::Edit => "edit",
+            CacheChangeCategory::UserMessage => "user_message",
+            CacheChangeCategory::ToolUse => "tool_use",
+            CacheChangeCategory::Normalization => "normalization",
+            CacheChangeCategory::Other => "other",
+        }
+    }
+}
+
+/// Per-category token impact weight for category-based break prediction.
+pub fn cache_change_weight(category: CacheChangeCategory) -> f64 {
+    match category {
+        CacheChangeCategory::Compaction => 1.0,
+        CacheChangeCategory::SystemPrompt => 0.9,
+        CacheChangeCategory::ToolResult => 0.7,
+        CacheChangeCategory::Thinking => 0.6,
+        CacheChangeCategory::Image => 0.8,
+        CacheChangeCategory::Pdf => 0.8,
+        CacheChangeCategory::Attachment => 0.6,
+        CacheChangeCategory::Edit => 0.5,
+        CacheChangeCategory::UserMessage => 0.3,
+        CacheChangeCategory::ToolUse => 0.2,
+        CacheChangeCategory::Normalization => 0.1,
+        CacheChangeCategory::Other => 0.4,
+    }
+}
+
+/// Infer the cache break dimension from change categories.
+pub fn infer_dimension_from_changes(categories: &[CacheChangeCategory]) -> &'static str {
+    if categories.is_empty() {
+        return "unknown";
+    }
+    if categories.contains(&CacheChangeCategory::Compaction) { return "compaction"; }
+    if categories.contains(&CacheChangeCategory::SystemPrompt) { return "system"; }
+    if categories.contains(&CacheChangeCategory::ToolResult) { return "tool_result"; }
+    if categories.contains(&CacheChangeCategory::Thinking) { return "thinking"; }
+    if categories.contains(&CacheChangeCategory::Image) || categories.contains(&CacheChangeCategory::Pdf) { return "media"; }
+    if categories.contains(&CacheChangeCategory::Edit) { return "edit"; }
+    if categories.contains(&CacheChangeCategory::UserMessage) { return "user"; }
+    if categories.contains(&CacheChangeCategory::ToolUse) { return "tool_use"; }
+    "other"
+}
+
+// ─── Cache Break Detector ────────────────────────────────────────────────
+
+/// Diagnostic capture for a cache break event.
+#[derive(Debug, Clone)]
+pub struct CacheBreak {
+    pub token_drop: i64,
+    pub pct_drop: f64,
+    pub dimension: String,
+    pub categories: Vec<CacheChangeCategory>,
+    pub timestamp: std::time::Instant,
+}
+
+/// Category-based cache break detector with prediction + token-based fallback.
+pub struct CacheBreakDetector {
+    baseline: Mutex<Option<i64>>,
+    pending_changes: Mutex<Vec<CacheChangeCategory>>,
+    estimated_impact: Mutex<f64>,
+    break_count: Mutex<usize>,
+    latch: Mutex<bool>,
+    post_compaction_guard: Mutex<bool>,
+    break_events: Mutex<Vec<CacheBreak>>,
+}
+
+impl CacheBreakDetector {
+    pub fn new() -> Self {
+        Self {
+            baseline: Mutex::new(None),
+            pending_changes: Mutex::new(Vec::new()),
+            estimated_impact: Mutex::new(0.0),
+            break_count: Mutex::new(0),
+            latch: Mutex::new(false),
+            post_compaction_guard: Mutex::new(false),
+            break_events: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record a change in a specific category.
+    pub fn record_change(&self, category: CacheChangeCategory) {
+        let weight = cache_change_weight(category);
+        let mut pending = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut impact = self.estimated_impact.lock().unwrap_or_else(|e| e.into_inner());
+        pending.push(category);
+        *impact += weight * 1000.0;
+    }
+
+    /// Update the baseline with cache_read tokens from a successful API response.
+    pub fn update_baseline(&self, cache_read_tokens: i64) {
+        let mut baseline = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut impact = self.estimated_impact.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latch = self.latch.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.post_compaction_guard.lock().unwrap_or_else(|e| e.into_inner());
+        *baseline = Some(cache_read_tokens);
+        pending.clear();
+        *impact = 0.0;
+        *latch = false;
+        *guard = false;
+    }
+
+    /// Detect a cache break using category-based prediction + token-based fallback.
+    pub fn detect_break(&self, current_cache_read: i64) -> Option<CacheBreak> {
+        let baseline_val = *self.baseline.lock().unwrap_or_else(|e| e.into_inner());
+        let latch_val = *self.latch.lock().unwrap_or_else(|e| e.into_inner());
+        let guard_val = *self.post_compaction_guard.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Post-compaction: always detect
+        if guard_val {
+            let categories: Vec<_> = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let dimension = infer_dimension_from_changes(&categories).to_string();
+            let token_drop = baseline_val.map(|b| b - current_cache_read).unwrap_or(0);
+            self.record_break_internal(&categories, token_drop, &dimension);
+            return Some(CacheBreak {
+                token_drop,
+                pct_drop: if let Some(b) = baseline_val { if b > 0 { (token_drop as f64 / b as f64) * 100.0 } else { 0.0 } } else { 0.0 },
+                dimension,
+                categories,
+                timestamp: std::time::Instant::now(),
+            });
+        }
+
+        if latch_val { return None; }
+        let baseline = baseline_val?;
+
+        // Category-based prediction
+        let impact = *self.estimated_impact.lock().unwrap_or_else(|e| e.into_inner());
+        if baseline > 0 && impact / (baseline as f64) > 0.10 {
+            let categories: Vec<_> = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let dimension = infer_dimension_from_changes(&categories).to_string();
+            let token_drop = baseline - current_cache_read;
+            self.record_break_internal(&categories, token_drop, &dimension);
+            return Some(CacheBreak {
+                token_drop,
+                pct_drop: (token_drop as f64 / baseline as f64) * 100.0,
+                dimension,
+                categories,
+                timestamp: std::time::Instant::now(),
+            });
+        }
+
+        // Token-based fallback
+        let token_drop = baseline - current_cache_read;
+        if baseline > 0 {
+            let pct_drop = (token_drop as f64 / baseline as f64) * 100.0;
+            if pct_drop > 10.0 && token_drop > 5000 {
+                let categories: Vec<_> = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let dimension = infer_dimension_from_changes(&categories).to_string();
+                self.record_break_internal(&categories, token_drop, &dimension);
+                return Some(CacheBreak {
+                    token_drop, pct_drop, dimension, categories,
+                    timestamp: std::time::Instant::now(),
+                });
+            }
+        }
+        None
+    }
+
+    fn record_break_internal(&self, categories: &[CacheChangeCategory], token_drop: i64, dimension: &str) {
+        let mut count = self.break_count.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latch = self.latch.lock().unwrap_or_else(|e| e.into_inner());
+        let mut events = self.break_events.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        *latch = true;
+        let baseline_val = *self.baseline.lock().unwrap_or_else(|e| e.into_inner());
+        let pct_drop = if let Some(b) = baseline_val { if b > 0 { (token_drop as f64 / b as f64) * 100.0 } else { 0.0 } } else { 0.0 };
+        events.push(CacheBreak {
+            token_drop, pct_drop,
+            dimension: dimension.to_string(),
+            categories: categories.to_vec(),
+            timestamp: std::time::Instant::now(),
+        });
+        if pct_drop > 10.0 && token_drop > 5000 {
+            // Write diagnostic via the public method (self.write_diagnostic_file)
+            let baseline_val = *self.baseline.lock().unwrap_or_else(|e| e.into_inner());
+            let current_val = baseline_val.unwrap_or(0).saturating_sub(token_drop);
+            let detail = format!("token_drop={}, pct_drop={:.1}%, dimension={}", token_drop, pct_drop, dimension);
+            self.write_diagnostic_file(baseline_val, current_val, &detail);
+        }
+    }
+
+    /// Write a cache break diagnostic file. Returns the file path if written.
+    pub fn write_diagnostic_file(&self, baseline: Option<i64>, current: i64, detail: &str) -> String {
+        let baseline_val = baseline.unwrap_or(0);
+        let token_drop = baseline_val.saturating_sub(current).max(0);
+        let pct_drop = if baseline_val > 0 { (token_drop as f64 / baseline_val as f64) * 100.0 } else { 0.0 };
+
+        let categories = self.pending_changes.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let dimension = infer_dimension_from_changes(&categories);
+        let cat_names: Vec<&str> = categories.iter().map(|c| c.as_str_name()).collect();
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let content = format!(
+            "Cache Break Diagnostic\n======================\n\
+             Timestamp: {}\nToken drop: {}\nPercentage drop: {:.1}%\n\
+             Dimension: {}\nCategories: {}\nDetail: {}\n",
+            timestamp, token_drop, pct_drop, dimension, cat_names.join(", "), detail
+        );
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("cache_break_{}.log", timestamp));
+        if std::fs::write(&path, &content).is_ok() {
+            return path.to_string_lossy().to_string();
+        }
+        String::new()
+    }
+
+    pub fn break_count(&self) -> usize {
+        *self.break_count.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn reset_baseline(&self) {
+        let mut baseline = self.baseline.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut impact = self.estimated_impact.lock().unwrap_or_else(|e| e.into_inner());
+        *baseline = None;
+        pending.clear();
+        *impact = 0.0;
+    }
+
+    pub fn mark_post_compaction(&self) {
+        let mut guard = self.post_compaction_guard.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending_changes.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = true;
+        pending.clear();
+        pending.push(CacheChangeCategory::Compaction);
+    }
+
+    pub fn last_baseline(&self) -> Option<i64> {
+        *self.baseline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Default for CacheBreakDetector {
+    fn default() -> Self { Self::new() }
+}
+
+// ─── System Prompt Caching with Scope ──────────────────────────────────
+
+/// Format a system prompt as a cached block with global scope.
+pub fn format_cached_system_prompt(system_text: &str) -> Value {
+    serde_json::json!([{
+        "type": "text",
+        "text": system_text,
+        "cache_control": {
+            "type": "ephemeral",
+            "scope": "global"
+        }
+    }])
+}
+
+/// Format a boundary-cached system prompt with separate caching scopes.
+pub fn format_boundary_cached_system_prompt(system_text: &str, boundary_marker: &str) -> Value {
+    if let Some(split_idx) = system_text.find(boundary_marker) {
+        let static_part = &system_text[..split_idx];
+        let dynamic_part = &system_text[split_idx..];
+        serde_json::json!([
+            {
+                "type": "text",
+                "text": static_part,
+                "cache_control": {
+                    "type": "ephemeral",
+                    "scope": "global"
+                }
+            },
+            {
+                "type": "text",
+                "text": dynamic_part,
+                "cache_control": {
+                    "type": "ephemeral"
+                }
+            }
+        ])
+    } else {
+        format_cached_system_prompt(system_text)
+    }
+}
+
+// ─── Pinned Cache Edits ─────────────────────────────────────────────────
+
+/// A pinned cache edit: a tool_result block with cache_control that
+/// should persist across API calls to preserve KV cache positions.
+#[derive(Debug, Clone)]
+pub struct PinnedCacheEdit {
+    pub message_idx: usize,
+    pub block_idx: usize,
+    pub tool_use_id: String,
+    pub content: Value,
+}
+
+/// Re-insert pinned cache edits at their original positions in the message stream.
+pub fn apply_pinned_cache_edits(messages: &mut [Value], edits: &[PinnedCacheEdit]) {
+    for edit in edits {
+        if edit.message_idx >= messages.len() { continue; }
+        let msg = &mut messages[edit.message_idx];
+        let Some(content) = msg.get_mut("content") else { continue };
+        let Some(arr) = content.as_array_mut() else { continue };
+        if edit.block_idx >= arr.len() { continue; }
+        let block = &mut arr[edit.block_idx];
+        if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") { continue; }
+        if block.get("tool_use_id").and_then(|t| t.as_str()) != Some(&edit.tool_use_id) { continue; }
+        if block.get("cache_control").is_none() {
+            block["cache_control"] = edit.content.get("cache_control").cloned().unwrap_or(serde_json::json!({"type": "ephemeral"}));
+        }
+    }
+}
+
+/// Extract pinned cache edits from the current message stream.
+pub fn extract_pinned_cache_edits(messages: &[Value]) -> Vec<PinnedCacheEdit> {
+    let mut edits = Vec::new();
+    for (msg_idx, msg) in messages.iter().enumerate() {
+        let Some(content) = msg.get("content") else { continue };
+        let Some(arr) = content.as_array() else { continue };
+        for (block_idx, block) in arr.iter().enumerate() {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") { continue; }
+            if block.get("cache_control").is_none() { continue; }
+            if let Some(tool_use_id) = block.get("tool_use_id").and_then(|t| t.as_str()) {
+                edits.push(PinnedCacheEdit {
+                    message_idx: msg_idx,
+                    block_idx,
+                    tool_use_id: tool_use_id.to_string(),
+                    content: block.clone(),
+                });
+            }
+        }
+    }
+    edits
 }
 
 #[cfg(test)]

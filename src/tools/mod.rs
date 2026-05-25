@@ -4,6 +4,130 @@
 /// hasn't changed since the last read. Used for both stub generation and detection.
 pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read.";
 
+// ─── Tool name constants ────────────────────────────────────────────────────
+
+/// Internal tool name constants for rule system integration.
+pub const FILE_READ_TOOL_NAME: &str = "read_file";
+pub const FILE_WRITE_TOOL_NAME: &str = "write_file";
+pub const FILE_EDIT_TOOL_NAME: &str = "edit_file";
+pub const EXEC_TOOL_NAME: &str = "exec";
+pub const GIT_TOOL_NAME: &str = "git";
+
+/// Upstream tool name aliases for rule system compatibility.
+/// Maps upstream names (Read, Write, Edit, Bash) to our internal names.
+/// Used by `internal_to_upstream_name` / `upstream_to_internal_name` for rule matching.
+pub static UPSTREAM_TOOL_ALIASES: &[(&str, &str)] = &[
+    ("Read", FILE_READ_TOOL_NAME),
+    ("Write", FILE_WRITE_TOOL_NAME),
+    ("Edit", FILE_EDIT_TOOL_NAME),
+    ("Bash", EXEC_TOOL_NAME),
+];
+
+/// Tool name aliases: maps common LLM tool name variations to canonical names.
+/// One-way mapping (alias → canonical), used by `Registry::resolve()`.
+/// LLMs frequently use non-canonical names (read, bash, cat, etc.) which would
+/// cause "unknown tool" errors without alias resolution. Keeping tool schemas
+/// stable preserves cache hit rates because the tool definition prefix doesn't change.
+pub static TOOL_NAME_ALIASES: &[(&str, &str)] = &[
+    // read_file aliases
+    ("read", FILE_READ_TOOL_NAME),
+    ("filereader", FILE_READ_TOOL_NAME),
+    ("file_read", FILE_READ_TOOL_NAME),
+    ("cat", FILE_READ_TOOL_NAME),
+    // write_file aliases
+    ("write", FILE_WRITE_TOOL_NAME),
+    ("create_file", FILE_WRITE_TOOL_NAME),
+    ("file_write", FILE_WRITE_TOOL_NAME),
+    // edit_file aliases
+    ("edit", FILE_EDIT_TOOL_NAME),
+    ("replace", FILE_EDIT_TOOL_NAME),
+    ("replace_in_file", FILE_EDIT_TOOL_NAME),
+    ("str_replace", FILE_EDIT_TOOL_NAME),
+    ("file_edit", FILE_EDIT_TOOL_NAME),
+    // exec aliases
+    ("bash", EXEC_TOOL_NAME),
+    ("shell", EXEC_TOOL_NAME),
+    ("terminal", EXEC_TOOL_NAME),
+    ("execute", EXEC_TOOL_NAME),
+    ("run_command", EXEC_TOOL_NAME),
+    ("run", EXEC_TOOL_NAME),
+    ("command", EXEC_TOOL_NAME),
+    // grep aliases
+    ("search_files", "grep"),
+    ("search_in_files", "grep"),
+    ("find_in_files", "grep"),
+    ("search_code", "grep"),
+    // glob aliases
+    ("find_files", "glob"),
+    ("list_files", "glob"),
+    ("file_glob", "glob"),
+    ("search_filenames", "glob"),
+    // web_search aliases
+    ("search", "web_search"),
+    ("websearch", "web_search"),
+    ("internet_search", "web_search"),
+    ("online_search", "web_search"),
+    // web_fetch aliases
+    ("fetch", "web_fetch"),
+    ("webfetch", "web_fetch"),
+    ("browse", "web_fetch"),
+    ("url_fetch", "web_fetch"),
+    ("http_get", "web_fetch"),
+    // list_dir aliases
+    ("ls", "list_dir"),
+    ("list_directory", "list_dir"),
+    ("dir", "list_dir"),
+    // multi_edit aliases
+    ("multi_edit_file", "multi_edit"),
+    ("batch_edit", "multi_edit"),
+    // agent aliases
+    ("subagent", "agent"),
+    ("sub_agent", "agent"),
+    ("spawn_agent", "agent"),
+    // git aliases
+    ("git_tool", GIT_TOOL_NAME),
+    // skill aliases
+    ("skill", "read_skill"),
+    ("run_skill", "read_skill"),
+    // memory aliases
+    ("remember", "memory_add"),
+    // task aliases
+    ("todo", "task_create"),
+    ("task_manager", "task_create"),
+    // ask_user aliases
+    ("ask_user", "AskUserQuestion"),
+    ("ask", "AskUserQuestion"),
+    ("user_input", "AskUserQuestion"),
+];
+
+/// Map an internal tool name to its upstream name.
+/// Returns the input unchanged if no alias exists.
+pub fn internal_to_upstream_name(internal: &str) -> &str {
+    if internal.is_empty() {
+        return "";
+    }
+    for (upstream, internal_name) in UPSTREAM_TOOL_ALIASES {
+        if *internal_name == internal {
+            return upstream;
+        }
+    }
+    internal
+}
+
+/// Map an upstream tool name to its internal name.
+/// Returns the input unchanged if no alias exists.
+pub fn upstream_to_internal_name(upstream: &str) -> &str {
+    if upstream.is_empty() {
+        return "";
+    }
+    for (up, internal) in UPSTREAM_TOOL_ALIASES {
+        if *up == upstream {
+            return internal;
+        }
+    }
+    upstream
+}
+
 pub mod coercion;
 
 mod exec_tool;
@@ -313,6 +437,71 @@ impl Registry {
     pub fn all_tools(&self) -> Vec<Arc<dyn Tool>> {
         let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
         tools.values().cloned().collect()
+    }
+
+    /// Resolve a tool name (possibly an alias) to its canonical name and the tool.
+    /// This prevents "unknown tool" errors when LLMs use common name variations,
+    /// while keeping tool schemas stable for cache hit rates.
+    ///
+    /// Resolution order:
+    /// 1. Exact match
+    /// 2. Case-insensitive match
+    /// 3. Alias lookup (TOOL_NAME_ALIASES)
+    /// 4. Upstream alias lookup (UPSTREAM_TOOL_ALIASES)
+    /// 5. Hyphen-to-underscore normalization
+    ///
+    /// Returns (canonical_name, Some(tool)) on success, or (name, None) if not found.
+    pub fn resolve(&self, name: &str) -> (String, Option<Arc<dyn Tool>>) {
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Exact match
+        if let Some(tool) = tools.get(name) {
+            return (name.to_string(), Some(Arc::clone(tool)));
+        }
+
+        let downcased = name.to_lowercase();
+
+        // 2. Case-insensitive match
+        for (registered_name, tool) in tools.iter() {
+            if registered_name.to_lowercase() == downcased {
+                return (registered_name.clone(), Some(Arc::clone(tool)));
+            }
+        }
+
+        // 3. Alias lookup
+        for (alias, canonical) in TOOL_NAME_ALIASES {
+            if *alias == downcased {
+                if let Some(tool) = tools.get(*canonical) {
+                    return (canonical.to_string(), Some(Arc::clone(tool)));
+                }
+            }
+        }
+
+        // 4. Upstream alias lookup (Read → read_file, Write → write_file, etc.)
+        for (upstream, internal) in UPSTREAM_TOOL_ALIASES {
+            if *upstream == name {
+                if let Some(tool) = tools.get(*internal) {
+                    return (internal.to_string(), Some(Arc::clone(tool)));
+                }
+            }
+        }
+
+        // 5. Hyphen-to-underscore normalization (e.g. "file-read" → "file_read")
+        let normalized = downcased.replace('-', "_");
+        if normalized != downcased {
+            if let Some(tool) = tools.get(&normalized) {
+                return (normalized, Some(Arc::clone(tool)));
+            }
+            for (alias, canonical) in TOOL_NAME_ALIASES {
+                if *alias == normalized {
+                    if let Some(tool) = tools.get(*canonical) {
+                        return (canonical.to_string(), Some(Arc::clone(tool)));
+                    }
+                }
+            }
+        }
+
+        (name.to_string(), None)
     }
 
     /// Register a tool directly from an Arc (used by sub-agent registry filtering)
