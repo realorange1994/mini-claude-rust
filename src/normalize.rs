@@ -6,7 +6,7 @@
 //! 3. These normalizations make identical logical content produce identical API payloads,
 //!    which is critical for Anthropic's prefix caching to work effectively.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Normalize a list of API messages for KV cache reuse.
 /// Returns a new vector with normalized messages.
@@ -148,6 +148,455 @@ fn normalize_whitespace(text: &str) -> String {
     }
 
     result.join("\n")
+}
+
+// ─── Advanced API Message Normalization ───────────────────────────────────────
+
+/// Full normalization pipeline for API messages (matching Go NormalizeAPIMessages).
+/// The normalization order matters for cache stability.
+pub fn normalize_api_messages_full(messages: &[Value]) -> Vec<Value> {
+    let mut msgs = messages.to_vec();
+    msgs = hoist_tool_results(&msgs);
+    msgs = enforce_role_alternation(&msgs);
+    msgs = hoist_tool_results(&msgs); // re-hoist after merge
+    msgs = ensure_tool_result_pairing(&msgs);
+    msgs = filter_empty_messages(&msgs);
+    msgs = strip_images_from_error_tool_results(&msgs);
+    msgs = strip_empty_text_blocks(&msgs);
+    // Apply existing normalizations (sort keys, whitespace)
+    msgs = normalize_api_messages(&msgs);
+    msgs
+}
+
+/// Hoist tool_result blocks to the front of each user message's content array.
+/// This ensures a stable, deterministic ordering regardless of how content blocks
+/// were originally appended, which is critical for KV cache prefix stability.
+pub fn hoist_tool_results(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|msg| {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "user" {
+                return msg.clone();
+            }
+            let content = match msg.get("content").and_then(|c| c.as_array()) {
+                Some(arr) if arr.len() > 1 => arr,
+                _ => return msg.clone(),
+            };
+
+            // Check if there are tool_result blocks not already at the front
+            let has_tool_result = content
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
+            if !has_tool_result {
+                return msg.clone();
+            }
+
+            // Partition: tool_results first, then everything else
+            let mut tool_results = Vec::new();
+            let mut others = Vec::new();
+            for block in content {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    tool_results.push(block.clone());
+                } else {
+                    others.push(block.clone());
+                }
+            }
+
+            let mut result = msg.clone();
+            let mut new_content = tool_results;
+            new_content.extend(others);
+            result["content"] = Value::Array(new_content);
+            result
+        })
+        .collect()
+}
+
+/// Ensures messages alternate between user and assistant roles.
+/// Consecutive same-role messages are merged. If the first message is from
+/// the assistant, a synthetic user message is prepended.
+pub fn enforce_role_alternation(messages: &[Value]) -> Vec<Value> {
+    if messages.is_empty() {
+        return messages.to_vec();
+    }
+
+    let mut result: Vec<Value> = Vec::with_capacity(messages.len());
+
+    // If the first message is from assistant, prepend a synthetic user message
+    if messages[0].get("role").and_then(|r| r.as_str()) == Some("assistant") {
+        result.push(json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "[System: conversation starts with assistant response]"}]
+        }));
+    }
+
+    for msg in messages {
+        if result.is_empty() {
+            result.push(msg.clone());
+            continue;
+        }
+
+        let last_role = result
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        let msg_role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+        if msg_role == last_role {
+            // Merge consecutive same-role messages by combining content blocks
+            let last = result.last_mut().unwrap();
+            let last_content = last.get("content").cloned().unwrap_or(Value::Null);
+            let msg_content = msg.get("content").cloned().unwrap_or(Value::Null);
+
+            let merged = match (last_content, msg_content.clone()) {
+                (Value::Array(a), Value::Array(b)) => {
+                    let mut combined = a;
+                    combined.extend(b);
+                    Value::Array(combined)
+                }
+                (Value::String(a), Value::String(b)) => Value::String(format!("{}\n\n{}", a, b)),
+                (Value::Array(a), Value::String(b)) => {
+                    let mut combined = a;
+                    combined.push(json!({"type": "text", "text": b}));
+                    Value::Array(combined)
+                }
+                (Value::String(a), Value::Array(b)) => {
+                    let mut combined = vec![json!({"type": "text", "text": a})];
+                    combined.extend(b);
+                    Value::Array(combined)
+                }
+                _ => msg_content,
+            };
+            last["content"] = merged;
+        } else {
+            result.push(msg.clone());
+        }
+    }
+
+    result
+}
+
+/// Ensures every tool_use has a matching tool_result and vice versa.
+/// - Forward pass: insert synthetic error tool_result for orphaned tool_use blocks.
+/// - Reverse pass: strip tool_result blocks whose tool_use_id doesn't match any tool_use.
+pub fn ensure_tool_result_pairing(messages: &[Value]) -> Vec<Value> {
+    if messages.is_empty() {
+        return messages.to_vec();
+    }
+
+    // Collect all tool_use IDs from assistant messages
+    let mut all_tool_use_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                        if !id.is_empty() {
+                            all_tool_use_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Collect all tool_result IDs from user messages
+    let mut all_tool_result_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                        if !id.is_empty() {
+                            all_tool_result_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Forward pass: insert synthetic tool_results for orphaned tool_uses
+    let mut result: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut seen_tool_use_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for msg in messages {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+        if role == "assistant" {
+            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                let mut new_content: Vec<Value> = Vec::new();
+                let mut orphaned_ids: Vec<String> = Vec::new();
+
+                for block in content {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() && seen_tool_use_ids.contains(id) {
+                                continue; // dedup
+                            }
+                            if !id.is_empty() {
+                                seen_tool_use_ids.insert(id.to_string());
+                            }
+                            if !id.is_empty() && !all_tool_result_ids.contains(id) {
+                                orphaned_ids.push(id.to_string());
+                            }
+                        }
+                    }
+                    new_content.push(block.clone());
+                }
+
+                let mut result_msg = msg.clone();
+                result_msg["content"] = Value::Array(new_content);
+                result.push(result_msg);
+
+                if !orphaned_ids.is_empty() {
+                    let synthetic_blocks: Vec<Value> = orphaned_ids
+                        .iter()
+                        .map(|id| {
+                            json!({
+                                "type": "tool_result",
+                                "tool_use_id": id,
+                                "is_error": true,
+                                "content": [{"type": "text", "text": "Tool execution was interrupted"}]
+                            })
+                        })
+                        .collect();
+                    result.push(json!({
+                        "role": "user",
+                        "content": synthetic_blocks
+                    }));
+                }
+            } else {
+                result.push(msg.clone());
+            }
+        } else {
+            result.push(msg.clone());
+        }
+    }
+
+    // Reverse pass: strip orphaned tool_result blocks and dedup
+    let mut seen_result_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for msg in &mut result {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        if let Some(content) = msg.get("content").and_then(|c| c.as_array()).cloned() {
+            let filtered: Vec<Value> = content
+                .into_iter()
+                .filter(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        return true;
+                    }
+                    let id = block
+                        .get("tool_use_id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("");
+                    if id.is_empty() {
+                        return true;
+                    }
+                    if !all_tool_use_ids.contains(id) {
+                        return false;
+                    }
+                    if seen_result_ids.contains(id) {
+                        return false; // dedup
+                    }
+                    seen_result_ids.insert(id.to_string());
+                    true
+                })
+                .collect();
+            msg["content"] = Value::Array(filtered);
+        }
+    }
+
+    result
+}
+
+/// Removes or fixes messages that would cause API 400 errors:
+/// - Whitespace-only assistant messages are removed.
+/// - Assistant messages with only empty content blocks get a placeholder.
+pub fn filter_empty_messages(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .filter(|msg| {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "assistant" {
+                return true;
+            }
+            // Check if assistant message is whitespace-only
+            if is_whitespace_only_assistant(msg) {
+                return false;
+            }
+            true
+        })
+        .map(|msg| {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role == "assistant" && has_only_empty_content(msg) {
+                let mut result = msg.clone();
+                result["content"] = json!([{"type": "text", "text": "[thinking...]"}]);
+                return result;
+            }
+            msg.clone()
+        })
+        .collect()
+}
+
+/// Checks if an assistant message is whitespace-only.
+fn is_whitespace_only_assistant(msg: &Value) -> bool {
+    let content = msg.get("content");
+    match content {
+        Some(Value::String(s)) => s.trim().is_empty(),
+        Some(Value::Array(arr)) => {
+            if arr.is_empty() {
+                return true;
+            }
+            arr.iter().all(|block| {
+                block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t.trim().is_empty())
+            })
+        }
+        None | Some(Value::Null) => true,
+        _ => false,
+    }
+}
+
+/// Checks if an assistant message has only empty content blocks.
+fn has_only_empty_content(msg: &Value) -> bool {
+    let content = match msg.get("content").and_then(|c| c.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return false,
+    };
+    content.iter().all(|block| {
+        block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t.trim().is_empty())
+    })
+}
+
+/// Strips image blocks from error tool_results (API requirement).
+pub fn strip_images_from_error_tool_results(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|msg| {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "user" {
+                return msg.clone();
+            }
+            let content = match msg.get("content").and_then(|c| c.as_array()) {
+                Some(arr) => arr,
+                _ => return msg.clone(),
+            };
+
+            let mut modified = false;
+            let new_content: Vec<Value> = content
+                .iter()
+                .map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                        && block.get("is_error").is_some()
+                    {
+                        if let Some(inner) = block.get("content").and_then(|c| c.as_array()) {
+                            let filtered: Vec<Value> = inner
+                                .iter()
+                                .filter(|b| {
+                                    b.get("type").and_then(|t| t.as_str()) != Some("image")
+                                })
+                                .cloned()
+                                .collect();
+                            if filtered.len() != inner.len() {
+                                modified = true;
+                                let mut new_block = block.clone();
+                                new_block["content"] = Value::Array(filtered);
+                                return new_block;
+                            }
+                        }
+                    }
+                    block.clone()
+                })
+                .collect();
+
+            if modified {
+                let mut result = msg.clone();
+                result["content"] = Value::Array(new_content);
+                result
+            } else {
+                msg.clone()
+            }
+        })
+        .collect()
+}
+
+/// Removes empty text blocks from message content arrays.
+pub fn strip_empty_text_blocks(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|msg| {
+            let content = match msg.get("content").and_then(|c| c.as_array()) {
+                Some(arr) => arr,
+                _ => return msg.clone(),
+            };
+
+            let filtered: Vec<Value> = content
+                .iter()
+                .filter(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        return !text.is_empty();
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+
+            if filtered.len() != content.len() {
+                let mut result = msg.clone();
+                result["content"] = Value::Array(filtered);
+                result
+            } else {
+                msg.clone()
+            }
+        })
+        .collect()
+}
+
+/// Strips the SystemInjectedPrefix from a message's content.
+/// The prefix is only used internally for breakpoint placement decisions.
+pub fn strip_system_injected(msg: &mut Value) {
+    let prefix = crate::context::SYSTEM_INJECTED_PREFIX;
+    if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
+        if s.starts_with(prefix) {
+            msg["content"] = Value::String(s[prefix.len()..].to_string());
+        }
+    } else if let Some(arr) = msg.get("content").and_then(|c| c.as_array()).cloned() {
+        if let Some(first) = arr.first() {
+            if let Some(text) = first.get("text").and_then(|t| t.as_str()) {
+                if text.starts_with(prefix) {
+                    let mut new_arr = arr.clone();
+                    if let Some(first) = new_arr.first_mut() {
+                        if let Some(obj) = first.as_object_mut() {
+                            obj.insert(
+                                "text".to_string(),
+                                Value::String(text[prefix.len()..].to_string()),
+                            );
+                        }
+                    }
+                    msg["content"] = Value::Array(new_arr);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,9 @@
 //! MCP client module - Model Context Protocol support
 
 pub mod client;
+pub mod schema;
+
+pub use schema::validate_schema;
 
 pub use client::parse_tool_result;
 

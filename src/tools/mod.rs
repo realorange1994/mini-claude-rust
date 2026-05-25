@@ -49,12 +49,17 @@ pub mod agent_worktree;
 pub mod bg_task_output;
 pub mod chunk_archival;
 pub mod output_cleaner;
+pub mod readline;
 pub mod resource_limit;
 pub mod send_message_tool;
 pub mod task_output_tool;
 pub mod encoding;
 pub mod rgrep;
 mod capabilities;
+pub mod bash_security;
+pub mod bash_readonly;
+pub mod exec_git_readonly;
+pub mod exec_powershell;
 
 pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};
 pub use filesystem_safety::{PermissionBehavior, ToolPermissionResult, check_path_safety_for_auto_edit, is_dangerous_file_path, has_suspicious_windows_path_pattern};
@@ -525,6 +530,11 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(file_encoding::FileEncodingTool::with_files_read(
         Some(registry.files_read_handle()),
     ));
+
+    // Cron tools
+    registry.register(crate::cron::CronCreateTool);
+    registry.register(crate::cron::CronDeleteTool);
+    registry.register(crate::cron::CronListTool);
 
     // ToolSearchTool: uses a shared tools list that gets populated
     // after all tools are registered (see finalize_tool_search).

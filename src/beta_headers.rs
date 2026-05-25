@@ -12,7 +12,7 @@ static BETA_FEATURES: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| {
     // Default beta features
     features.insert("interleaved-thinking-2025-05-14".to_string());
     features.insert("code-execution-2025-05-22".to_string());
-    features
+    RwLock::new(features)
 });
 
 /// Get the current beta header value for API requests.

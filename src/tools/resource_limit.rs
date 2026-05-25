@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 /// ResourceLimit defines resource constraints for a process.

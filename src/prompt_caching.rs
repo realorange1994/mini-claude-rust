@@ -91,6 +91,133 @@ fn apply_cache_marker(msg: &mut serde_json::Value, marker: &serde_json::Value) {
     }
 }
 
+// ─── Configurable Cache Breakpoint Strategy ───────────────────────────────────
+
+use serde_json::Value;
+
+/// Controls the KV cache breakpoint strategy.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheBreakpointConfig {
+    pub max_breakpoints: usize,
+    pub skip_cache_write: bool,
+}
+
+impl CacheBreakpointConfig {
+    pub fn rolling() -> Self {
+        Self { max_breakpoints: 2, skip_cache_write: false }
+    }
+    pub fn system_and_3() -> Self {
+        Self { max_breakpoints: 4, skip_cache_write: false }
+    }
+}
+
+impl Default for CacheBreakpointConfig {
+    fn default() -> Self { Self::rolling() }
+}
+
+fn is_system_injected(msg: &Value) -> bool {
+    let prefix = crate::context::SYSTEM_INJECTED_PREFIX;
+    let content = msg.get("content");
+    match content {
+        Some(Value::String(s)) => s.starts_with(prefix),
+        Some(Value::Array(arr)) if !arr.is_empty() => {
+            arr.first()
+                .and_then(|b| b.get("text").and_then(|t| t.as_str()))
+                .is_some_and(|t| t.starts_with(prefix))
+        }
+        _ => false,
+    }
+}
+
+fn strip_system_injected(msg: &mut Value) {
+    let prefix = crate::context::SYSTEM_INJECTED_PREFIX;
+    let content = msg.get("content").cloned();
+    match content {
+        Some(Value::String(s)) if s.starts_with(prefix) => {
+            msg["content"] = Value::String(s[prefix.len()..].to_string());
+        }
+        Some(Value::Array(arr)) if !arr.is_empty() => {
+            if let Some(text) = arr.first().and_then(|b| b.get("text").and_then(|t| t.as_str())) {
+                if text.starts_with(prefix) {
+                    let mut new_arr = arr.clone();
+                    if let Some(first) = new_arr.first_mut() {
+                        if let Some(obj) = first.as_object_mut() {
+                            obj.insert("text".to_string(), Value::String(text[prefix.len()..].to_string()));
+                        }
+                    }
+                    msg["content"] = Value::Array(new_arr);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Applies configurable cache breakpoint strategy to messages.
+pub fn apply_prompt_caching_with_config(
+    messages: &mut [Value],
+    config: CacheBreakpointConfig,
+    ttl: &str,
+) {
+    if messages.is_empty() {
+        return;
+    }
+
+    let marker = match ttl {
+        "1h" => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+        _ => serde_json::json!({"type": "ephemeral"}),
+    };
+
+    let non_sys_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            let is_system = m.get("role").and_then(|v| v.as_str()) == Some("system");
+            !is_system && !is_system_injected(m)
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let count = config.max_breakpoints.min(non_sys_indices.len());
+    let adjusted_count = if config.skip_cache_write && count > 1 {
+        count - 1
+    } else {
+        count
+    };
+    let adjusted_start = non_sys_indices.len().saturating_sub(adjusted_count);
+
+    for &idx in &non_sys_indices[adjusted_start..] {
+        apply_cache_marker(&mut messages[idx], &marker);
+    }
+
+    for msg in messages.iter_mut() {
+        strip_system_injected(msg);
+    }
+}
+
+/// Apply cache_control to the system prompt block.
+pub fn apply_system_prompt_caching(system: &mut Value, ttl: &str) {
+    let marker = match ttl {
+        "1h" => serde_json::json!({"type": "ephemeral", "ttl": "1h"}),
+        _ => serde_json::json!({"type": "ephemeral"}),
+    };
+
+    if let Some(arr) = system.as_array_mut() {
+        if let Some(block) = arr.last_mut() {
+            if let Some(obj) = block.as_object_mut() {
+                obj.insert("cache_control".to_string(), marker);
+            }
+        }
+    } else if system.as_str().is_some() {
+        let s = system.as_str().unwrap();
+        *system = serde_json::json!([{
+            "type": "text",
+            "text": s,
+            "cache_control": marker
+        }]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

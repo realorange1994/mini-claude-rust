@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
-lazy_static! {
-    pub static ref DEFAULT_TYPES: HashMap<&'static str, Vec<&'static str>> = {
-        let mut m = HashMap::new();
+pub static DEFAULT_TYPES: Lazy<HashMap<&'static str, Vec<&'static str>>> = Lazy::new(|| {
+    let mut m = HashMap::new();
         m.insert("rust", vec![".rs"]);
         m.insert("go", vec![".go"]);
         m.insert("python", vec![".py", ".pyi"]);
@@ -86,8 +85,7 @@ lazy_static! {
         m.insert("vhdl", vec![".vhd", ".vhdl"]);
         m.insert("matlab", vec![".m"]);
         m
-    };
-}
+});
 
 /// Returns the file extensions for a given language type name.
 pub fn extensions_for_type(type_name: &str) -> Option<&Vec<&'static str>> {

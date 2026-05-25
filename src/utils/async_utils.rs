@@ -30,7 +30,7 @@ where
     }
 
     let semaphore = Arc::new(Semaphore::new(limit));
-    let results = Arc::new(Mutex::new(vec![None::<R>; items.len()]));
+    let results = Arc::new(Mutex::new((0..items.len()).map(|_| None).collect::<Vec<_>>()));
     let mut handles = Vec::new();
 
     for (i, item) in items.into_iter().enumerate() {
@@ -48,7 +48,10 @@ where
         handle.await.unwrap();
     }
 
-    results.lock().await.into_iter().map(|r| r.unwrap()).collect()
+    let mut guard = results.lock().await;
+    let collected: Vec<R> = guard.drain(..).map(|r| r.unwrap()).collect();
+    drop(guard);
+    collected
 }
 
 // DeferredPromise: a deferred resolution pattern
@@ -103,7 +106,7 @@ pub async fn sleep(duration: Duration) {
 }
 
 // Sleep with abort: if the cancel signal is received, return early
-pub async fn sleep_with_abort(duration: Duration, cancel: tokio::sync::watch::Receiver<bool>, throw_on_abort: bool) -> Result<(), String> {
+pub async fn sleep_with_abort(duration: Duration, mut cancel: tokio::sync::watch::Receiver<bool>, throw_on_abort: bool) -> Result<(), String> {
     tokio::select! {
         _ = tokio::time::sleep(duration) => Ok(()),
         _ = cancel.changed() => {

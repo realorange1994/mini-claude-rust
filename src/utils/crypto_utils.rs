@@ -193,7 +193,7 @@ const VERBS: &[&str] = &[
     "wobbling", "wondering", "yawning", "zooming",
 ];
 
-fn pick_random(arr: &[&str]) -> &str {
+fn pick_random<'a>(arr: &'a [&'a str]) -> &'a str {
     let mut rng = rand::thread_rng();
     let idx = rng.gen_range(0..arr.len());
     arr[idx]

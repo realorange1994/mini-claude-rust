@@ -26,7 +26,7 @@ pub fn truncate_by_lines(text: &str, max_lines: usize) -> String {
         return text.to_string();
     }
 
-    let kept: Vec<&str> = lines.into_iter().take(max_lines).collect();
+    let kept: Vec<&str> = lines.iter().take(max_lines).copied().collect();
     format!(
         "{}\n\n... ({} more lines)",
         kept.join("\n"),

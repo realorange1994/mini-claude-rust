@@ -1,5 +1,7 @@
 //! Skills loader - loads and parses skill definitions
 
+mod loader;
+mod task_evolution;
 mod tracker;
 
 use std::collections::HashMap;

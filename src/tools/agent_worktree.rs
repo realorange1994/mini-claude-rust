@@ -28,8 +28,8 @@ pub struct WorktreeResult {
 /// Generates a short hex string suitable for unique naming (8 hex chars).
 pub fn uuid_v4_short() -> String {
     use rand::Rng;
-    let mut rng = rand::rng();
-    let b: [u8; 4] = rng.random();
+    let mut rng = rand::thread_rng();
+    let b: [u8; 4] = rng.gen();
     format!("{:08x}", u32::from_be_bytes(b))
 }
 

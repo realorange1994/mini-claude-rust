@@ -3,7 +3,7 @@
 //! Handles memory file detection, HTML comment stripping, etc.
 
 use regex::Regex;
-use std::lazy::SyncLazy;
+use once_cell::sync::Lazy as SyncLazy;
 use std::path::Path;
 
 /// Recommended max character count for a memory file.
@@ -99,6 +99,25 @@ pub fn get_large_memory_files(files: &[MemoryFileInfo]) -> Vec<MemoryFileInfo> {
         .filter(|f| f.content.len() > MAX_MEMORY_CHARACTER_COUNT)
         .cloned()
         .collect()
+}
+
+/// Reads CLAUDE.md from the project root.
+/// Ported from upstream context.go:LoadProjectInstructions.
+pub fn load_project_instructions(project_dir: &str) -> String {
+    let dir = if project_dir.is_empty() {
+        match std::env::current_dir() {
+            Ok(d) => d,
+            Err(_) => return String::new(),
+        }
+    } else {
+        std::path::PathBuf::from(project_dir)
+    };
+
+    let path = dir.join("CLAUDE.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content.trim().to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]

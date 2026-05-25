@@ -1,4 +1,4 @@
-use encoding_rs::{UTF_8, GBK, BIG5, SHIFT_JIS, EUC_JP, EUC_KR, ISO_8859_1, WINDOWS_1252};
+use encoding_rs::{GBK, BIG5, SHIFT_JIS, EUC_JP, EUC_KR, WINDOWS_1252, ISO_8859_2};
 use serde::{Deserialize, Serialize};
 
 /// DetectedEncoding represents the result of encoding detection.
@@ -45,7 +45,7 @@ pub fn detect_encoding(data: &[u8]) -> DetectedEncoding {
         ("shift_jis", SHIFT_JIS),
         ("euc-jp", EUC_JP),
         ("euc-kr", EUC_KR),
-        ("iso-8859-1", ISO_8859_1),
+        ("iso-8859-1", WINDOWS_1252),
         ("windows-1252", WINDOWS_1252),
     ];
 
@@ -87,7 +87,7 @@ pub fn convert_to_utf8(data: &[u8], from_encoding: &str) -> Result<String, Strin
         "shift_jis" | "shift-jis" | "sjis" => SHIFT_JIS,
         "euc-jp" => EUC_JP,
         "euc-kr" => EUC_KR,
-        "iso-8859-1" | "latin1" => ISO_8859_1,
+        "iso-8859-1" | "latin1" => WINDOWS_1252,
         "windows-1252" | "cp1252" => WINDOWS_1252,
         _ => return Err(format!("Unsupported encoding: {}", from_encoding)),
     };

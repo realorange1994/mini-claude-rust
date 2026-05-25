@@ -166,7 +166,7 @@ struct CostTrackerFile {
 }
 
 /// Format token count with k/M suffixes for readability.
-fn format_token_count(n: i64) -> String {
+pub fn format_token_count(n: i64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {

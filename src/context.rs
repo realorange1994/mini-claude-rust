@@ -1,6 +1,7 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 // ─── Todo Types ───────────────────────────────────────────────────────────────
@@ -498,6 +499,19 @@ pub struct ConversationContext {
     #[allow(dead_code)]
     system_prompt: String,
     last_assistant_time: Option<std::time::Instant>, // used for time-based microcompact
+    // Hybrid token estimation: use API anchor as precise baseline
+    api_token_anchor: i64,   // exact input_tokens from last API response
+    api_anchor_entries: usize, // entry count when anchor was recorded
+    // Tool result replacement map for cache-stable serialization
+    tool_result_replacements: HashMap<String, String>,
+    // Tracks tool_use_ids whose content was cleared by micro-compact
+    cleared_tool_results: std::collections::HashSet<String>,
+    // Tracks compression level for progressive summarization
+    compression_level: usize,
+    // Disk persistence for oversized tool results (None = feature disabled)
+    tool_result_store: Option<ToolResultStore>,
+    // Replacement state tracker for prompt cache stability
+    content_replacement_state: Option<Arc<ContentReplacementState>>,
 }
 
 /// Set of tool names whose results should be cleared during micro-compaction.
@@ -530,6 +544,13 @@ impl ConversationContext {
             messages: Vec::new(),
             system_prompt: String::new(),
             last_assistant_time: None,
+            api_token_anchor: 0,
+            api_anchor_entries: 0,
+            tool_result_replacements: HashMap::new(),
+            cleared_tool_results: std::collections::HashSet::new(),
+            compression_level: 0,
+            tool_result_store: None,
+            content_replacement_state: None,
         }
     }
 
@@ -1259,7 +1280,761 @@ impl ConversationContext {
             ));
         }
     }
+
+    /// Records the exact input_tokens from an API response along with the
+    /// current entry count. This enables hybrid token estimation: use the
+    /// exact API count as anchor, then only estimate the delta for entries
+    /// added since.
+    pub fn set_api_token_anchor(&mut self, input_tokens: i64) {
+        self.api_token_anchor = input_tokens;
+        self.api_anchor_entries = self.messages.len();
+    }
+
+    /// Returns a hybrid token estimate using API anchor + incremental estimation.
+    ///
+    /// 1. If we have an API anchor, use it as baseline and estimate the delta.
+    /// 2. If no anchor or stale anchor, fall back to full heuristic estimation.
+    ///
+    /// Only counts entries after the most recent compact boundary.
+    pub fn estimated_tokens(&self) -> usize {
+        // Find the most recent compact boundary
+        let boundary_idx = self.messages.iter().rposition(|m| m.is_compact_boundary());
+        let start_idx = boundary_idx.unwrap_or(0);
+
+        // Hybrid estimation: use API anchor if available and valid
+        if self.api_token_anchor > 0 && self.api_anchor_entries > 0 {
+            // Anchor is valid only if it was recorded at or after the current boundary
+            // and the entry count hasn't been invalidated by compaction
+            if self.api_anchor_entries >= start_idx && self.api_anchor_entries <= self.messages.len() {
+                let delta_start = self.api_anchor_entries.max(start_idx);
+                let delta_estimate: usize = self.messages[delta_start..]
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum();
+                if delta_estimate == 0 {
+                    return self.api_token_anchor as usize;
+                }
+                // Apply 4/3 safety margin to the delta only
+                let delta_with_margin = (delta_estimate as f64 * 4.0 / 3.0).ceil() as usize;
+                return self.api_token_anchor as usize + delta_with_margin;
+            }
+        }
+
+        // Full heuristic estimation (no anchor or stale anchor)
+        let raw_total: usize = self.messages[start_idx..]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
+        if raw_total == 0 {
+            return 0;
+        }
+        // Apply 4/3 safety margin
+        (raw_total as f64 * 4.0 / 3.0).ceil() as usize
+    }
+
+    /// Returns the text of the most recent user message (excluding tool_result
+    /// messages). Used to derive the "active task" for task drift prevention.
+    pub fn latest_user_message(&self) -> String {
+        for msg in self.messages.iter().rev() {
+            if msg.role != MessageRole::User {
+                continue;
+            }
+            // Skip tool_result user messages
+            if matches!(&msg.content, MessageContent::ToolResultBlocks(_)) {
+                continue;
+            }
+            // Extract text
+            match &msg.content {
+                MessageContent::Text(t) => return t.clone(),
+                MessageContent::Summary(s) => return s.clone(),
+                MessageContent::Attachment(a) => return a.clone(),
+                _ => {}
+            }
+        }
+        String::new()
+    }
+
+    /// Removes trailing assistant entries that contain ToolUseBlocks with no
+    /// matching ToolResultBlocks. This happens when the agent is interrupted
+    /// mid-turn (e.g., user sends new message before tool results arrive).
+    /// Without cleanup, the API rejects the conversation with a 400 error.
+    pub fn drop_dangling_tool_calls(&mut self) {
+        while let Some(last) = self.messages.last() {
+            if last.role != MessageRole::Assistant {
+                break;
+            }
+            let blocks = match &last.content {
+                MessageContent::ToolUseBlocks(b) => b,
+                _ => break, // not a tool_use entry, stop
+            };
+            // Since this is the last entry, there can't be tool results after it.
+            // If it has any tool_use blocks, they are dangling — drop it.
+            let has_tool_calls = blocks.iter().any(|b| !b.id.is_empty());
+            if has_tool_calls {
+                self.messages.pop();
+            } else {
+                break; // assistant message without tool_calls, stop
+            }
+        }
+    }
+
+    /// Configures the disk persistence store for tool results.
+    /// When set, micro-compact will persist cleared results to disk.
+    pub fn set_tool_result_store(&mut self, store: ToolResultStore) {
+        self.tool_result_store = Some(store);
+    }
+
+    /// Configures the state tracker for prompt cache stability.
+    /// When set, enforce_tool_result_budget will make consistent replacement
+    /// decisions across turns, preserving the prompt cache prefix.
+    pub fn set_content_replacement_state(&mut self, state: Arc<ContentReplacementState>) {
+        self.content_replacement_state = Some(state);
+    }
+
+    /// Increments the compression level after each compaction.
+    /// Used for progressive summarization.
+    pub fn increment_compression_level(&mut self) {
+        self.compression_level += 1;
+    }
+
+    /// Returns the current compression level.
+    pub fn compression_level(&self) -> usize {
+        self.compression_level
+    }
+
+    /// Enforces the per-message tool result budget. For each user message
+    /// whose tool_result blocks together exceed the per-message limit, the
+    /// largest FRESH (never-before-seen) results are persisted to disk and
+    /// replaced with <persisted-output> previews.
+    ///
+    /// State is tracked by tool_use_id. Once a result is seen, its fate is frozen:
+    /// previously-replaced results get the same replacement re-applied every turn
+    /// (zero I/O, byte-identical), and previously-unreplaced results are never
+    /// replaced later (would break prompt cache).
+    ///
+    /// Returns the number of newly replaced results.
+    pub fn enforce_tool_result_budget(
+        &mut self,
+        limit: usize,
+        skip_tool_names: &std::collections::HashSet<String>,
+    ) -> usize {
+        let store = match &self.tool_result_store {
+            Some(s) => s,
+            None => return 0,
+        };
+        let state = match &self.content_replacement_state {
+            Some(s) => s,
+            None => return 0,
+        };
+        if limit == 0 {
+            return 0;
+        }
+
+        // Build tool_use_id -> tool_name mapping
+        let mut tool_name_map: HashMap<String, String> = HashMap::new();
+        for msg in &self.messages {
+            if let MessageContent::ToolUseBlocks(blocks) = &msg.content {
+                for b in blocks {
+                    if !b.id.is_empty() {
+                        tool_name_map.insert(b.id.clone(), b.name.clone());
+                    }
+                }
+            }
+        }
+
+        let mut newly_replaced = 0;
+
+        // Process each ToolResultBlocks entry
+        for msg in &mut self.messages {
+            let blocks = match &mut msg.content {
+                MessageContent::ToolResultBlocks(b) => b,
+                _ => continue,
+            };
+
+            // Collect candidates from this message
+            struct ToolResultCandidate {
+                tool_use_id: String,
+                content: String,
+                size: usize,
+                replacement: Option<String>, // cached replacement for mustReapply
+            }
+
+            let mut candidates: Vec<ToolResultCandidate> = Vec::new();
+            for r in blocks.iter() {
+                // Extract text content
+                let content_text: String = r
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ToolResultContent::Text { text } => Some(text.clone()),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if content_text.is_empty() || content_text.starts_with(PERSISTED_OUTPUT_TAG) {
+                    continue; // skip empty or already-compacted
+                }
+                // Skip if already recorded as a replacement
+                if self.tool_result_replacements.contains_key(&r.tool_use_id) {
+                    continue;
+                }
+                // Skip if cleared
+                if self.cleared_tool_results.contains(&r.tool_use_id) {
+                    continue;
+                }
+                candidates.push(ToolResultCandidate {
+                    tool_use_id: r.tool_use_id.clone(),
+                    content: content_text,
+                    size: 0,
+                    replacement: None,
+                });
+                candidates.last_mut().unwrap().size = candidates.last().unwrap().content.len();
+            }
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            // Partition by prior decision state
+            let mut must_reapply: Vec<ToolResultCandidate> = Vec::new();
+            let mut frozen: Vec<ToolResultCandidate> = Vec::new();
+            let mut fresh: Vec<ToolResultCandidate> = Vec::new();
+
+            for cand in candidates {
+                if let Some(repl) = state.get_replacement(&cand.tool_use_id) {
+                    let mut c = cand;
+                    c.replacement = Some(repl);
+                    must_reapply.push(c);
+                } else if state.is_seen(&cand.tool_use_id) {
+                    frozen.push(cand);
+                } else {
+                    fresh.push(cand);
+                }
+            }
+
+            // Re-apply cached replacements
+            for cand in &must_reapply {
+                if let Some(ref repl) = cand.replacement {
+                    self.tool_result_replacements
+                        .insert(cand.tool_use_id.clone(), repl.clone());
+                }
+                state.mark_seen(&cand.tool_use_id);
+            }
+            for cand in &frozen {
+                state.mark_seen(&cand.tool_use_id);
+            }
+
+            if fresh.is_empty() {
+                continue;
+            }
+
+            // Skip tools in skip_tool_names
+            let mut eligible: Vec<ToolResultCandidate> = Vec::new();
+            for cand in fresh {
+                let tool_name = tool_name_map.get(&cand.tool_use_id).cloned().unwrap_or_default();
+                if skip_tool_names.contains(&tool_name) {
+                    state.mark_seen(&cand.tool_use_id); // freeze without replacement
+                } else {
+                    eligible.push(cand);
+                }
+            }
+
+            if eligible.is_empty() {
+                continue;
+            }
+
+            // Calculate total size
+            let frozen_size: usize = frozen.iter().map(|c| c.size).sum();
+            let fresh_size: usize = eligible.iter().map(|c| c.size).sum();
+
+            if frozen_size + fresh_size <= limit {
+                // Under budget — mark all as seen (frozen) without replacement
+                for cand in &eligible {
+                    state.mark_seen(&cand.tool_use_id);
+                }
+                continue;
+            }
+
+            // Sort eligible by size descending (replace largest first)
+            eligible.sort_by(|a, b| b.size.cmp(&a.size));
+
+            // Select candidates to replace until under budget
+            let mut remaining = frozen_size + fresh_size;
+            let mut selected_indices: Vec<usize> = Vec::new();
+            for (i, cand) in eligible.iter().enumerate() {
+                if remaining <= limit {
+                    break;
+                }
+                selected_indices.push(i);
+                remaining -= cand.size;
+            }
+
+            // Mark non-selected as seen (frozen)
+            let selected_set: std::collections::HashSet<usize> =
+                selected_indices.iter().copied().collect();
+            for (i, cand) in eligible.iter().enumerate() {
+                if !selected_set.contains(&i) {
+                    state.mark_seen(&cand.tool_use_id);
+                }
+            }
+
+            if selected_indices.is_empty() {
+                continue;
+            }
+
+            // Persist selected results and record replacements
+            for i in selected_indices {
+                let cand = &eligible[i];
+                match store.persist(&cand.tool_use_id, &cand.content) {
+                    Some(persisted) => {
+                        let replacement = build_large_tool_result_message(&persisted);
+                        state.mark_seen(&cand.tool_use_id);
+                        state.record_replacement(&cand.tool_use_id, &replacement);
+                        newly_replaced += 1;
+                        self.tool_result_replacements
+                            .insert(cand.tool_use_id.clone(), replacement);
+                    }
+                    None => {
+                        // Persistence failed — mark as seen but unreplaced (frozen)
+                        state.mark_seen(&cand.tool_use_id);
+                    }
+                }
+            }
+        }
+
+        newly_replaced
+    }
+
+    /// Apply the per-message tool result budget with default settings.
+    /// Returns true if any replacements were made.
+    pub fn apply_tool_result_budget(&mut self) -> bool {
+        if self.tool_result_store.is_none() || self.content_replacement_state.is_none() {
+            return false;
+        }
+        self.enforce_tool_result_budget(MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, &std::collections::HashSet::new()) > 0
+    }
+
+    /// Returns the current tool result replacements map.
+    pub fn tool_result_replacements(&self) -> &HashMap<String, String> {
+        &self.tool_result_replacements
+    }
+
+    /// Clears the tool result replacements map.
+    pub fn clear_tool_result_replacements(&mut self) {
+        self.tool_result_replacements.clear();
+    }
 }
+
+// ─── Tool Result Persistence ──────────────────────────────────────────────────
+
+/// XML tag used to wrap persisted output messages.
+const PERSISTED_OUTPUT_TAG: &str = "<persisted-output>";
+const PERSISTED_OUTPUT_CLOSING_TAG: &str = "</persisted-output>";
+/// Preview size in bytes for the reference message.
+const PREVIEW_SIZE_BYTES: usize = 2000;
+/// Default threshold before persistence kicks in (chars).
+const DEFAULT_MAX_RESULT_SIZE_CHARS: usize = 8000;
+/// Per-message aggregate budget limit (chars).
+const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 20000;
+/// SystemInjectedPrefix is prepended to auto-injected content so cache
+/// breakpoint placement can skip these messages.
+pub const SYSTEM_INJECTED_PREFIX: &str = "<!-- system-injected -->";
+
+/// Metadata about a persisted tool result.
+#[derive(Debug, Clone)]
+pub struct PersistedToolResult {
+    pub filepath: String,
+    pub original_size: usize,
+    pub is_json: bool,
+    pub preview: String,
+    pub has_more: bool,
+}
+
+/// Persists oversized tool results to disk so they can be re-read on demand
+/// after micro-compact clears them from context.
+///
+/// Storage path: {project_dir}/{session_id}/tool-results/{tool_use_id}.{txt|json}
+#[derive(Debug)]
+pub struct ToolResultStore {
+    dir: PathBuf,
+    project_dir: String,
+    session_id: String,
+}
+
+impl ToolResultStore {
+    /// Creates a store rooted at {project_dir}/{session_id}/tool-results/.
+    /// If session_id is empty, uses {project_dir}/tool-results/ as a fallback.
+    pub fn new(project_dir: &str, session_id: &str) -> Self {
+        let dir = if session_id.is_empty() {
+            PathBuf::from(project_dir).join("tool-results")
+        } else {
+            PathBuf::from(project_dir).join(session_id).join("tool-results")
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        Self {
+            dir,
+            project_dir: project_dir.to_string(),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    /// Saves a tool result to disk and returns metadata about the persisted file.
+    /// Uses exclusive create — if the file already exists (from a prior turn),
+    /// it is skipped (EEXIST is not an error). This matches upstream's idempotency guard.
+    pub fn persist(&self, tool_use_id: &str, content: &str) -> Option<PersistedToolResult> {
+        use std::io::Write;
+        if content.is_empty() {
+            return None;
+        }
+        let safe_id = sanitize_tool_id(tool_use_id);
+        let is_json = content.starts_with('{') || content.starts_with('[');
+        let ext = if is_json { "json" } else { "txt" };
+        let filename = format!("{}.{}", safe_id, ext);
+        let path = self.dir.join(&filename);
+
+        // Use exclusive create — skip if file already exists (idempotent across turns)
+        let mut fd = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => Some(f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Already persisted on a prior turn, fall through to generate preview
+                None
+            }
+            Err(_) => return None,
+        };
+        if let Some(mut f) = fd.take() {
+            if f.write_all(content.as_bytes()).is_err() {
+                return None;
+            }
+            let _ = f.flush();
+        }
+
+        let (preview, has_more) = generate_preview(content, PREVIEW_SIZE_BYTES);
+        Some(PersistedToolResult {
+            filepath: path.display().to_string(),
+            original_size: content.len(),
+            is_json,
+            preview,
+            has_more,
+        })
+    }
+
+    /// Checks if a tool result should be persisted based on size threshold.
+    /// Returns the modified content string if persisted, or the original if not.
+    pub fn maybe_persist_tool_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        content: &str,
+        threshold: usize,
+    ) -> String {
+        if content.trim().is_empty() {
+            return format!("({} completed with no output)", tool_name);
+        }
+        if content.len() <= threshold {
+            return content.to_string();
+        }
+        match self.persist(tool_use_id, content) {
+            Some(result) => build_large_tool_result_message(&result),
+            None => content.to_string(),
+        }
+    }
+
+    /// Loads a persisted tool result from disk by its toolUseID.
+    pub fn read(&self, tool_use_id: &str) -> Result<String, String> {
+        let safe_id = sanitize_tool_id(tool_use_id);
+        for ext in &["txt", "json"] {
+            let path = self.dir.join(format!("{}.{}", safe_id, ext));
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                return Ok(data);
+            }
+        }
+        Err(format!("tool result not found on disk: {}", tool_use_id))
+    }
+}
+
+/// Makes a toolUseID safe for use as a filename.
+fn sanitize_tool_id(tool_use_id: &str) -> String {
+    tool_use_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Truncates content at a newline boundary when possible.
+fn generate_preview(content: &str, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content.to_string(), false);
+    }
+    let truncated = &content[..max_bytes];
+    let last_newline = truncated.rfind('\n');
+    let cut_point = match last_newline {
+        Some(pos) if pos > max_bytes / 2 => pos,
+        _ => max_bytes,
+    };
+    (content[..cut_point].to_string(), true)
+}
+
+/// Formats a persisted tool result into the <persisted-output> XML message.
+fn build_large_tool_result_message(result: &PersistedToolResult) -> String {
+    format!(
+        "{}\n\
+         Output too large ({}). Full output saved to: {}\n\n\
+         Preview (first {}):\n\
+         {}{}\n\
+         {}",
+        PERSISTED_OUTPUT_TAG,
+        format_file_size(result.original_size),
+        result.filepath,
+        format_file_size(PREVIEW_SIZE_BYTES),
+        result.preview,
+        if result.has_more { "\n...\n" } else { "\n" },
+        PERSISTED_OUTPUT_CLOSING_TAG,
+    )
+}
+
+/// Returns a human-readable file size string.
+fn format_file_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{} bytes", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+// ─── Content Replacement State ────────────────────────────────────────────────
+
+/// Tracks per-conversation-thread state for the aggregate tool result budget.
+/// Once a result is seen, its fate is frozen for the conversation.
+///   - seen_ids: results that have passed through the budget check (replaced or not).
+///   - replacements: subset of seen_ids that were persisted to disk and replaced
+///     with <persisted-output> previews, mapped to the exact preview string.
+#[derive(Debug, Default)]
+pub struct ContentReplacementState {
+    seen_ids: std::sync::Mutex<HashMap<String, bool>>,
+    replacements: std::sync::Mutex<HashMap<String, String>>,
+}
+
+impl ContentReplacementState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks a tool_use_id as seen.
+    pub fn mark_seen(&self, tool_use_id: &str) {
+        let _ = self.seen_ids.lock().unwrap().insert(tool_use_id.to_string(), true);
+    }
+
+    /// Returns true if this tool_use_id has been seen before.
+    pub fn is_seen(&self, tool_use_id: &str) -> bool {
+        self.seen_ids.lock().unwrap().contains_key(tool_use_id)
+    }
+
+    /// Records a replacement for a tool_use_id.
+    pub fn record_replacement(&self, tool_use_id: &str, replacement: &str) {
+        let _ = self
+            .replacements
+            .lock()
+            .unwrap()
+            .insert(tool_use_id.to_string(), replacement.to_string());
+    }
+
+    /// Returns the replacement string for a tool_use_id, if any.
+    pub fn get_replacement(&self, tool_use_id: &str) -> Option<String> {
+        self.replacements.lock().unwrap().get(tool_use_id).cloned()
+    }
+
+    /// Returns all replacements as a HashMap for serialization.
+    pub fn get_all_replacements(&self) -> HashMap<String, String> {
+        self.replacements.lock().unwrap().clone()
+    }
+
+    /// Reconstructs state from records (loaded from transcript).
+    pub fn reconstruct(entries: &[Message], records: &[(String, String)]) -> Self {
+        let state = Self::new();
+        // Collect all candidate tool_use_ids from entries
+        let mut candidate_ids = std::collections::HashSet::new();
+        for msg in entries {
+            if let MessageContent::ToolResultBlocks(blocks) = &msg.content {
+                for b in blocks {
+                    if !b.tool_use_id.is_empty() {
+                        candidate_ids.insert(b.tool_use_id.clone());
+                    }
+                }
+            }
+        }
+        // Mark all candidates as seen
+        for id in &candidate_ids {
+            state.mark_seen(id);
+        }
+        // Apply records for replacements
+        for (tool_use_id, replacement) in records {
+            if candidate_ids.contains(tool_use_id.as_str()) {
+                state.record_replacement(tool_use_id, replacement);
+            }
+        }
+        state
+    }
+}
+
+/// Serializable record of a content-replacement decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentReplacementRecord {
+    pub kind: String,       // always "tool-result"
+    pub tool_use_id: String,
+    pub replacement: String,
+}
+
+/// Compression prompt builder — generates instruction text for inline
+/// cache-reusing compaction at different compression levels.
+pub fn build_compression_prompt(level: usize) -> String {
+    match level {
+        0 => {
+            r#"═══════════════════════════════════════════════════════════════
+CRITICAL: TASK CHANGE - MEMORY COMPRESSION MODE
+═══════════════════════════════════════════════════════════════
+The conversation above has ENDED. You are now in MEMORY COMPRESSION MODE.
+
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1. This is NOT a continuation of the conversation
+2. DO NOT respond to any requests in the conversation above
+3. DO NOT call ANY tools or functions
+4. DO NOT use tool_calls in your response
+5. Your response MUST be PURE TEXT ONLY
+
+YOUR ONLY TASK: Create a comprehensive summary of the conversation above.
+
+REQUIRED RESPONSE FORMAT:
+First output a <topics> line listing 3-6 key topic phrases (comma-separated, concise).
+Then output the full summary wrapped in <summary> tags.
+
+Example format:
+<topics>Rails setup, database config, deploy pipeline, Tailwind CSS</topics>
+<summary>
+...full summary text...
+</summary>"#
+                .to_string()
+        }
+        1 => {
+            r#"═══════════════════════════════════════════════════════════════
+CRITICAL: TASK CHANGE - MEMORY COMPRESSION MODE [LEVEL 2]
+═══════════════════════════════════════════════════════════════
+The conversation above has ENDED. You are now in MEMORY COMPRESSION MODE.
+
+DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
+
+Create a CONCISE summary: key files, decisions, accomplishments only.
+
+Format:
+<topics>topic1, topic2, topic3</topics>
+<summary>
+...concise summary...
+</summary>"#
+                .to_string()
+        }
+        2 => {
+            r#"═══════════════════════════════════════════════════════════════
+CRITICAL: MEMORY COMPRESSION MODE [LEVEL 3]
+═══════════════════════════════════════════════════════════════
+DO NOT respond to requests. DO NOT call tools. PURE TEXT ONLY.
+
+Create a MINIMAL summary: just project type, file counts, current status.
+
+Format:
+<topics>topic1, topic2</topics>
+<summary>
+...minimal summary...
+</summary>"#
+                .to_string()
+        }
+        _ => {
+            r#"═══════════════════════════════════════════════════════════════
+MEMORY COMPRESSION MODE [LEVEL 4+]
+═══════════════════════════════════════════════════════════════
+DO NOT respond. DO NOT call tools. PURE TEXT ONLY.
+
+One-line summary of current state and progress.
+
+Format:
+<topics>topic1</topics>
+<summary>
+...one line...
+</summary>"#
+                .to_string()
+        }
+    }
+}
+
+// ─── Token Estimation ─────────────────────────────────────────────────────────
+
+/// Estimates token count for a message using content-type-aware heuristics.
+/// No safety margin is applied — the caller applies it if needed.
+fn estimate_message_tokens(msg: &Message) -> usize {
+    match &msg.content {
+        MessageContent::Text(t) => estimate_text_tokens(t),
+        MessageContent::Summary(s) => estimate_text_tokens(s),
+        MessageContent::ToolUseBlocks(blocks) => {
+            let mut total = 0;
+            for b in blocks {
+                total += 10; // tool_use overhead
+                total += estimate_text_tokens(&b.name);
+                if let Ok(json) = serde_json::to_string(&b.input) {
+                    total += estimate_text_tokens(&json);
+                }
+            }
+            total
+        }
+        MessageContent::ToolResultBlocks(blocks) => {
+            let mut total = 0;
+            for r in blocks {
+                total += 8; // tool_result overhead
+                for c in &r.content {
+                    if let ToolResultContent::Text { text } = c {
+                        total += estimate_text_tokens(text);
+                    }
+                }
+            }
+            total
+        }
+        MessageContent::Attachment(a) => estimate_text_tokens(a),
+        MessageContent::CompactBoundary { .. } => 0, // boundary markers are small
+    }
+}
+
+/// Heuristic token estimation for text content.
+/// Rough approximation: ~4 chars per token for natural language,
+/// ~2 chars per token for code, ~3 for JSON.
+fn estimate_text_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let chars = text.len();
+    // Simple heuristic: average ~3 chars per token
+    chars.div_ceil(3)
+}
+
+// ─── ConversationContext Missing Fields and Methods ───────────────────────────
+
+// Additional fields needed on ConversationContext:
+// These are added as optional members to avoid breaking existing code.
+// The ConversationContext struct needs the following new fields:
+//   - api_token_anchor: i64 (exact input_tokens from last API response)
+//   - api_anchor_entries: usize (entry count when anchor was recorded)
+//   - tool_result_replacements: HashMap<String, String>
+//   - cleared_tool_results: HashMap<String, bool>
+//   - compression_level: usize
+//   - tool_result_store: Option<ToolResultStore>
+//   - content_replacement_state: Option<Arc<ContentReplacementState>>
 
 #[cfg(test)]
 mod tests {

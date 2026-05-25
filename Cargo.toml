@@ -81,6 +81,11 @@ libc = "0.2"
 
 # Home directory detection
 dirs = "5"
+which = "8.0.2"
+
+# Windows API (file locking on Windows)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 tempfile = "3.8"

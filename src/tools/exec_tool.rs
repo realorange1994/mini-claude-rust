@@ -1163,7 +1163,7 @@ impl ExecTool {
                 Ok(None) => {
                     if std::time::Instant::now().duration_since(start) >= timeout {
                         // Kill the entire process group (matching upstream's tree-kill)
-                        let pid = child.id();
+                        let _pid = child.id();
                         #[cfg(unix)]
                         unsafe {
                             // Negative PID = process group. Cast to i32 for Unix kill.
