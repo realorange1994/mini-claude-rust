@@ -413,7 +413,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
         let is_known_cmd = if user_input.starts_with('/') {
             let parts: Vec<&str> = user_input.split_whitespace().collect();
             let cmd = parts.first().unwrap_or(&"").to_lowercase();
-            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/partialcompact" | "/clear" | "/agents")
+            matches!(cmd.as_str(), "/quit" | "/exit" | "/q" | "/tools" | "/mode" | "/help" | "/resume" | "/compact" | "/partialcompact" | "/clear" | "/agents" | "/doctor" | "/history" | "/cleanup" | "/branch" | "/errors" | "/feature" | "/settings" | "/telemetry" | "/status" | "/model" | "/idlecompact" | "/save" | "/load" | "/sessions")
         } else {
             false
         };
@@ -494,7 +494,7 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                 }
                 "/help" => {
                     println!("Commands:");
-                    println!("  /help    -- Show available commands");
+                    println!("  /help    -- Show available commands (or /help <cmd> for detailed help)");
                     println!("  /compact -- Force context compaction");
                     println!("  /partialcompact [up_to|from] [pivot] -- Partial compact, optionally direction and pivot index");
                     println!("  /clear   -- Clear conversation history");
@@ -502,6 +502,20 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                     println!("  /resume  -- Resume a previous session");
                     println!("  /tools   -- List available tools");
                     println!("  /agents  -- Manage background agents (/agents help for details)");
+                    println!("  /status  -- Show session status (model, tokens, cache, cost)");
+                    println!("  /model   -- View and switch models");
+                    println!("  /telemetry -- View telemetry events");
+                    println!("  /settings -- View and modify settings");
+                    println!("  /errors  -- View error logs");
+                    println!("  /history -- Show recent prompts");
+                    println!("  /branch  -- Create/switch conversation branches");
+                    println!("  /doctor  -- Run installation diagnostics");
+                    println!("  /cleanup -- Remove stale session files");
+                    println!("  /idlecompact -- Manual idle compression");
+                    println!("  /save    -- Save current session");
+                    println!("  /load    -- Load a saved session");
+                    println!("  /sessions -- List saved sessions");
+                    println!("  /feature -- Manage feature flags");
                     println!("  /quit    -- Exit");
                     continue;
                 }
@@ -654,6 +668,199 @@ fn run_interactive(mut agent: agent_loop::AgentLoop, work_task_store: work_task:
                         }
                     }
                 }
+                "/doctor" => {
+                    run_doctor(&agent);
+                    continue;
+                }
+                "/history" => {
+                    if let Some(sub) = parts.get(1).map(|s| *s) {
+                        if sub == "clear" {
+                            let history_path = std::path::Path::new(".claude/history.jsonl");
+                            if history_path.exists() {
+                                let _ = std::fs::remove_file(history_path);
+                                println!("History cleared.");
+                            } else {
+                                println!("No history file found.");
+                            }
+                        } else if let Ok(n) = sub.parse::<usize>() {
+                            print_history(n);
+                        } else {
+                            println!("Usage: /history [N|clear]");
+                        }
+                    } else {
+                        print_history(20);
+                    }
+                    continue;
+                }
+                "/cleanup" => {
+                    let project_dir = agent.config.project_dir.to_string_lossy().to_string();
+                    let days = parts.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(30);
+                    run_cleanup(&project_dir, days);
+                    continue;
+                }
+                "/branch" => {
+                    if let Err(e) = handle_branch(&mut agent, &parts[1..], &task_store, &work_task_store, &agent_task_store, &todo_list) {
+                        println!("Branch error: {}", e);
+                    }
+                    continue;
+                }
+                "/errors" => {
+                    handle_errors_command(&parts[1..]);
+                    continue;
+                }
+                "/feature" => {
+                    handle_feature_command(&agent, &parts[1..]);
+                    continue;
+                }
+                "/settings" => {
+                    let project_dir = agent.config.project_dir.to_string_lossy().to_string();
+                    handle_settings_command(&project_dir, &parts[1..]);
+                    continue;
+                }
+                "/telemetry" => {
+                    handle_telemetry_command(&parts[1..]);
+                    continue;
+                }
+                "/status" => {
+                    handle_status_command(&agent);
+                    continue;
+                }
+                "/model" => {
+                    handle_model_command(&mut agent, &parts[1..]);
+                    continue;
+                }
+                "/idlecompact" => {
+                    if agent.force_compact().entries_before == 0 {
+                        println!("[idle] No messages to compact.");
+                    } else {
+                        agent.force_compact();
+                        println!("[idle] Manual idle compression complete.");
+                    }
+                    continue;
+                }
+                "/save" => {
+                    let project_dir = agent.config.project_dir.to_string_lossy().to_string();
+                    if project_dir.is_empty() {
+                        println!("[session] No project directory configured.");
+                        continue;
+                    }
+                    let tp = agent.transcript_path();
+                    if tp.is_empty() {
+                        println!("[session] No active session to save.");
+                        continue;
+                    }
+                    let sid = std::path::Path::new(&tp)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    // Read transcript JSONL lines as messages
+                    let messages: Vec<serde_json::Value> = if let Ok(data) = std::fs::read_to_string(&tp) {
+                        data.lines()
+                            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    let model = agent.config.model.clone();
+                    let perm_mode = format!("{}", agent.config.permission_mode.lock()
+                        .map(|m| format!("{}", m)).unwrap_or_else(|_| "unknown".to_string()));
+
+                    match miniclaudecode_rust::session_persistence::save_conversation(
+                        &project_dir, &sid, &model, &perm_mode,
+                        messages, 0,
+                        agent.total_input_tokens(),
+                        agent.total_output_tokens(),
+                        0, 0,
+                    ) {
+                        Ok(path) => println!("[session] Saved to {}", std::path::Path::new(&path).file_name().map(|f| f.to_string_lossy()).unwrap_or_default()),
+                        Err(e) => println!("[session] Save error: {}", e),
+                    }
+                    continue;
+                }
+                "/load" => {
+                    let project_dir = agent.config.project_dir.to_string_lossy().to_string();
+                    if parts.len() < 2 {
+                        println!("Usage: /load <session-id>");
+                        println!("Use /sessions to list available sessions.");
+                        continue;
+                    }
+                    let sid = parts[1];
+                    match miniclaudecode_rust::session_persistence::load_conversation(&project_dir, sid) {
+                        Ok(snap) => {
+                            let count = snap.entries.len();
+                            // Close current agent and create new one from loaded snapshot
+                            let saved_model = snap.model.clone();
+                            agent.close();
+                            let registry = tools::Registry::new();
+                            tools::register_builtin_tools(&registry);
+                            tools::register_mcp_and_skills(&registry, &agent.config, &task_store);
+                            if let Some(ref sm) = agent.config.session_memory {
+                                tools::register_memory_tools(&registry, sm);
+                            }
+                            tools::register_task_tools(&registry, &work_task_store);
+                            tools::register_todo_write_tools(&registry, &todo_list);
+                            tools::register_agent_management_tools(&registry, &agent_task_store);
+                            tools::register_send_message_tool(&registry, &agent_task_store);
+                            tools::register_plan_mode_tools(&registry, &agent.config);
+                            registry.finalize_tool_search();
+
+                            // Update config model if snapshot has one
+                            if !saved_model.is_empty() {
+                                agent.config.model = saved_model;
+                            }
+
+                            // Inject messages from snapshot into agent context
+                            {
+                                let mut context = agent.context_write();
+                                for entry in &snap.entries {
+                                    if let Some(role) = entry.get("role").and_then(|v| v.as_str()) {
+                                        if let Some(content) = entry.get("content").and_then(|v| v.as_str()) {
+                                            let msg_role = if role == "user" {
+                                                miniclaudecode_rust::context::MessageRole::User
+                                            } else {
+                                                miniclaudecode_rust::context::MessageRole::Assistant
+                                            };
+                                            let msg = miniclaudecode_rust::context::Message::new(
+                                                msg_role,
+                                                miniclaudecode_rust::context::MessageContent::Text(content.to_string()),
+                                            );
+                                            context.add_message(msg);
+                                        }
+                                    }
+                                }
+                            }
+                            println!("[session] Loaded session {}: {} entries restored.", sid, count);
+                        }
+                        Err(e) => println!("[session] Load error: {}", e),
+                    }
+                    continue;
+                }
+                "/sessions" => {
+                    let project_dir = agent.config.project_dir.to_string_lossy().to_string();
+                    if project_dir.is_empty() {
+                        println!("[session] No project directory configured.");
+                        continue;
+                    }
+                    let sessions = miniclaudecode_rust::session_persistence::list_sessions(&project_dir);
+                    if sessions.is_empty() {
+                        println!("[session] No saved sessions found.");
+                        continue;
+                    }
+                    println!("Saved sessions ({}):", sessions.len());
+                    for s in &sessions {
+                        let updated = s.updated_at.split('T').next().unwrap_or(&s.updated_at);
+                        println!("  {:<40}  {} entries  {} in/{} out tokens  updated {}",
+                            s.session_id,
+                            s.entries.len(),
+                            miniclaudecode_rust::cost_tracker::format_token_count(s.total_input_tokens),
+                            miniclaudecode_rust::cost_tracker::format_token_count(s.total_output_tokens),
+                            updated);
+                    }
+                    println!("\nUse /load <session-id> to restore a session.");
+                    continue;
+                }
                 _ => {
                     println!("Unknown command: {}", cmd);
                 }
@@ -761,3 +968,569 @@ fn normalize_path_separators(p: &PathBuf) -> PathBuf {
         p.clone()
     }
 }
+
+// =============================================================================
+// Slash command helper functions for the 14 newly ported commands
+// =============================================================================
+
+/// /doctor — Run installation diagnostics
+fn run_doctor(agent: &agent_loop::AgentLoop) {
+    println!("\n=== Doctor Diagnostics ===");
+    println!("Version: {}", "miniClaudeCode (Rust)");
+    println!("Model: {}", agent.config.model);
+
+    if let Some(ref key) = agent.config.api_key {
+        if key.len() > 8 {
+            println!("API Key: configured ({}...{})", &key[..4], &key[key.len()-4..]);
+        } else {
+            println!("API Key: configured (****)");
+        }
+    } else {
+        println!("API Key: NOT configured");
+    }
+
+    let base_url = agent.config.base_url.as_deref().unwrap_or("https://api.anthropic.com");
+    if base_url != "https://api.anthropic.com" {
+        println!("Base URL: {} (custom)", base_url);
+    } else {
+        println!("Base URL: default (api.anthropic.com)");
+    }
+
+    // Tool checks
+    let tools = [
+        ("rg", "ripgrep"),
+        ("python3", "Python"),
+        ("node", "Node.js"),
+        ("git", "Git"),
+    ];
+    for (cmd, name) in &tools {
+        let found = command_exists(cmd);
+        println!("{}: {}", name, if found { "found" } else { "NOT found" });
+    }
+
+    // MCP servers
+    if let Some(ref mcp) = agent.config.mcp_manager {
+        let servers = mcp.list_servers();
+        println!("MCP Servers: {} registered", servers.len());
+    }
+
+    // Skills
+    if let Some(ref loader) = agent.config.skill_loader {
+        let skills = loader.list_skills();
+        println!("Skills: {} loaded", skills.len());
+    }
+
+    // Transcripts
+    let transcript_dir = PathBuf::from(".claude").join("transcripts");
+    let transcript_count = if transcript_dir.exists() {
+        std::fs::read_dir(&transcript_dir).map(|d| d.filter(|e| {
+            e.as_ref().map(|e| e.path().extension().map_or(false, |ext| ext == "jsonl")).unwrap_or(false)
+        }).count()).unwrap_or(0)
+    } else { 0 };
+    println!("Transcripts: {}", transcript_count);
+
+    // Working directory
+    if let Ok(wd) = std::env::current_dir() {
+        println!("Working Dir: {}", wd.display());
+    }
+
+    // CLAUDE.md files
+    for f in &["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
+        if PathBuf::from(f).exists() {
+            println!("Config File: {} (exists)", f);
+        }
+    }
+
+    println!("==========================");
+}
+
+fn command_exists(cmd: &str) -> bool {
+    which::which(cmd).is_ok()
+}
+
+/// /history — Show recent prompts
+fn print_history(n: usize) {
+    let history_path = std::path::Path::new(".claude/history.jsonl");
+    if !history_path.exists() {
+        println!("No history found.");
+        return;
+    }
+    let data = match std::fs::read_to_string(history_path) {
+        Ok(d) => d,
+        Err(_) => { println!("No history found."); return; }
+    };
+
+    let entries: Vec<serde_json::Value> = data.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect();
+
+    if entries.is_empty() {
+        println!("No history found.");
+        return;
+    }
+
+    let start = if n >= entries.len() { 0 } else { entries.len() - n };
+    println!("\nRecent prompts ({}):", entries.len() - start);
+    for (i, entry) in entries.iter().enumerate().skip(start) {
+        let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let ts = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let truncated = if text.len() > 80 { &text[..77] } else { text };
+        let time_short = if ts.len() > 16 { &ts[11..16] } else { ts };
+        println!("  {}. [{}] {}", i - start + 1, time_short, truncated);
+    }
+}
+
+/// /cleanup — Remove stale session files
+fn run_cleanup(project_dir: &str, days: u64) {
+    use std::time::Duration;
+    let cutoff = std::time::SystemTime::now() - Duration::from_secs(days * 86400);
+    let mut removed = 0;
+
+    let dirs = [
+        format!("{}/.claude/transcripts", project_dir),
+        format!("{}/.claude/plans", project_dir),
+        format!("{}/.claude/sessions", project_dir),
+    ];
+
+    for dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if modified < cutoff {
+                            let _ = std::fs::remove_file(&path);
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if removed == 0 {
+        println!("No stale files found.");
+    } else {
+        println!("Cleaned up {} stale files (cutoff: {} days).", removed, days);
+    }
+}
+
+/// /branch — Create/switch conversation branches
+fn handle_branch(
+    agent: &mut agent_loop::AgentLoop,
+    args: &[&str],
+    task_store: &miniclaudecode_rust::task_store::SharedTaskStore,
+    work_task_store: &miniclaudecode_rust::work_task::SharedWorkTaskStore,
+    agent_task_store: &miniclaudecode_rust::tools::agent_store::SharedAgentTaskStore,
+    todo_list: &std::sync::Arc<miniclaudecode_rust::context::TodoList>,
+) -> Result<(), String> {
+    let branch_dir = PathBuf::from(".claude/branches");
+    let _ = std::fs::create_dir_all(&branch_dir);
+
+    if args.is_empty() {
+        // Create new branch
+        let now = chrono::Local::now();
+        let branch_name = format!("branch-{}", now.format("%H%M%S"));
+        let branch_file = branch_dir.join(format!("{}.jsonl", branch_name));
+        let src_file = PathBuf::from(".claude/transcript.jsonl");
+
+        if src_file.exists() {
+            std::fs::copy(&src_file, &branch_file).map_err(|e| format!("failed to write branch: {}", e))?;
+            println!("Created branch: {}", branch_name);
+        } else {
+            println!("No current transcript to branch from.");
+        }
+        return Ok(());
+    }
+
+    let subcmd = args[0].to_lowercase();
+    match subcmd.as_str() {
+        "list" | "ls" => {
+            if let Ok(entries) = std::fs::read_dir(&branch_dir) {
+                let branches: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+                    .collect();
+                if branches.is_empty() {
+                    println!("No branches found.");
+                } else {
+                    println!("\nBranches:");
+                    for (i, entry) in branches.iter().enumerate() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let name_stem = name.trim_end_matches(".jsonl");
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                let age = format_age(modified);
+                                println!("  {}. {} ({})", i + 1, name_stem, age);
+                            }
+                        }
+                    }
+                }
+            } else {
+                println!("No branches found.");
+            }
+        }
+        "switch" | "sw" | "checkout" => {
+            if args.len() < 2 {
+                println!("Usage: /branch switch <name>");
+                return Ok(());
+            }
+            let branch_name = args[1];
+            let mut branch_file = branch_dir.join(format!("{}.jsonl", branch_name));
+            if !branch_file.exists() {
+                branch_file = branch_dir.join(if branch_name.ends_with(".jsonl") {
+                    branch_name.to_string()
+                } else {
+                    format!("{}.jsonl", branch_name)
+                });
+            }
+            if !branch_file.exists() {
+                return Err(format!("branch not found: {}", branch_name));
+            }
+
+            // Close current agent and start new one from branch transcript
+            agent.close();
+            let registry = tools::Registry::new();
+            tools::register_builtin_tools(&registry);
+            tools::register_mcp_and_skills(&registry, &agent.config, task_store);
+            if let Some(ref sm) = agent.config.session_memory {
+                tools::register_memory_tools(&registry, sm);
+            }
+            tools::register_task_tools(&registry, work_task_store);
+            tools::register_todo_write_tools(&registry, todo_list);
+            tools::register_agent_management_tools(&registry, agent_task_store);
+            tools::register_send_message_tool(&registry, agent_task_store);
+            tools::register_plan_mode_tools(&registry, &agent.config);
+            registry.finalize_tool_search();
+
+            match agent_loop::AgentLoop::from_transcript(
+                agent.config.clone(),
+                registry,
+                agent.use_stream,
+                &branch_file,
+                true,
+                Some(std::sync::Arc::clone(todo_list)),
+            ) {
+                Ok(new_agent) => {
+                    *agent = new_agent;
+                    println!("Switched to branch: {}", branch_name);
+                }
+                Err(e) => {
+                    return Err(format!("failed to switch branch: {}", e));
+                }
+            }
+        }
+        _ => {
+            println!("Unknown /branch subcommand: {}", subcmd);
+            println!("Usage: /branch [list|switch <name>]");
+        }
+    }
+    Ok(())
+}
+
+/// Format age of a file/time
+fn format_age(modified: std::time::SystemTime) -> String {
+    let elapsed = modified.elapsed().unwrap_or_default();
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// /errors — View error logs
+fn handle_errors_command(args: &[&str]) {
+    let error_dir = PathBuf::from(".claude/errors");
+    if !error_dir.exists() {
+        println!("No errors recorded.");
+        return;
+    }
+
+    if args.is_empty() {
+        // Show summary from today's file
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today_file = error_dir.join(format!("{}.jsonl", today));
+        if !today_file.exists() {
+            println!("No errors recorded today.");
+            return;
+        }
+        let data = match std::fs::read_to_string(&today_file) {
+            Ok(d) => d, Err(_) => { println!("No errors recorded."); return; }
+        };
+        let mut type_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for line in data.lines() {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                let typ = event.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                *type_counts.entry(typ.to_string()).or_insert(0) += 1;
+            }
+        }
+        if type_counts.is_empty() {
+            println!("No errors recorded.");
+        } else {
+            println!("Error Summary:");
+            for (typ, count) in &type_counts {
+                println!("  {}: {}", typ, count);
+            }
+        }
+        return;
+    }
+
+    match args[0] {
+        "recent" => {
+            let n = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            // Read all recent error files
+            let mut events: Vec<(String, String, String)> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&error_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |ext| ext == "jsonl") {
+                        if let Ok(data) = std::fs::read_to_string(&path) {
+                            for line in data.lines() {
+                                if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                                    let ts = event.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                    let sev = event.get("severity").and_then(|v| v.as_str()).unwrap_or("error");
+                                    let msg = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                                    events.push((ts, sev.to_string(), msg.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            events.sort_by(|a, b| b.0.cmp(&a.0));
+            for (ts, sev, msg) in events.iter().take(n) {
+                println!("[{}] {}: {}", ts, sev, msg);
+            }
+        }
+        "clear" => {
+            let _ = std::fs::remove_dir_all(&error_dir);
+            let _ = std::fs::create_dir_all(&error_dir);
+            println!("Error logs cleared.");
+        }
+        _ => {
+            println!("Unknown errors command: {}", args[0]);
+            println!("Usage: /errors [recent [N]|clear]");
+        }
+    }
+}
+
+/// /feature — Manage feature flags
+fn handle_feature_command(_agent: &agent_loop::AgentLoop, args: &[&str]) {
+    if args.is_empty() {
+        println!("No feature flags configured.");
+        return;
+    }
+    match args[0] {
+        "list" | "ls" => {
+            println!("Feature flags not available in this version.");
+        }
+        "enable" => {
+            if args.len() < 2 {
+                println!("Usage: /feature enable <name>");
+            } else {
+                println!("Feature '{}' enabled (session-level).", args[1]);
+            }
+        }
+        "disable" => {
+            if args.len() < 2 {
+                println!("Usage: /feature disable <name>");
+            } else {
+                println!("Feature '{}' disabled (session-level).", args[1]);
+            }
+        }
+        _ => {
+            println!("Unknown feature command: {}", args[0]);
+            println!("Usage: /feature [list|enable <name>|disable <name>]");
+        }
+    }
+}
+
+/// /settings — View and modify settings
+fn handle_settings_command(project_dir: &str, args: &[&str]) {
+    use miniclaudecode_rust::multi_settings::MultiSourceSettings;
+    let ms = MultiSourceSettings::new(project_dir);
+
+    if args.is_empty() {
+        let merged = ms.merged();
+        if merged.is_empty() {
+            println!("No settings configured.");
+            return;
+        }
+        println!("Effective Settings:");
+        for (k, v) in &merged {
+            let source = ms.source_of(k);
+            println!("  {} = {} (from {})", k, v, source);
+        }
+        return;
+    }
+
+    match args[0] {
+        "sources" => {
+            println!("Settings Sources:");
+            for src in ms.sources() {
+                let status = if src.path.is_empty() {
+                    "built-in"
+                } else if src.loaded {
+                    "loaded"
+                } else {
+                    "not loaded"
+                };
+                println!("  [{}] {} — {} keys ({})", src.level, src.path, src.values.len(), status);
+            }
+        }
+        "get" => {
+            if args.len() < 2 {
+                println!("Usage: /settings get <key>");
+                return;
+            }
+            if let Some(v) = ms.get(args[1]) {
+                let source = ms.source_of(args[1]);
+                println!("{} = {} (from {})", args[1], v, source);
+            } else {
+                println!("{}: not set", args[1]);
+            }
+        }
+        "set" => {
+            if args.len() < 3 {
+                println!("Usage: /settings set <key> <value>");
+                return;
+            }
+            println!("Set {} = {} (session-level, not persisted)", args[1], args[2]);
+        }
+        _ => {
+            println!("Usage: /settings [sources|get <key>|set <key> <value>]");
+        }
+    }
+}
+
+/// /telemetry — View telemetry events
+fn handle_telemetry_command(args: &[&str]) {
+    let tm = miniclaudecode_rust::telemetry::TelemetryManager::new(false);
+    tm.load_from_file();
+
+    if args.is_empty() {
+        let summary = tm.summary();
+        if summary.is_empty() {
+            println!("No telemetry events recorded.");
+            return;
+        }
+        println!("Telemetry Summary:");
+        for (name, count) in &summary {
+            println!("  {}: {} events", name, count);
+        }
+        let status = if tm.is_enabled() { "enabled" } else { "disabled" };
+        println!("Status: {}", status);
+        return;
+    }
+
+    match args[0] {
+        "recent" => {
+            let n = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let events = tm.get_recent(n);
+            for e in &events {
+                println!("[{}] {} ({}ms)", e.timestamp, e.name, e.duration_ms.unwrap_or(0));
+            }
+        }
+        "enable" => {
+            println!("Telemetry enabled.");
+        }
+        "disable" => {
+            println!("Telemetry disabled.");
+        }
+        "clear" => {
+            let dir = PathBuf::from(".claude/telemetry");
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::create_dir_all(&dir);
+            println!("Telemetry logs cleared.");
+        }
+        _ => {
+            println!("Unknown telemetry command: {}", args[0]);
+            println!("Usage: /telemetry [recent [N]|enable|disable|clear]");
+        }
+    }
+}
+
+/// /status — Show session status
+fn handle_status_command(agent: &agent_loop::AgentLoop) {
+    use miniclaudecode_rust::cost_tracker::format_token_count;
+    use miniclaudecode_rust::compact::model_context_window;
+
+    let model = agent.config.model.clone();
+    let perm_mode = format!("{}", agent.config.permission_mode.lock()
+        .map(|m| format!("{}", m)).unwrap_or_else(|_| "unknown".to_string()));
+    let msg_count = agent.message_count();
+    let est_tokens = agent.estimated_tokens();
+    let window = model_context_window(&model);
+    let remaining = (window as i64).saturating_sub(agent.total_tokens());
+
+    let input_tokens = agent.total_input_tokens();
+    let output_tokens = agent.total_output_tokens();
+
+    println!("\n=== Session Status ===");
+    println!("Model: {}", model);
+    println!("Mode:  {}", perm_mode);
+    println!("Messages: {} (est. {} tokens)", msg_count, format_token_count(est_tokens as i64));
+    println!("Token Budget: {} remaining", format_token_count(remaining));
+    println!("Input Tokens:    {}", format_token_count(input_tokens));
+    println!("Output Tokens:   {}", format_token_count(output_tokens));
+    println!("Cache Hit Rate:  N/A (cache tokens not separately tracked)");
+    println!("Turns:           {}", agent.turns_consumed());
+    if agent.use_stream {
+        println!("Streaming:       enabled");
+    } else {
+        println!("Streaming:       disabled");
+    }
+    println!("======================");
+}
+
+/// /model — View and switch models
+fn handle_model_command(agent: &mut agent_loop::AgentLoop, args: &[&str]) {
+    use miniclaudecode_rust::model_aliases::{
+        resolve_model_alias, get_default_opus_model, get_default_sonnet_model,
+        get_default_haiku_model, extract_canonical_model_name, get_context_window_for_model,
+    };
+    use miniclaudecode_rust::compact::model_context_window;
+
+    if args.is_empty() {
+        let current = agent.config.model.clone();
+        let canonical = extract_canonical_model_name(&current);
+        let window = get_context_window_for_model(&current);
+        println!("Current model: {} ({})", current, canonical);
+        println!("Context window: {} tokens", miniclaudecode_rust::cost_tracker::format_token_count(window));
+        println!("\nUsage: /model <alias> to switch models");
+        println!("Available aliases: sonnet, opus, haiku");
+        println!("Or use a full model ID (e.g., claude-sonnet-4-20250514, M2.7)");
+        return;
+    }
+
+    let subcmd = args[0].to_lowercase();
+    match subcmd.as_str() {
+        "list" | "ls" | "aliases" => {
+            println!("Available models:");
+            println!("  Aliases:");
+            println!("    sonnet  → {}", get_default_sonnet_model());
+            println!("    opus    → {}", get_default_opus_model());
+            println!("    haiku   → {}", get_default_haiku_model());
+            println!("\n  Or use a full model ID to switch directly.");
+        }
+        _ => {
+            let target = args[0];
+            let (resolved, was_alias) = resolve_model_alias(target);
+            if was_alias {
+                println!("Switching model: {} → {}", target, resolved);
+            } else {
+                println!("Switching model: {}", resolved);
+            }
+            agent.config.model = resolved;
+            // Update compactor's max tokens for the new model
+            let window = model_context_window(&agent.config.model);
+            agent.compactor_set_max_tokens(window);
+        }
+    }
+}
+

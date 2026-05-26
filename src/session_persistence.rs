@@ -167,6 +167,48 @@ pub fn delete_session(project_dir: &str, session_id: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Convenience wrapper: save a conversation snapshot from an AgentLoop.
+/// Extracts all relevant fields from the agent.
+pub fn save_conversation_from_agent<L: AgentLoopSnapshot>(
+    project_dir: &str,
+    session_id: &str,
+    agent: &L,
+) -> Result<String, String> {
+    let snap = agent.snapshot(session_id, project_dir);
+    save_conversation_snapshot(project_dir, snap)
+}
+
+/// Save a pre-built snapshot to disk.
+pub fn save_conversation_snapshot(
+    project_dir: &str,
+    snap: SerializedConversation,
+) -> Result<String, String> {
+    if project_dir.is_empty() || snap.session_id.is_empty() {
+        return Err("project_dir and session_id are required".to_string());
+    }
+
+    let dir = sessions_dir(project_dir);
+    if let Err(e) = fs::create_dir_all(&dir) {
+        return Err(format!("failed to create sessions directory: {}", e));
+    }
+
+    let path = dir.join(format!("{}.json", snap.session_id));
+
+    let data = serde_json::to_string_pretty(&snap)
+        .map_err(|e| format!("failed to marshal conversation: {}", e))?;
+
+    fs::write(&path, data)
+        .map_err(|e| format!("failed to write session file: {}", e))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Trait for extracting a conversation snapshot from an agent loop.
+/// Implemented in main.rs to avoid circular dependency.
+pub trait AgentLoopSnapshot {
+    fn snapshot(&self, session_id: &str, project_dir: &str) -> SerializedConversation;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

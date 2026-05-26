@@ -2263,6 +2263,11 @@ impl Compactor {
         self.transcript_path = Some(path);
     }
 
+    /// Set the max tokens for the context window (for model switching).
+    pub fn set_max_tokens(&mut self, max: usize) {
+        self.max_tokens = max;
+    }
+
     /// Get the transcript path as Option<&str> for passing to compact functions
     pub fn get_transcript_path(&self) -> Option<&str> {
         self.transcript_path.as_deref()

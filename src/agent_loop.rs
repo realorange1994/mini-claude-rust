@@ -3987,6 +3987,59 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             + self.total_output_tokens.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Get total input tokens consumed by this agent across all turns.
+    pub fn total_input_tokens(&self) -> i64 {
+        self.total_input_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get total output tokens consumed by this agent across all turns.
+    pub fn total_output_tokens(&self) -> i64 {
+        self.total_output_tokens.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get total cache read tokens (placeholder: returns 0 since not separately tracked).
+    pub fn total_cache_read_tokens(&self) -> i64 {
+        // Cache tokens are not separately tracked as atomic counters yet.
+        0
+    }
+
+    /// Get total cache creation tokens (placeholder: returns 0 since not separately tracked).
+    pub fn total_cache_creation_tokens(&self) -> i64 {
+        // Cache tokens are not separately tracked as atomic counters yet.
+        0
+    }
+
+    /// Get the estimated token count for the current context.
+    pub fn estimated_tokens(&self) -> usize {
+        self.context.blocking_read().estimated_tokens()
+    }
+
+    /// Get the message count in the current context.
+    pub fn message_count(&self) -> usize {
+        self.context.blocking_read().len()
+    }
+
+    /// Get a read lock on the context for inspection.
+    pub fn context_read(&self) -> tokio::sync::RwLockReadGuard<'_, ConversationContext> {
+        self.context.blocking_read()
+    }
+
+    /// Get a write lock on the context for modification.
+    pub fn context_write(&self) -> tokio::sync::RwLockWriteGuard<'_, ConversationContext> {
+        self.context.blocking_write()
+    }
+
+    /// Update the compactor's max tokens (e.g., after model switch).
+    pub fn compactor_set_max_tokens(&self, max: usize) {
+        let mut compactor = self.compactor.blocking_write();
+        compactor.set_max_tokens(max);
+    }
+
+    /// Get the number of turns consumed by this agent.
+    pub fn turns_consumed(&self) -> usize {
+        self.total_input_tokens.load(std::sync::atomic::Ordering::SeqCst) as usize // rough proxy
+    }
+
     /// Record token usage from a single API response.
     pub fn record_token_usage(&self, input_tokens: i64, output_tokens: i64) {
         if input_tokens > 0 {
