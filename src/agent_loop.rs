@@ -717,12 +717,14 @@ impl AgentLoop {
         }
     }
 
-    /// Convert conversation entries to API message format (sync)
+    /// Convert conversation entries to API message format (sync).
+    /// Uses ConversationContext::build_messages() which handles compact boundaries,
+    /// tool result replacements, consecutive same-role merging, and orphaned tool result fixing.
     fn entries_to_messages(&self) -> Vec<serde_json::Value> {
         let mut ctx = self.context.blocking_write();
         ctx.validate_tool_pairing();
         ctx.fix_role_alternation();
-        Self::entries_to_messages_from_ctx(ctx.entries())
+        ctx.build_messages()
     }
 
     /// Build the system prompt, injecting dynamic state (skills, session state, todos).
@@ -814,13 +816,10 @@ impl AgentLoop {
     /// (matching Go: callWithRetryAndFallback calls ValidateToolPairing + FixRoleAlternation
     /// before BuildMessages).
     async fn entries_to_messages_async(&self) -> Vec<serde_json::Value> {
-        {
-            let mut ctx = self.context.write().await;
-            ctx.validate_tool_pairing();
-            ctx.fix_role_alternation();
-        }
-        let ctx = self.context.read().await;
-        Self::entries_to_messages_from_ctx(ctx.entries())
+        let mut ctx = self.context.write().await;
+        ctx.validate_tool_pairing();
+        ctx.fix_role_alternation();
+        ctx.build_messages()
     }
 
     /// Shared logic: convert entries to API message format.
@@ -878,13 +877,30 @@ impl AgentLoop {
                         "content": content
                     }));
                 }
-                MessageContent::Summary(text) => {
+                MessageContent::Summary(text)
+                | MessageContent::Attachment(text)
+                | MessageContent::AntiReplay(text)
+                | MessageContent::Goal(text) => {
                     messages.push(serde_json::json!({
                         "role": "user",
-                        "content": [{"type": "text", "text": text}]
+                        "content": [{"type": "text", "text": crate::context::SYSTEM_INJECTED_PREFIX.to_string() + text}]
                     }));
                 }
-                MessageContent::Attachment(text) => {
+                MessageContent::CompressionInstruction { level } => {
+                    let prompt = crate::context::build_compression_prompt(*level);
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": crate::context::SYSTEM_INJECTED_PREFIX.to_string() + &prompt}]
+                    }));
+                }
+                MessageContent::CompressedSummary { summary, chunk_path, .. } => {
+                    let mut text = crate::context::SYSTEM_INJECTED_PREFIX.to_string() + summary;
+                    if !chunk_path.is_empty() {
+                        text.push_str(&format!(
+                            "\n\n📁 **Current chunk archived at:** `{}`\n_Use `file_reader` tool to recall details from this chunk._",
+                            chunk_path
+                        ));
+                    }
                     messages.push(serde_json::json!({
                         "role": "user",
                         "content": [{"type": "text", "text": text}]

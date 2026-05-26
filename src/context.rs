@@ -215,6 +215,23 @@ pub enum MessageContent {
     /// Attachment content for post-compact recovery (role: user)
     /// Re-injects file/skill content after compaction
     Attachment(String),
+    /// Post-compaction rules to prevent re-execution of completed tasks.
+    /// Separated from the summary so it survives further compaction.
+    AntiReplay(String),
+    /// Structured goal block (pending/completed tasks, current work).
+    /// Separated from the summary so it survives further compaction.
+    Goal(String),
+    /// Inline compression instruction injected for cache-reusing compaction.
+    /// The instruction is appended as a user message so the next API call
+    /// reuses the prompt cache prefix.
+    CompressionInstruction { level: usize },
+    /// Parsed LLM response from inline compression. Wraps summary with
+    /// chunk anchors, topics metadata, and previous-chunks index.
+    CompressedSummary {
+        summary: String,
+        topics: String,
+        chunk_path: String,
+    },
 }
 
 /// A single message in the conversation history.
@@ -268,6 +285,14 @@ impl Message {
                 format!("[compact boundary: {}, {} tokens]", trigger, pre_compact_tokens)
             }
             MessageContent::Attachment(a) => a.clone(),
+            MessageContent::AntiReplay(a) => a.clone(),
+            MessageContent::Goal(g) => g.clone(),
+            MessageContent::CompressionInstruction { level } => {
+                format!("[compression instruction: level {}]", level)
+            }
+            MessageContent::CompressedSummary { summary, .. } => {
+                format!("[compressed summary: {}]", summary)
+            }
         }
     }
 
@@ -514,6 +539,9 @@ pub struct ConversationContext {
     tool_result_store: Option<ToolResultStore>,
     // Replacement state tracker for prompt cache stability
     content_replacement_state: Option<Arc<ContentReplacementState>>,
+    /// Redacted thinking blocks from assistant responses that arrived before
+    /// tool_use blocks. Must be re-submitted for context continuity.
+    pending_redacted_thinking: Vec<serde_json::Value>,
 }
 
 /// Represents a detected turn interruption in the conversation.
@@ -563,6 +591,7 @@ impl ConversationContext {
             is_compacted: false,
             tool_result_store: None,
             content_replacement_state: None,
+            pending_redacted_thinking: Vec::new(),
         }
     }
 
@@ -672,6 +701,165 @@ impl ConversationContext {
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
         self.truncate_if_needed();
+    }
+
+    /// Set pending redacted thinking data from a previous API response.
+    /// These opaque blobs must be re-submitted for context continuity.
+    pub fn set_pending_redacted_thinking(&mut self, data: Vec<serde_json::Value>) {
+        self.pending_redacted_thinking = data;
+    }
+
+    /// Build API-compatible message array from conversation history.
+    /// This is the Rust equivalent of Go's BuildMessages().
+    /// Finds the last compact boundary, converts all content types,
+    /// applies tool result replacements, merges consecutive same-role messages,
+    /// and fixes orphaned tool results.
+    pub fn build_messages(&mut self) -> Vec<serde_json::Value> {
+        // Consume pending redacted thinking (only used once)
+        let mut redacted_data: Vec<serde_json::Value> = std::mem::take(&mut self.pending_redacted_thinking);
+
+        // Copy replacement map for cache-stable serialization
+        let replacements: HashMap<String, String> = self.tool_result_replacements.clone();
+
+        // Find the last compact boundary. Entries at or after this point are preserved;
+        // everything before is dropped. This is the key mechanism that makes compaction
+        // actually reduce token usage — without this reset, old messages would still be
+        // included and compaction would be a no-op.
+        let boundary_idx = self.messages.iter().rposition(|m| m.is_compact_boundary());
+        let start_idx = boundary_idx.unwrap_or(0);
+
+        let mut messages: Vec<serde_json::Value> = Vec::with_capacity(self.messages.len() - start_idx);
+
+        for msg in &self.messages[start_idx..] {
+            let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+            let role = msg.role.as_str();
+
+            match &msg.content {
+                MessageContent::Text(text) => {
+                    content_blocks.push(serde_json::json!({
+                        "type": "text", "text": text
+                    }));
+                }
+                MessageContent::ToolUseBlocks(blocks) => {
+                    // Prepend redacted_thinking blocks to the first assistant tool_use message.
+                    // The API requires these opaque data blobs to be re-submitted for context
+                    // continuity when interleaved thinking is enabled.
+                    let consumed = !redacted_data.is_empty();
+                    if consumed {
+                        for block in &redacted_data {
+                            content_blocks.push(block.clone());
+                        }
+                    }
+                    for b in blocks {
+                        content_blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": b.id,
+                            "name": b.name,
+                            "input": b.input
+                        }));
+                    }
+                    // Consume after first use — only prepend to the first tool_use message
+                    if consumed {
+                        redacted_data.clear();
+                    }
+                }
+                MessageContent::ToolResultBlocks(blocks) => {
+                    for r in blocks {
+                        if let Some(repl) = replacements.get(&r.tool_use_id) {
+                            // Apply replacement for cache-stable serialization
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": r.tool_use_id,
+                                "content": [{"type": "text", "text": repl}],
+                                "is_error": r.is_error
+                            }));
+                        } else {
+                            let content_values: Vec<serde_json::Value> = r.content.iter()
+                                .filter_map(|c| serde_json::to_value(c).ok())
+                                .collect();
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": r.tool_use_id,
+                                "content": content_values,
+                                "is_error": r.is_error
+                            }));
+                        }
+                    }
+                }
+                MessageContent::CompactBoundary { .. } => {
+                    // The boundary itself is not sent to the API — it serves as the
+                    // cutoff marker. The API doesn't understand compact boundaries.
+                    continue;
+                }
+                MessageContent::Summary(text)
+                | MessageContent::Attachment(text)
+                | MessageContent::AntiReplay(text)
+                | MessageContent::Goal(text) => {
+                    content_blocks.push(serde_json::json!({
+                        "type": "text", "text": format!("{}{}", SYSTEM_INJECTED_PREFIX, text)
+                    }));
+                }
+                MessageContent::CompressionInstruction { level } => {
+                    let prompt = build_compression_prompt(*level);
+                    content_blocks.push(serde_json::json!({
+                        "type": "text", "text": format!("{}{}", SYSTEM_INJECTED_PREFIX, prompt)
+                    }));
+                }
+                MessageContent::CompressedSummary { summary, chunk_path, .. } => {
+                    let mut text = format!("{}{}", SYSTEM_INJECTED_PREFIX, summary);
+                    if !chunk_path.is_empty() {
+                        text.push_str(&format!(
+                            "\n\n📁 **Current chunk archived at:** `{}`\n_Use `file_reader` tool to recall details from this chunk._",
+                            chunk_path
+                        ));
+                    }
+                    content_blocks.push(serde_json::json!({
+                        "type": "text", "text": text
+                    }));
+                }
+            }
+
+            if !content_blocks.is_empty() {
+                messages.push(serde_json::json!({
+                    "role": role,
+                    "content": content_blocks
+                }));
+            }
+        }
+
+        // Merge consecutive same-role messages (API requires strict alternation).
+        // This handles cases where fix_role_alternation couldn't merge due to
+        // type mismatches (e.g., ToolResultContent + TextContent both user role).
+        // The API allows a single user message to contain mixed text and tool_result blocks.
+        let mut merged: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if let Some(last) = merged.last_mut() {
+                    if let Some(last_role) = last.get("role").and_then(|r| r.as_str()) {
+                        if last_role == role {
+                            // Merge content blocks
+                            if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                if let Some(new_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                                    arr.extend(new_blocks.clone());
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            merged.push(msg);
+        }
+
+        // Fix orphaned tool_results: when the compact boundary drops tool_use
+        // entries that precede it, their matching tool_results in the kept tail
+        // become orphaned. Instead of silently stripping them and inserting
+        // "Tool execution was interrupted", inject synthetic tool_use blocks
+        // for any tool_result whose tool_use_id is not present in any assistant
+        // message's tool_use blocks.
+        merged = fix_orphaned_tool_results(merged);
+
+        merged
     }
 
     /// Get all messages
@@ -1424,49 +1612,32 @@ impl ConversationContext {
         if rules.is_empty() {
             return;
         }
-        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, rules);
-        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+        self.messages.push(Message::new(MessageRole::User, MessageContent::AntiReplay(rules.to_string())));
     }
 
-    /// Add a goal block as a user message with the system-injected prefix.
+    /// Add a goal block as a user message.
     pub fn add_goal_block(&mut self, content: &str) {
-        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, content);
-        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+        self.messages.push(Message::new(MessageRole::User, MessageContent::Goal(content.to_string())));
     }
 
-    /// Add compression instruction as a user message with the system-injected prefix.
+    /// Add compression instruction as a user message.
     pub fn add_compression_instruction(&mut self, level: usize) {
-        let instruction = match level {
-            0 => "Compress the conversation history, keeping recent turns intact.".to_string(),
-            1 => "Aggressively compress the conversation history. Keep only the most recent turn and critical context.".to_string(),
-            _ => "Maximum compression: keep only the bare minimum of context needed to continue.".to_string(),
-        };
-        let msg = format!("{}{}", SYSTEM_INJECTED_PREFIX, instruction);
-        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(msg)));
+        self.messages.push(Message::new(MessageRole::User, MessageContent::CompressionInstruction { level }));
     }
 
-    /// Add a compressed summary as a user message with the system-injected prefix.
+    /// Add a compressed summary as a user message.
     pub fn add_compressed_summary(&mut self, summary: &str, topics: &str, chunk_path: &str) {
-        let mut text = format!("{}{}", SYSTEM_INJECTED_PREFIX, summary);
-        if !topics.is_empty() {
-            text.push_str(&format!("\nTopics: {}", topics));
-        }
-        if !chunk_path.is_empty() {
-            text.push_str(&format!("\n\nCurrent chunk archived at: `{}`\nUse `file_reader` tool to recall details from this chunk.", chunk_path));
-        }
-        self.messages.push(Message::new(MessageRole::User, MessageContent::Text(text)));
+        self.messages.push(Message::new(MessageRole::User, MessageContent::CompressedSummary {
+            summary: summary.to_string(),
+            topics: topics.to_string(),
+            chunk_path: chunk_path.to_string(),
+        }));
     }
 
     /// Check if a compression instruction has already been added.
     pub fn has_compression_instruction(&self) -> bool {
         self.messages.iter().any(|m| {
-            if let MessageContent::Text(t) = &m.content {
-                t.contains("Compress the conversation history")
-                    || t.contains("Aggressively compress")
-                    || t.contains("Maximum compression")
-            } else {
-                false
-            }
+            matches!(&m.content, MessageContent::CompressionInstruction { .. })
         })
     }
 
@@ -2274,6 +2445,10 @@ fn estimate_message_tokens(msg: &Message) -> usize {
         }
         MessageContent::Attachment(a) => estimate_text_tokens(a),
         MessageContent::CompactBoundary { .. } => 0, // boundary markers are small
+        MessageContent::AntiReplay(a) => estimate_text_tokens(a),
+        MessageContent::Goal(g) => estimate_text_tokens(g),
+        MessageContent::CompressionInstruction { level } => estimate_text_tokens(&build_compression_prompt(*level)),
+        MessageContent::CompressedSummary { summary, .. } => estimate_text_tokens(summary),
     }
 }
 
@@ -2301,6 +2476,118 @@ fn estimate_text_tokens(text: &str) -> usize {
 //   - compression_level: usize
 //   - tool_result_store: Option<ToolResultStore>
 //   - content_replacement_state: Option<Arc<ContentReplacementState>>
+
+// ─── Orphaned Tool Result Fixing ──────────────────────────────────────────────
+
+/// Fix orphaned tool_results: when the compact boundary drops tool_use
+/// entries that precede it, their matching tool_results in the kept tail
+/// become orphaned. Instead of silently stripping them and inserting
+/// "Tool execution was interrupted", inject synthetic tool_use blocks
+/// for any tool_result whose tool_use_id is not present in any assistant
+/// message's tool_use blocks.
+/// This preserves the real tool result while satisfying API pairing requirements.
+fn fix_orphaned_tool_results(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    // Step 1: Collect all tool_use IDs from assistant messages
+    let mut all_tool_use_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in &messages {
+        if let Some("assistant") = msg.get("role").and_then(|r| r.as_str()) {
+            if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if let Some("tool_use") = block.get("type").and_then(|t| t.as_str()) {
+                        if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                            all_tool_use_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: Find orphaned tool_results and pair them with their preceding
+    // assistant message by injecting synthetic tool_use blocks
+    let mut result = messages.clone();
+
+    for i in 0..result.len() {
+        if let Some("user") = result[i].get("role").and_then(|r| r.as_str()) {
+            // Find orphaned tool_results in this user message
+            let mut orphaned: Vec<serde_json::Value> = Vec::new();
+            if let Some(blocks) = result[i].get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if let Some("tool_result") = block.get("type").and_then(|t| t.as_str()) {
+                        if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                            if !id.is_empty() && !all_tool_use_ids.contains(id) {
+                                orphaned.push(block.clone());
+                                all_tool_use_ids.insert(id.to_string()); // mark as handled
+                            }
+                        }
+                    }
+                }
+            }
+            if orphaned.is_empty() {
+                continue;
+            }
+
+            // Inject synthetic tool_use into preceding assistant message
+            if i > 0 {
+                if let Some("assistant") = result[i - 1].get("role").and_then(|r| r.as_str()) {
+                    let synth_blocks: Vec<serde_json::Value> = orphaned.iter().map(|o| {
+                        let tool_use_id = o.get("tool_use_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let tool_name = infer_tool_name_from_result(o);
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": tool_name,
+                            "input": {}
+                        })
+                    }).collect();
+
+                    // Prepend synthetic tool_use blocks to the existing content
+                    if let Some(existing) = result[i - 1].get_mut("content").and_then(|c| c.as_array_mut()) {
+                        let mut new_content: Vec<serde_json::Value> = synth_blocks;
+                        new_content.extend(existing.drain(..));
+                        *existing = new_content;
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Infer a tool name from an orphaned tool_result.
+/// Since the original tool_use is missing, we use content heuristics to provide
+/// a meaningful placeholder that preserves conversation context.
+fn infer_tool_name_from_result(result: &serde_json::Value) -> String {
+    if let Some(blocks) = result.get("content") {
+        if let Some(blocks_arr) = blocks.as_array() {
+            for block in blocks_arr {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    // Heuristics based on common tool output patterns
+                    if text.contains("lines") && text.contains("───") {
+                        return "read_file".to_string();
+                    }
+                    if text.contains("$ ") || text.contains("> ") {
+                        return "bash".to_string();
+                    }
+                    if text.contains("commit") || text.contains("branch") {
+                        return "git".to_string();
+                    }
+                    if text.contains("Found") && text.contains("match") {
+                        return "grep".to_string();
+                    }
+                    if text.contains("wrote") || text.contains("modified") {
+                        return "edit_file".to_string();
+                    }
+                    if text.contains("directory") || text.contains("files") {
+                        return "list_directory".to_string();
+                    }
+                }
+            }
+        }
+    }
+    "unknown_tool".to_string()
+}
 
 #[cfg(test)]
 mod tests {

@@ -9,6 +9,7 @@ pub mod claudemd;
 pub mod cleanup;
 pub mod compact;
 pub mod config;
+pub mod idle_compress;
 pub mod context;
 pub mod cost_tracker;
 pub mod cron;

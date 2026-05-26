@@ -353,7 +353,11 @@ pub fn clone_context_for_fork(
             MessageContent::Text(_)
             | MessageContent::ToolUseBlocks(_)
             | MessageContent::ToolResultBlocks(_)
-            | MessageContent::Summary(_) => {
+            | MessageContent::Summary(_)
+            | MessageContent::AntiReplay(_)
+            | MessageContent::Goal(_)
+            | MessageContent::CompressionInstruction { .. }
+            | MessageContent::CompressedSummary { .. } => {
                 cloned.push(entry.clone());
             }
             MessageContent::CompactBoundary { .. } | MessageContent::Attachment(_) => {
@@ -520,7 +524,11 @@ pub fn spawn_sub_agent_sync(
                             MessageContent::Text(_)
                             | MessageContent::ToolUseBlocks(_)
                             | MessageContent::ToolResultBlocks(_)
-                            | MessageContent::Summary(_) => {
+                            | MessageContent::Summary(_)
+                            | MessageContent::AntiReplay(_)
+                            | MessageContent::Goal(_)
+                            | MessageContent::CompressionInstruction { .. }
+                            | MessageContent::CompressedSummary { .. } => {
                                 cloned.push(entry.clone());
                             }
                             MessageContent::CompactBoundary { .. }

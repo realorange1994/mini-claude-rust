@@ -162,6 +162,18 @@ pub fn estimate_message_tokens(msg: &Message) -> usize {
         MessageContent::Attachment(text) => {
             3 + estimate_tokens_typed(text)
         }
+        MessageContent::AntiReplay(text) => {
+            3 + estimate_tokens_typed(text)
+        }
+        MessageContent::Goal(text) => {
+            3 + estimate_tokens_typed(text)
+        }
+        MessageContent::CompressionInstruction { level } => {
+            3 + estimate_tokens_typed(&crate::context::build_compression_prompt(*level))
+        }
+        MessageContent::CompressedSummary { summary, .. } => {
+            3 + estimate_tokens_typed(summary)
+        }
     }
 }
 
@@ -1884,14 +1896,33 @@ fn message_to_api(msg: &Message) -> Option<serde_json::Value> {
                 "content": content
             }))
         }
-        MessageContent::Summary(text) => Some(serde_json::json!({
+        MessageContent::Summary(text)
+        | MessageContent::Attachment(text)
+        | MessageContent::AntiReplay(text)
+        | MessageContent::Goal(text) => Some(serde_json::json!({
             "role": "user",
             "content": [{"type": "text", "text": text}]
         })),
-        MessageContent::Attachment(text) => Some(serde_json::json!({
-            "role": "user",
-            "content": [{"type": "text", "text": text}]
-        })),
+        MessageContent::CompressionInstruction { level } => {
+            let prompt = crate::context::build_compression_prompt(*level);
+            Some(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}]
+            }))
+        }
+        MessageContent::CompressedSummary { summary, chunk_path, .. } => {
+            let mut text = summary.clone();
+            if !chunk_path.is_empty() {
+                text.push_str(&format!(
+                    "\n\nCurrent chunk archived at: `{}`\nUse `file_reader` tool to recall details from this chunk.",
+                    chunk_path
+                ));
+            }
+            Some(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": text}]
+            }))
+        }
         MessageContent::CompactBoundary { .. } => {
             // Skip compact boundaries when sending to compact API
             // They're already summarized

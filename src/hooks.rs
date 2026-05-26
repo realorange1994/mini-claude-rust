@@ -3,9 +3,14 @@
 //! Provides pre-compact and post-compact hook registration and execution.
 //! Hooks are called synchronously with a timeout context.
 
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
-
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 /// Trigger type for compaction events
@@ -337,6 +342,444 @@ impl HookManager {
         let prelude = self.post_compact_prelude.lock().await.len();
         let epilogue = self.post_compact_epilogue.lock().await.len();
         pre + prelude + epilogue
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shell Hook Infrastructure
+// ---------------------------------------------------------------------------
+
+/// Events that can trigger hooks, matching Go's HookEvent constants.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookEvent {
+    PreToolUse,
+    PostToolUse,
+    PreUserMessage,
+    PostUserMessage,
+    PreAssistantMessage,
+    PostAssistantMessage,
+    PreApiCall,
+    PostApiCall,
+    OnError,
+    OnAbort,
+    OnNotification,
+    OnSubagent,
+    OnFork,
+    OnResume,
+    Stop,
+}
+
+/// JSON-serializable input sent to a shell hook via stdin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellHookInput {
+    pub session_id: String,
+    #[serde(rename = "hookEventName")]
+    pub hook_event_name: String,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub tool_result: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Parsed output from a shell hook's stdout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellHookOutput {
+    #[serde(default)]
+    pub decision: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default, rename = "suppressOutput")]
+    pub suppress_output: bool,
+    #[serde(default, rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
+    #[serde(default, rename = "hookSpecificOutput")]
+    pub hook_specific_output: Option<serde_json::Value>,
+}
+
+impl Default for ShellHookOutput {
+    fn default() -> Self {
+        Self {
+            decision: "approve".into(),
+            reason: None,
+            suppress_output: false,
+            updated_input: None,
+            hook_specific_output: None,
+        }
+    }
+}
+
+/// A shell command hook loaded from settings.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookCommand {
+    pub matcher: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub r#async: bool,
+    #[serde(default)]
+    pub r#type: Option<String>,
+}
+
+/// HookConfig maps event names to lists of HookCommand.
+pub type HookConfig = HashMap<String, Vec<HookCommand>>;
+
+/// Result of executing a shell hook.
+#[derive(Debug, Clone)]
+pub struct HookShellResult {
+    pub decision: String,
+    pub reason: Option<String>,
+    pub permission_decision: Option<String>,
+    pub permission_decision_reason: Option<String>,
+    pub updated_input: Option<serde_json::Value>,
+    pub suppress_output: bool,
+    pub stop_reason: Option<String>,
+    pub system_message: Option<String>,
+    pub raw_stdout: String,
+    pub raw_stderr: String,
+    pub exit_code: i32,
+}
+
+impl HookShellResult {
+    /// Returns true if this hook result indicates the tool should be blocked.
+    pub fn should_block(&self) -> bool {
+        self.decision == "block" || self.permission_decision.as_deref() == Some("deny")
+    }
+
+    /// Returns true if the hook wants the user to be prompted.
+    pub fn should_ask(&self) -> bool {
+        self.permission_decision.as_deref() == Some("ask")
+    }
+
+    /// Returns the reason why the hook blocked the tool.
+    pub fn block_reason(&self) -> String {
+        self.permission_decision_reason
+            .clone()
+            .or(self.reason.clone())
+            .unwrap_or_else(|| "Blocked by hook".to_string())
+    }
+
+    /// Parse hook stdout for JSON output.
+    pub fn parse_stdout(&mut self) {
+        let stdout = self.raw_stdout.trim();
+        if stdout.is_empty() || !stdout.starts_with('{') {
+            return;
+        }
+
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout) else {
+            return;
+        };
+
+        if let Some(v) = parsed.get("continue").and_then(|v| v.as_bool()) {
+            if !v {
+                self.decision = "block".to_string();
+            }
+        }
+        if let Some(v) = parsed.get("suppressOutput").and_then(|v| v.as_bool()) {
+            self.suppress_output = v;
+        }
+        if let Some(v) = parsed.get("decision").and_then(|v| v.as_str()) {
+            self.decision = v.to_string();
+        }
+        if let Some(v) = parsed.get("reason").and_then(|v| v.as_str()) {
+            self.reason = Some(v.to_string());
+        }
+        if let Some(v) = parsed.get("stopReason").and_then(|v| v.as_str()) {
+            self.stop_reason = Some(v.to_string());
+        }
+        if let Some(v) = parsed.get("systemMessage").and_then(|v| v.as_str()) {
+            self.system_message = Some(v.to_string());
+        }
+
+        // Extract hookSpecificOutput for PreToolUse hooks
+        if let Some(spec) = parsed.get("hookSpecificOutput").and_then(|v| v.as_object()) {
+            if let Some(v) = spec.get("permissionDecision").and_then(|v| v.as_str()) {
+                self.permission_decision = Some(v.to_string());
+            }
+            if let Some(v) = spec.get("permissionDecisionReason").and_then(|v| v.as_str()) {
+                self.permission_decision_reason = Some(v.to_string());
+            }
+            if let Some(v) = spec.get("updatedInput") {
+                self.updated_input = Some(v.clone());
+            }
+            if self.system_message.is_none() {
+                if let Some(v) = spec.get("additionalContext").and_then(|v| v.as_str()) {
+                    self.system_message = Some(v.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// HookBlockError signals that a PreToolUse hook blocked tool execution.
+#[derive(Debug)]
+pub struct HookBlockError {
+    pub tool_name: String,
+    pub command: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for HookBlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Hook blocked {}: {} (command: {})", self.tool_name, self.reason, self.command)
+    }
+}
+
+impl std::error::Error for HookBlockError {}
+
+/// Check if a hook's matcher pattern matches the given query string.
+/// Supports exact match and glob patterns (* and ?).
+pub fn match_hook(hook: &HookCommand, query: &str) -> bool {
+    let Some(pattern) = &hook.matcher else {
+        return true; // no matcher = match all
+    };
+    if pattern == query {
+        return true;
+    }
+    hook_glob_match(pattern, query)
+}
+
+/// Perform simple glob pattern matching for hook matchers.
+/// Supports * (any characters) and ? (single character).
+fn hook_glob_match(pattern: &str, text: &str) -> bool {
+    let p_bytes = pattern.as_bytes();
+    let t_bytes = text.as_bytes();
+    let p_len = p_bytes.len();
+    let t_len = t_bytes.len();
+
+    // dp[i][j] = can pattern[..i] match text[..j]?
+    let mut dp = vec![vec![false; t_len + 1]; p_len + 1];
+    dp[0][0] = true;
+
+    for i in 1..=p_len {
+        if p_bytes[i - 1] == b'*' {
+            dp[i][0] = dp[i - 1][0];
+        }
+        for j in 1..=t_len {
+            if p_bytes[i - 1] == b'*' {
+                dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
+            } else if p_bytes[i - 1] == b'?' || p_bytes[i - 1] == t_bytes[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1];
+            }
+        }
+    }
+    dp[p_len][t_len]
+}
+
+/// Build environment variables for a hook command.
+fn build_hook_env(extra: Option<&HashMap<String, String>>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_str = cwd.display().to_string();
+        env.push(("CLAUDE_PROJECT_DIR".to_string(), cwd_str.clone()));
+        env.push(("CLAUDE_CWD".to_string(), cwd_str));
+    }
+
+    if let Some(extra) = extra {
+        for (k, v) in extra {
+            env.push((k.clone(), v.clone()));
+        }
+    }
+
+    env
+}
+
+/// Execute a shell command hook with JSON input via stdin.
+/// Spawns a shell process, passes serialized input as JSON, parses stdout.
+pub async fn execute_shell_hook(
+    hook: &HookCommand,
+    event: &str,
+    json_input: &str,
+    extra_env: Option<&HashMap<String, String>>,
+) -> Result<HookShellResult, String> {
+    let timeout = Duration::from_secs(hook.timeout.unwrap_or(600)); // default 10 min
+
+    // Determine shell and build command
+    let shell_type = hook.shell.as_deref().unwrap_or("bash");
+    let (prog, args): (&str, Vec<&str>) = if cfg!(target_os = "windows") {
+        if shell_type == "powershell" {
+            ("powershell", vec!["-NoProfile", "-NonInteractive", "-Command", &hook.command])
+        } else {
+            // On Windows, prefer Git Bash if available
+            if let Some(bash) = detect_git_bash_for_hook() {
+                (bash, vec!["-c", &hook.command])
+            } else {
+                ("cmd", vec!["/c", &hook.command])
+            }
+        }
+    } else {
+        ("sh", vec!["-c", &hook.command])
+    };
+
+    let mut cmd = tokio::process::Command::new(prog);
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    cmd.envs(build_hook_env(extra_env));
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.current_dir(cwd);
+    }
+
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to start hook command: {e}"))?;
+
+    // Write JSON input to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        let input_bytes = format!("{json_input}\n").into_bytes();
+        let _ = stdin.write_all(&input_bytes).await;
+    }
+
+    // Read stdout and stderr with timeout
+    let stdout_future = async {
+        let mut buf = Vec::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = stdout.read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    };
+
+    let stderr_future = async {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = stderr.read_to_end(&mut buf).await;
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    };
+
+    let (raw_stdout, raw_stderr) = tokio::join!(stdout_future, stderr_future);
+
+    let exit_code = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status.code().unwrap_or(-1),
+        Ok(Err(e)) => return Err(format!("Hook command failed: {e}")),
+        Err(_) => return Err(format!("Hook timed out after {:?}", timeout)),
+    };
+
+    let mut result = HookShellResult {
+        decision: String::new(),
+        reason: None,
+        permission_decision: None,
+        permission_decision_reason: None,
+        updated_input: None,
+        suppress_output: false,
+        stop_reason: None,
+        system_message: None,
+        raw_stdout,
+        raw_stderr,
+        exit_code,
+    };
+
+    result.parse_stdout();
+
+    Ok(result)
+}
+
+/// Find Git Bash executable on Windows.
+fn detect_git_bash_for_hook() -> Option<String> {
+    // Check CLAUDE_CODE_GIT_BASH_PATH env var
+    if let Ok(path) = std::env::var("CLAUDE_CODE_GIT_BASH_PATH") {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+
+    // Check common locations
+    let candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ];
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+
+    // Try PATH
+    if let Ok(p) = which::which("bash") {
+        return p.to_str().map(|s| s.to_string());
+    }
+
+    None
+}
+
+/// Load hooks from a settings.json file.
+pub fn load_hooks_from_settings(file_path: &str) -> Result<HookConfig, String> {
+    let data = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("Failed to read settings file: {e}"))?;
+
+    let raw: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| format!("Failed to parse settings JSON: {e}"))?;
+
+    let Some(hooks_raw) = raw.get("hooks") else {
+        return Ok(HookConfig::new());
+    };
+
+    let Some(hooks_map) = hooks_raw.as_object() else {
+        return Err("hooks must be an object".to_string());
+    };
+
+    let mut result = HookConfig::new();
+    for (event_name, hook_list) in hooks_map {
+        let Some(hooks) = hook_list.as_array() else {
+            continue;
+        };
+        for h in hooks {
+            let hook_json = serde_json::to_string(h).unwrap_or_default();
+            let Ok(hook) = serde_json::from_str::<HookCommand>(&hook_json) else {
+                continue;
+            };
+            let event_key = capitalize_first(event_name);
+            result.entry(event_key).or_default().push(hook);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Load hooks from all config sources (project + home).
+pub fn load_all_hooks(project_dir: &str) -> HookConfig {
+    let mut result = HookConfig::new();
+
+    // Project-level settings
+    let project_path = std::path::Path::new(project_dir)
+        .join(".claude")
+        .join("settings.json");
+    if let Ok(hooks) = load_hooks_from_settings(project_path.to_str().unwrap_or("")) {
+        for (event, cmds) in hooks {
+            result.entry(event).or_default().extend(cmds);
+        }
+    }
+
+    // Home directory settings
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        let home_path = std::path::Path::new(&home)
+            .join(".claude")
+            .join("settings.json");
+        if let Ok(hooks) = load_hooks_from_settings(home_path.to_str().unwrap_or("")) {
+            for (event, cmds) in hooks {
+                result.entry(event).or_default().extend(cmds);
+            }
+        }
+    }
+
+    result
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
     }
 }
 
