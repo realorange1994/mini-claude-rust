@@ -184,6 +184,7 @@ pub mod bash_security;
 pub mod bash_readonly;
 pub mod exec_git_readonly;
 pub mod exec_powershell;
+pub mod json_repair;
 
 pub use path_safety::{resolve_path, path_escapes_workspace, WorkspaceTrust};
 pub use filesystem_safety::{PermissionBehavior, ToolPermissionResult, check_path_safety_for_auto_edit, is_dangerous_file_path, has_suspicious_windows_path_pattern};

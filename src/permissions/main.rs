@@ -161,6 +161,8 @@ pub struct PermissionGate {
     project_dir: Option<String>,
     /// Stripped dangerous rules (for auto mode restoration)
     stripped_rules: std::sync::Mutex<Option<Vec<(String, Vec<ParsedRule>)>>>,
+    /// Tools blocked at runtime but kept in registry (for fork sub-agents / cache sharing)
+    runtime_disallowed_tools: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl PermissionGate {
@@ -175,6 +177,7 @@ impl PermissionGate {
             rule_store: None,
             project_dir: None,
             stripped_rules: std::sync::Mutex::new(None),
+            runtime_disallowed_tools: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -192,6 +195,13 @@ impl PermissionGate {
     /// Set the transcript source for the classifier.
     pub fn set_transcript_source(&mut self, src: Arc<tokio::sync::RwLock<ConversationContext>>) {
         self.transcript_src = Some(src);
+    }
+
+    /// Set tools that are blocked at runtime (e.g., for fork sub-agents).
+    /// These tools remain in the registry but are denied during execution.
+    pub fn with_runtime_disallowed_tools(&self, tools: std::collections::HashSet<String>) {
+        let mut guard = self.runtime_disallowed_tools.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = tools;
     }
 
     /// Clear classifier cache and approval state after context compaction.
@@ -334,6 +344,18 @@ impl PermissionGate {
         };
 
         let tool_name = tool.name();
+
+        // Step 0a: Runtime-disallowed tools (e.g., fork sub-agents blocked tools)
+        {
+            let guard = self.runtime_disallowed_tools.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.contains(tool_name) {
+                return Some(ToolResult::error(format!(
+                    "Permission denied: '{}' is blocked at runtime.",
+                    tool_name
+                )));
+            }
+        }
+
         let upstream_name = super::upstream_to_internal(tool_name);
         let content = self.extract_rule_content(tool_name, &params);
         let path_param = self.extract_path_param(tool_name, &params);
@@ -762,6 +784,7 @@ impl Clone for PermissionGate {
             rule_store: None,
             project_dir: None,
             stripped_rules: std::sync::Mutex::new(None),
+            runtime_disallowed_tools: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 }

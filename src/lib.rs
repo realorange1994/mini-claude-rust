@@ -1,4 +1,8 @@
 pub mod agent_memory_updater;
+pub mod agent_profile;
+pub mod adaptive_prompt;
+pub mod redundant_call_detector;
+pub mod utf8_sanitize;
 pub mod agent_loop;
 pub mod agent_progress;
 pub mod agent_sub;
@@ -32,6 +36,7 @@ pub mod rate_limit;
 pub mod retry_utils;
 pub mod semver;
 pub mod session_memory;
+pub mod session_persistence;
 pub mod slice_ansi;
 pub mod skills;
 pub mod status;

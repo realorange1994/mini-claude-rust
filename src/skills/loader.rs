@@ -42,6 +42,95 @@ pub struct SkillInfo {
     pub paths: Vec<String>,
 }
 
+/// Represents a skill discovered from an MCP server resource.
+#[derive(Debug, Clone)]
+pub struct MCPSkillResource {
+    pub server: String,
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
+/// Interface trait for MCP skill discovery.
+/// Deliberately avoids direct import of the mcp package.
+pub trait MCPResourceClient: Send + Sync {
+    /// Discover skill resources from MCP servers.
+    fn discover_skill_resources(&self) -> Vec<MCPSkillResource>;
+}
+
+/// Orchestrates skill discovery from MCP servers.
+pub struct MCPSkillDiscovery {
+    client: Box<dyn MCPResourceClient>,
+}
+
+impl MCPSkillDiscovery {
+    /// Create a new MCP skill discovery instance.
+    pub fn new(client: Box<dyn MCPResourceClient>) -> Self {
+        Self { client }
+    }
+
+    /// Discover skills from MCP server resources.
+    /// Queries for skill:// resources and converts to SkillInfo.
+    pub fn discover_skills(&self) -> Vec<SkillInfo> {
+        let resources = self.client.discover_skill_resources();
+        if resources.is_empty() {
+            return Vec::new();
+        }
+
+        resources
+            .into_iter()
+            .map(|r| SkillInfo {
+                name: r.name.clone(),
+                path: r.uri.clone(),
+                source: format!("mcp:{}", r.server),
+                available: true,
+                always: false,
+                description: r.description.clone(),
+                commands: vec![format!("/{}", r.name)],
+                tags: Vec::new(),
+                version: String::new(),
+                missing_deps: Vec::new(),
+                when_to_use: String::new(),
+                paths: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Load skill content by name from a discovered MCP skill.
+    pub fn load_skill_content(&self, name: &str) -> Option<String> {
+        for r in self.client.discover_skill_resources() {
+            if r.name == name {
+                return Some(r.content);
+            }
+        }
+        None
+    }
+}
+
+/// Bridges an MCP manager to the MCPResourceClient interface.
+pub struct MCPManagerAdapter {
+    discover_fn: Box<dyn Fn() -> Vec<MCPSkillResource> + Send + Sync>,
+}
+
+impl MCPManagerAdapter {
+    /// Create a new adapter with a discovery function.
+    pub fn new<F>(discover_fn: F) -> Self
+    where
+        F: Fn() -> Vec<MCPSkillResource> + Send + Sync + 'static,
+    {
+        Self {
+            discover_fn: Box::new(discover_fn),
+        }
+    }
+}
+
+impl MCPResourceClient for MCPManagerAdapter {
+    fn discover_skill_resources(&self) -> Vec<MCPSkillResource> {
+        (self.discover_fn)()
+    }
+}
+
 impl SkillInfo {
     /// Check if this skill applies to the current project directory.
     pub fn is_applicable(&self, project_dir: &str) -> bool {
@@ -516,6 +605,106 @@ pub fn strip_frontmatter(content: &str) -> &str {
     }
 
     content.trim()
+}
+
+/// Parse frontmatter from SKILL.md content (public API with validation).
+/// Returns an error if frontmatter delimiters are missing or both name and description are empty.
+pub fn parse_frontmatter_public(content: &str) -> Result<SkillMeta, String> {
+    if !content.starts_with("---") {
+        return Err("Content does not start with frontmatter delimiter '---'".to_string());
+    }
+
+    let rest = &content[3..];
+    let end_idx = rest.find("\n---").ok_or("Missing closing frontmatter delimiter '---'")?;
+    let frontmatter = &rest[..end_idx];
+
+    if frontmatter.trim().is_empty() {
+        return Err("Frontmatter section is empty".to_string());
+    }
+
+    // Build a full content string to parse (with the opening --- already consumed)
+    let full_content = &content[..3 + end_idx + 4];
+    let meta = parse_frontmatter(full_content);
+
+    if meta.name.is_empty() && meta.description.is_empty() {
+        return Err("Frontmatter must contain either 'name' or 'description'".to_string());
+    }
+
+    Ok(meta)
+}
+
+/// Expand skill variables in content (alias matching Go's ExpandSkillVariables).
+/// Replaces ${CLAUDE_SKILL_DIR}, ${CLAUDE_SESSION_ID}, ${CLAUDE_PROJECT_DIR}, ${CLAUDE_CONFIG_DIR}.
+pub fn expand_skill_variables(
+    content: &str,
+    skill_dir: &str,
+    session_id: &str,
+) -> String {
+    SkillLoader::expand_skill_variables(content, skill_dir, session_id)
+}
+
+/// Expand skill content with arguments.
+/// Replaces $ARGUMENTS with all args joined, and $ARG_<NAME> with corresponding values.
+pub fn expand_skill_content(content: &str, args: &std::collections::HashMap<String, String>) -> String {
+    let mut result = content.to_string();
+
+    // Replace $ARGUMENTS with all values joined
+    if let Some(all_args) = args.get("ARGUMENTS") {
+        result = result.replace("$ARGUMENTS", all_args);
+    }
+
+    // Replace $ARG_<NAME> with corresponding values
+    for (key, value) in args {
+        if key.starts_with("ARG_") {
+            result = result.replace(&format!("${}", key), value);
+        }
+    }
+
+    result
+}
+
+/// Escape XML special characters in a string.
+/// Replaces & -> &amp;, < -> &lt;, > -> &gt;, " -> &quot;, ' -> &apos;.
+pub fn escape_xml(s: &str) -> String {
+    let s = s.replace('&', "&amp;");
+    let s = s.replace('<', "&lt;");
+    let s = s.replace('>', "&gt;");
+    let s = s.replace('"', "&quot;");
+    s.replace('\'', "&apos;")
+}
+
+/// Build an XML-formatted summary of available skills.
+/// Returns a <skills> root element with <skill> children for each skill.
+pub fn build_skills_summary(loader: &SkillLoader) -> String {
+    let mut parts = Vec::new();
+    parts.push("<skills>".to_string());
+
+    let mut skills: Vec<_> = loader.skills.values().collect();
+    skills.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+
+    for (info, _) in skills {
+        let avail = info.available.to_string();
+        let always = info.always.to_string();
+        parts.push(format!(
+            "  <skill available=\"{}\" always=\"{}\">",
+            escape_xml(&avail), escape_xml(&always)
+        ));
+        parts.push(format!("    <name>{}</name>", escape_xml(&info.name)));
+        parts.push(format!("    <description>{}</description>", escape_xml(&info.description)));
+        parts.push(format!("    <location>{}</location>", escape_xml(&format!("{}:{}", info.source, info.name))));
+
+        if !info.available && !info.missing_deps.is_empty() {
+            parts.push(format!(
+                "    <requires>{}</requires>",
+                escape_xml(&info.missing_deps.join(", "))
+            ));
+        }
+
+        parts.push("  </skill>".to_string());
+    }
+
+    parts.push("</skills>".to_string());
+    parts.join("\n")
 }
 
 #[cfg(test)]
