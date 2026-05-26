@@ -10,6 +10,10 @@ use crate::prompt_caching::{apply_prompt_caching, cache_system_prompt};
 use crate::error_types::{classify_error, is_context_length_error};
 use crate::rate_limit::RateLimitState;
 use crate::retry_utils::jittered_backoff;
+use crate::storm_breaker::StormBreaker;
+use crate::tool_scavenge;
+use crate::utils::truncated_result_saver::TruncatedResultSaver;
+use crate::reasoning_retention;
 use crate::tools::{expand_path, truncate_at, ToolResult, Registry};
 use crate::transcript::{Transcript, TranscriptEntry, TYPE_USER, TYPE_ASSISTANT, TYPE_TOOL_USE, TYPE_TOOL_RESULT, TYPE_SYSTEM, TYPE_ERROR, TYPE_COMPACT, TYPE_SUMMARY};
 use anyhow::{anyhow, Result};
@@ -198,6 +202,10 @@ pub struct AgentLoop {
     interrupted: Arc<std::sync::atomic::AtomicBool>,
     /// Tracks which skills have been shown/read/used across turns
     skill_tracker: Arc<RwLock<SkillTracker>>,
+    /// Storm breaker for detecting and suppressing repeat-loop tool call storms.
+    pub storm_breaker: StormBreaker,
+    /// Truncated result saver — saves full output to disk for recall when truncated.
+    pub truncated_saver: TruncatedResultSaver,
     /// Rate limit state parsed from API response headers
     rate_limit_state: RateLimitState,
     /// Optional custom system prompt (used by sub-agents)
@@ -301,6 +309,12 @@ impl AgentLoop {
         // Write system entry with model/mode info (matching Go format)
         let _ = transcript.add_system(format!("model={}, mode={}", gate.config.model, gate.config.permission_mode.lock().unwrap_or_else(|e| e.into_inner())));
 
+        // Initialize storm breaker for repeat loop detection
+        let storm_breaker = StormBreaker::new();
+
+        // Initialize truncated result saver
+        let truncated_saver = TruncatedResultSaver::new(&config.project_dir.to_string_lossy());
+
         // Initialize compactor with config values
         let session_memory = config.session_memory.clone();
         let compactor = RwLock::new(
@@ -354,6 +368,8 @@ impl AgentLoop {
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
             cached_mc: Arc::new(CachedMicrocompactTracker::new()),
+            storm_breaker,
+            truncated_saver,
         })
     }
 
@@ -458,6 +474,12 @@ impl AgentLoop {
 
         let compactor = RwLock::new(compactor);
 
+        // Initialize storm breaker for repeat loop detection
+        let storm_breaker = StormBreaker::new();
+
+        // Initialize truncated result saver
+        let truncated_saver = TruncatedResultSaver::new(&config.project_dir.to_string_lossy());
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -498,6 +520,8 @@ impl AgentLoop {
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
             cached_mc: Arc::new(CachedMicrocompactTracker::new()),
+            storm_breaker,
+            truncated_saver,
         })
     }
 
@@ -1286,6 +1310,8 @@ impl AgentLoop {
                                 let timeout_secs = entry.timeout_secs;
                                 let max_tool_chars = self.max_tool_chars;
                                 let interrupted = self.interrupted.clone();
+                                let truncated_saver = self.truncated_saver.clone();
+                                let tool_name_for_saver = tc.name.clone();
 
                                 // Clone what we need for the spawned task
                                 let registry_clone = self.registry.clone();
@@ -1462,9 +1488,16 @@ impl AgentLoop {
                                                 while last_end < result.output.len() && !result.output.is_char_boundary(last_end) {
                                                     last_end += 1;
                                                 }
-                                                format!("{}\n\n... [OUTPUT TRUNCATED] ...\n\n{}",
+                                                let truncated = format!("{}\n\n... [OUTPUT TRUNCATED] ...\n\n{}",
                                                     &result.output[..first_end],
-                                                    &result.output[last_end..])
+                                                    &result.output[last_end..]);
+                                                // Save full output to disk for recall
+                                                let saved_path = truncated_saver.save(&tool_name_for_saver, &result.output);
+                                                if !saved_path.is_empty() {
+                                                    format!("{}\n{}", truncated, saved_path)
+                                                } else {
+                                                    truncated
+                                                }
                                             } else {
                                                 result.output.clone()
                                             };
@@ -2630,6 +2663,18 @@ impl AgentLoop {
         // Check permissions
         if let Some(result) = self.gate.check(tool.as_ref(), params.clone()) {
             return Ok(result);
+        }
+
+        // StormBreaker: check for repeat-loop tool call storms
+        let input_value = serde_json::Value::Object(params.clone().into_iter().map(|(k, v)| (k, v)).collect());
+        let hint = self.storm_breaker.inspect(name, &input_value);
+        if !hint.is_empty() {
+            agent_emit!("[storm] suppressed: {}", hint);
+            return Ok(ToolResult {
+                output: hint,
+                is_error: true,
+                ..Default::default()
+            });
         }
 
         // Coerce argument types to match schema
@@ -4168,6 +4213,12 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             .build()
             .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
 
+        // Initialize storm breaker for repeat loop detection
+        let storm_breaker = StormBreaker::new();
+
+        // Initialize truncated result saver
+        let truncated_saver = TruncatedResultSaver::new(&config.project_dir.to_string_lossy());
+
         Ok(Self {
             config: gate.config.clone(),
             registry: Arc::new(RwLock::new(registry)),
@@ -4203,6 +4254,8 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
             cached_mc: Arc::new(CachedMicrocompactTracker::new()),
+            storm_breaker: StormBreaker::new(),
+            truncated_saver: TruncatedResultSaver::new(&config.project_dir.to_string_lossy()),
         })
     }
     /// Called at tool-round boundaries so the sub-agent can process messages
