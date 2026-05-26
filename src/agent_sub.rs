@@ -424,7 +424,8 @@ fn spawn_sub_agent_sync_mode(
     };
 
     // Create and run child agent loop in current thread
-    match AgentLoop::new_for_sub_agent(child_config.clone(), child_registry.clone(), &child_sys_prompt, false) {
+    let child_registry_arc = Arc::new(child_registry);
+    match AgentLoop::new_for_sub_agent(child_config.clone(), child_registry_arc, &child_sys_prompt, false) {
         Ok(mut child_loop) => {
             // Apply fork mode: inject parent context entries into child
             if !parent_entries.is_empty() {
@@ -629,7 +630,7 @@ pub fn spawn_sub_agent_sync(
             }
         }
 
-        let result = match AgentLoop::new_for_sub_agent(config, registry, &sys_prompt_owned, false) {
+        let result = match AgentLoop::new_for_sub_agent(config, Arc::new(registry), &sys_prompt_owned, false) {
             Ok(mut child_loop) => {
                 // Wire pending message drain: the child loop will drain pending
                 // messages from its own AgentTask at each turn boundary, enabling

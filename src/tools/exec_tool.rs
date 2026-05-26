@@ -1199,6 +1199,7 @@ impl ExecTool {
                 // Don't kill the process — let it continue in background
                 let command_str = command.to_string();
                 let wd_str = working_dir.to_string_lossy().to_string();
+                let command_for_msg = command_str.clone();
                 let (task_id, output_file, err_text, completion_cb) =
                     callback(command_str, wd_str, child);
 
@@ -1217,7 +1218,7 @@ impl ExecTool {
                      Output file: {}\n\
                      Command: {}\n\n\
                      Use task_output with task_id to retrieve output when the command finishes.",
-                    timeout_ms, task_id, output_file, command_str
+                    timeout_ms, task_id, output_file, command_for_msg
                 ));
             }
 
@@ -1649,6 +1650,14 @@ pub fn make_task_output_func(task_store: crate::task_store::SharedTaskStore) -> 
     })
 }
 
+/// Generate an 8-hex-char suffix for task IDs.
+fn generate_task_id_suffix() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bytes: [u8; 4] = rng.gen();
+    format!("{:02x}{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
 /// Build a background callback from a TaskStore.
 /// This is called by ExecTool when run_in_background=true.
 /// Returns (task_id, output_file, error_text).
@@ -1671,8 +1680,10 @@ pub fn make_timeout_callback(
         let tx = notification_tx.clone();
         // For timeout case, we spawn a background task that waits for the existing process
         let task_id = format!("exec-{}", generate_task_id_suffix());
+        let task_id_clone = task_id.clone();
 
         // Spawn a thread to wait for the process and then finish the task
+        let ts = task_store.clone();
         std::thread::spawn(move || {
             let result = child.wait();
             let exit_code = result.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
@@ -1680,10 +1691,14 @@ pub fn make_timeout_callback(
             // Write completion to output file
             use crate::task_store::bash_bg_tasks_dir;
             let output_dir = bash_bg_tasks_dir();
-            let output_file = output_dir.join(format!("{}.output", task_id));
+            let output_file = output_dir.join(format!("{}.output", task_id_clone));
 
             // Update task store
-            task_store.finish_bash_bg_task(&task_id, exit_code, "");
+            if exit_code == 0 {
+                ts.complete_task(&task_id_clone, "");
+            } else {
+                ts.fail_task(&task_id_clone, &format!("exit code {}", exit_code));
+            }
 
             // Send notification
             let notification = format!(
@@ -1696,7 +1711,7 @@ pub fn make_timeout_callback(
 <exit_code>{}</exit_code>
 <summary>Command completed with exit code {}</summary>
 </task-notification>"#,
-                task_id,
+                task_id_clone,
                 output_file.to_string_lossy(),
                 command,
                 exit_code,

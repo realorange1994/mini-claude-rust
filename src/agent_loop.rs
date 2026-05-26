@@ -4150,7 +4150,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
     /// Reuses the parent's API key, base URL, and HTTP client configuration.
     pub fn new_for_sub_agent(
         config: Config,
-        registry: Registry,
+        registry: Arc<Registry>,
         system_prompt: &str,
         use_stream: bool,
     ) -> Result<Self> {
@@ -4221,7 +4221,7 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
 
         Ok(Self {
             config: gate.config.clone(),
-            registry: Arc::new(RwLock::new(registry)),
+            registry: Arc::new(RwLock::new(match Arc::try_unwrap(registry) { Ok(r) => r, Err(_) => panic!("Registry has Arc references") })),
             gate,
             context: context,
             client,

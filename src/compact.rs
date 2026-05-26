@@ -2594,7 +2594,7 @@ impl Compactor {
                                     .iter()
                                     .map(|m| ChunkMessage {
                                         role: m.role.as_str().to_string(),
-                                        content: m.content.to_string(),
+                                        content: m.content_to_text(),
                                     })
                                     .collect();
                                 // Archive as a chunk (with chunk_index = 0 for now, could be incremental)
