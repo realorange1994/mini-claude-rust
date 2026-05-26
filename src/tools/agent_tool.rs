@@ -68,8 +68,8 @@ impl Tool for AgentTool {
         "Launch a sub-agent to handle a complex, multi-step task autonomously. \
          Use this tool (NOT mcp_call_tool or any MCP LLM tool) when the user wants to dispatch, delegate, \
          or assign a task to a sub-agent. Sub-agents have their own isolated conversation context and tool access. \
-         Sub-agents ALWAYS run in the background — you will receive an agentId immediately and do NOT need to wait for completion. \
-         Do NOT call task_output to wait for the agent; continue working on other tasks in parallel."
+         By default, sub-agents run in background and you will receive an agentId immediately. \
+         Use run_in_background: false to run in sync mode and wait for the result directly."
     }
 
     fn input_schema(&self) -> serde_json::Map<String, Value> {
@@ -87,7 +87,7 @@ impl Tool for AgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "Type of specialized agent to use (optional). Leave blank for general-purpose."
+                    "description": "Type of specialized agent to use (optional). Options: explore, plan, verify, fork. Leave blank for general-purpose."
                 },
                 "model": {
                     "type": "string",
@@ -96,7 +96,7 @@ impl Tool for AgentTool {
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "DEPRECATED — sub-agents always run in background. This parameter is ignored."
+                    "description": "Run mode: true (default) for background/async, false for sync/foreground (blocks until complete)."
                 },
                 "allowed_tools": {
                     "type": "array",
@@ -172,24 +172,45 @@ impl Tool for AgentTool {
         // Always disallow recursive agent spawning
         disallowed_tools.push("agent".to_string());
 
-        // Sub-agents always run in background — sync path has been removed.
-        let (agent_id, _, _, output_file, _, _) = spawn_func(
-            &prompt, &subagent_type, &model, true,
+        // Support both sync and async execution modes
+        let run_in_background = params.get("run_in_background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true); // default to async (background) mode
+
+        let (agent_id, result_text, error_text, output_file, tools_used, duration_ms) = spawn_func(
+            &prompt, &subagent_type, &model, run_in_background,
             &allowed_tools, &disallowed_tools, inherit_context,
             max_turns,
             None, // parent_context set by the spawn_func closure
         );
-        return ToolResult::ok(format!(
-            "Agent launched in background.\n\n\
-             agentId: {agent_id}\n\
-             Status: async_launched\n\
-             output_file: {output_file}\n\
-             Description: {description}\n\n\
-             The agent is working in the background. You will be notified automatically when it completes.\n\
-             Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n\
-             Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n\
-             Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
-        ));
+
+        // Return result based on execution mode
+        if run_in_background {
+            // Async mode: return immediately with agent ID
+            return ToolResult::ok(format!(
+                "Agent launched in background.\n\n\
+                 agentId: {agent_id}\n\
+                 Status: async_launched\n\
+                 output_file: {output_file}\n\
+                 Description: {description}\n\n\
+                 The agent is working in the background. You will be notified automatically when it completes.\n\
+                 Do NOT call task_output to wait for this agent — it will block your turn and prevent you from responding to the user.\n\
+                 Do not duplicate this agent's work — avoid working with the same files or topics it is using.\n\
+                 Briefly tell the user what you launched, then end your response. The notification will arrive in a separate turn.",
+            ));
+        } else {
+            // Sync mode: return the result directly
+            if !error_text.is_empty() {
+                return ToolResult::error(error_text);
+            }
+            return ToolResult::ok(format!(
+                "Agent completed.\n\n\
+                 agentId: {agent_id}\n\
+                 Tools used: {tools_used}\n\
+                 Duration: {duration_ms}ms\n\n\
+                 Result:\n{result_text}",
+            ));
+        }
     }
 }
 

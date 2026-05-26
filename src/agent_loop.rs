@@ -1789,24 +1789,54 @@ impl AgentLoop {
                             return Ok("Error: Context overflow - unable to recover".to_string());
                         }
 
-                        // Progressive recovery matching Go's agent_loop.go:
-                        //   context_errors == 1 → LLM compact (or TruncateHistory if disabled)
-                        //   context_errors == 2 → TruncateHistory (keep first + last 10)
-                        //   context_errors == 3 → AggressiveTruncateHistory (keep first + last 5)
-                        //   context_errors > 3 → MinimumHistory (keep first + last 2, last resort)
+                        // Two-layer context overflow recovery (openclacky pattern).
+                        // Layer 1: Standard cache-preserving compact (preserves cache#A)
+                        // Layer 2: Aggressive half-history compact (sacrifices cache, guarantees fit)
+                        // Fallback: Progressive truncation (keep 10 → keep 5 → keep 2)
                         if context_errors == 1 && self.config.auto_compact_enabled {
-                            // First attempt: try LLM-driven compaction
-                            let mut ctx = self.context.write().await;
-                            let mut compactor = self.compactor.write().await;
-                            compactor.set_transcript_path(self.transcript_path());
-                            let _ = compactor.compact(
-                                &mut ctx,
-                                &self.client,
-                                &self.config.model,
-                                &self.api_key,
-                                &self.base_url,
-                                &system_prompt,
-                            ).await;
+                            // First attempt: Two-layer overflow recovery
+                            let pre_tokens_ctx = {
+                                let ctx = self.context.read().await;
+                                crate::compact::estimate_total_tokens(ctx.messages())
+                            };
+                            {
+                                let mut ctx = self.context.write().await;
+                                let mut compactor = self.compactor.write().await;
+                                compactor.set_transcript_path(self.transcript_path());
+
+                                // Layer 1: Standard cache-preserving compact
+                                let (_pre1, attempted1) = compactor.standard_cache_preserving_compact(
+                                    &mut ctx,
+                                    &self.client,
+                                    &self.config.model,
+                                    &self.api_key,
+                                    &self.base_url,
+                                    &system_prompt,
+                                ).await;
+
+                                if attempted1 {
+                                    let tokens_after = crate::compact::estimate_total_tokens(ctx.messages());
+                                    if tokens_after < pre_tokens_ctx {
+                                        // Layer 1 succeeded, tokens decreased
+                                        eprintln!("[two-layer-compact] Layer 1 succeeded: {} -> {} tokens", pre_tokens_ctx, tokens_after);
+                                    } else {
+                                        // Layer 1 insufficient, escalate to Layer 2
+                                        eprintln!("[two-layer-compact] Layer 1 insufficient (tokens: {} -> {}), escalating to Layer 2", pre_tokens_ctx, tokens_after);
+                                        let (_pre2, attempted2) = compactor.aggressive_half_history_compact(
+                                            &mut ctx,
+                                            &self.client,
+                                            &self.config.model,
+                                            &self.api_key,
+                                            &self.base_url,
+                                            &system_prompt,
+                                        ).await;
+                                        if attempted2 {
+                                            let tokens_after2 = crate::compact::estimate_total_tokens(ctx.messages());
+                                            eprintln!("[two-layer-compact] Layer 2 complete: {} -> {} tokens", pre_tokens_ctx, tokens_after2);
+                                        }
+                                    }
+                                }
+                            }
                         } else if context_errors == 2 {
                             let pre_tokens = {
                                 let ctx = self.context.read().await;

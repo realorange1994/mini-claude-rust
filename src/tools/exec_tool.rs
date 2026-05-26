@@ -796,6 +796,12 @@ fn contains_path_escape(path: &str) -> bool {
 pub type BashBgTaskCallback =
     Arc<dyn Fn(String, String) -> (String, String, String) + Send + Sync>;
 
+/// Timeout callback: called when a command times out (not user interrupt).
+/// If non-nil, the timed-out process is registered as a background task.
+/// Returns (task_id, output_file, error_text, completion_callback).
+pub type TimeoutCallback =
+    Arc<dyn Fn(String, String, std::process::Child) -> (String, String, String, Option<Box<dyn FnOnce() + Send + Sync>>) + Send + Sync>;
+
 // ─── ExecTool ────────────────────────────────────────────────────────────────
 
 /// ExecTool executes shell commands with security guards and background support.
@@ -803,12 +809,16 @@ pub struct ExecTool {
     /// When set, enables run_in_background support. The callback spawns a background
     /// bash task and returns (task_id, output_file, error_text).
     pub background_callback: Option<BashBgTaskCallback>,
+    /// When set, enables auto-background on timeout. The callback registers the
+    /// timed-out process as a background task instead of killing it.
+    pub timeout_callback: Option<TimeoutCallback>,
 }
 
 impl ExecTool {
     pub fn new() -> Self {
         Self {
             background_callback: None,
+            timeout_callback: None,
         }
     }
 
@@ -816,6 +826,18 @@ impl ExecTool {
     pub fn with_background_callback(callback: BashBgTaskCallback) -> Self {
         Self {
             background_callback: Some(callback),
+            timeout_callback: None,
+        }
+    }
+
+    /// Create with both background and timeout callbacks.
+    pub fn with_callbacks(
+        background_callback: BashBgTaskCallback,
+        timeout_callback: TimeoutCallback,
+    ) -> Self {
+        Self {
+            background_callback: Some(background_callback),
+            timeout_callback: Some(timeout_callback),
         }
     }
 }
@@ -830,6 +852,7 @@ impl Clone for ExecTool {
     fn clone(&self) -> Self {
         Self {
             background_callback: self.background_callback.clone(),
+            timeout_callback: self.timeout_callback.clone(),
         }
     }
 }
@@ -1162,17 +1185,6 @@ impl ExecTool {
                 Ok(Some(_)) => break false,
                 Ok(None) => {
                     if std::time::Instant::now().duration_since(start) >= timeout {
-                        // Kill the entire process group (matching upstream's tree-kill)
-                        let _pid = child.id();
-                        #[cfg(unix)]
-                        unsafe {
-                            // Negative PID = process group. Cast to i32 for Unix kill.
-                            libc::kill(-(pid as i32), libc::SIGKILL);
-                        }
-                        #[cfg(windows)]
-                        let _ = child.kill(); // Windows: kill() already terminates the process tree
-                        let _ = child.kill();
-                        let _ = child.wait();
                         break true;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1182,6 +1194,45 @@ impl ExecTool {
         };
 
         if timed_out {
+            // If timeout callback is set, auto-promote to background task
+            if let Some(ref callback) = self.timeout_callback {
+                // Don't kill the process — let it continue in background
+                let command_str = command.to_string();
+                let wd_str = working_dir.to_string_lossy().to_string();
+                let (task_id, output_file, err_text, completion_cb) =
+                    callback(command_str, wd_str, child);
+
+                // Drain the reader threads to avoid leaking
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+
+                // Call completion callback if provided
+                if let Some(cb) = completion_cb {
+                    cb();
+                }
+
+                return ToolResult::ok(format!(
+                    "Command timed out after {}ms. Process continues in background.\n\n\
+                     Task ID: {}\n\
+                     Output file: {}\n\
+                     Command: {}\n\n\
+                     Use task_output with task_id to retrieve output when the command finishes.",
+                    timeout_ms, task_id, output_file, command_str
+                ));
+            }
+
+            // No callback: kill the entire process group (matching upstream's tree-kill)
+            let _pid = child.id();
+            #[cfg(unix)]
+            unsafe {
+                // Negative PID = process group. Cast to i32 for Unix kill.
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            let _ = child.kill(); // Windows: kill() already terminates the process tree
+            let _ = child.kill();
+            let _ = child.wait();
+
             // Drain the reader threads to avoid leaking
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
@@ -1611,7 +1662,59 @@ pub fn make_bash_bg_callback(
     })
 }
 
-// ─── Background bash spawning ──────────────────────────────────────────────
+/// Create a timeout callback that promotes timed-out commands to background tasks.
+pub fn make_timeout_callback(
+    task_store: crate::task_store::SharedTaskStore,
+    notification_tx: std::sync::Arc<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> TimeoutCallback {
+    Arc::new(move |command: String, working_dir: String, mut child: std::process::Child| {
+        let tx = notification_tx.clone();
+        // For timeout case, we spawn a background task that waits for the existing process
+        let task_id = format!("exec-{}", generate_task_id_suffix());
+
+        // Spawn a thread to wait for the process and then finish the task
+        std::thread::spawn(move || {
+            let result = child.wait();
+            let exit_code = result.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+
+            // Write completion to output file
+            use crate::task_store::bash_bg_tasks_dir;
+            let output_dir = bash_bg_tasks_dir();
+            let output_file = output_dir.join(format!("{}.output", task_id));
+
+            // Update task store
+            task_store.finish_bash_bg_task(&task_id, exit_code, "");
+
+            // Send notification
+            let notification = format!(
+                r#"<task-notification>
+<task_id>{}</task_id>
+<task_type>bash_background</task_type>
+<status>completed</status>
+<output_file>{}</output_file>
+<command>{}</command>
+<exit_code>{}</exit_code>
+<summary>Command completed with exit code {}</summary>
+</task-notification>"#,
+                task_id,
+                output_file.to_string_lossy(),
+                command,
+                exit_code,
+                exit_code
+            );
+            let _ = tx.send(notification);
+        });
+
+        // Return task ID and output file
+        use crate::task_store::bash_bg_tasks_dir;
+        let output_dir = bash_bg_tasks_dir();
+        let output_file = output_dir.join(format!("{}.output", task_id)).to_string_lossy().to_string();
+
+        (task_id, output_file, String::new(), None)
+    })
+}
+
+// ─── Background bash spawning ───────────────────────────────────��──────────
 
 /// Spawn a background bash command and register it in the TaskStore.
 /// Returns (task_id, output_file, error_text).

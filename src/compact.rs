@@ -17,6 +17,7 @@ use crate::context::{
     ToolResultContent,
 };
 use crate::session_memory::SessionMemory;
+use crate::tools::chunk_archival::{archive_chunk, ChunkMessage};
 
 /// Creates a compact boundary Message with a unique UUID.
 /// Used by the transcript, session storage, and QueryEngine to reference
@@ -2582,6 +2583,33 @@ impl Compactor {
                     // the actual post-compact token count.
                     self.post_compact_tokens = Some(post_tokens);
 
+                    // Archive the discarded messages (before tail) to chunk files
+                    // if we have a transcript path for storage
+                    if let Some(transcript_path) = self.get_transcript_path() {
+                        if let Some(parent_dir) = std::path::Path::new(transcript_path).parent() {
+                            let archived_dir = parent_dir.to_string_lossy().to_string();
+                            // Calculate which messages were discarded
+                            if tail_start > 0 {
+                                let discarded: Vec<ChunkMessage> = messages[..tail_start]
+                                    .iter()
+                                    .map(|m| ChunkMessage {
+                                        role: m.role.as_str().to_string(),
+                                        content: m.content.to_string(),
+                                    })
+                                    .collect();
+                                // Archive as a chunk (with chunk_index = 0 for now, could be incremental)
+                                let _ = archive_chunk(
+                                    &archived_dir,
+                                    "compacted",
+                                    0,  // chunk_index
+                                    1,  // compression_level
+                                    "compacted_messages",
+                                    &discarded,
+                                );
+                            }
+                        }
+                    }
+
                     context.replace_messages(new_messages);
 
                     // After replacing messages, validate tool pairing and fix
@@ -2715,6 +2743,147 @@ impl Compactor {
         self.last_compact_savings.clear();
         self.post_compact_tokens = None;
         self.prev_turn_tokens = None;
+    }
+
+    // ─── Two-layer context overflow recovery ─────────────────────────────────────
+
+    /// StandardCachePreservingCompact performs Layer 1 of the two-layer overflow recovery.
+    /// It pulls back K=1 message from the tail, runs compaction, then re-appends the
+    /// pulled-back message. This preserves Anthropic's prompt cache checkpoint #A
+    /// (at position N-1) — the compression call only needs to re-read ~500 cold tokens
+    /// (the compression instruction) instead of ~50,000 cold tokens.
+    ///
+    /// Inspired by openclacky's pull_back_from_tail: 1 mechanism.
+    /// The key insight is that Anthropic's dual-checkpoint cache (cache#A at N-1, cache#B at N)
+    /// means popping exactly 1 message keeps cache#A intact.
+    ///
+    /// Returns the pre-compaction token count and whether compaction was attempted.
+    pub async fn standard_cache_preserving_compact(
+        &mut self,
+        context: &mut ConversationContext,
+        client: &reqwest::Client,
+        model: &str,
+        api_key: &str,
+        base_url: &str,
+        system_prompt: &str,
+    ) -> (usize, bool) {
+        let history_size = context.len();
+        if history_size <= 2 {
+            eprintln!("[standard-compact] history too small for standard compaction");
+            return (0, false);
+        }
+
+        // Pull back K=1 message from tail
+        let pulled = context.pull_back_from_tail(1);
+        if pulled.is_empty() {
+            eprintln!("[standard-compact] failed to pull back message");
+            return (0, false);
+        }
+
+        let pre_tokens = estimate_total_tokens(context.messages());
+        eprintln!(
+            "[standard-compact] Pulled back 1 message, running compaction (current: {} tokens, preserving cache#A)",
+            pre_tokens
+        );
+
+        // Run compaction. Because we popped 1 message, the prefix
+        // [system, m1..m(N-1)] still matches cache#A, so this call should
+        // get a prompt cache hit for ~95% of tokens.
+        self.compact(
+            context,
+            client,
+            model,
+            api_key,
+            base_url,
+            system_prompt,
+        ).await;
+
+        // Re-append the pulled-back message to preserve recent progress.
+        context.re_append_entries(pulled);
+
+        // Validate tool pairing after re-appending
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
+
+        let post_tokens = estimate_total_tokens(context.messages());
+        eprintln!(
+            "[standard-compact] Complete: {} -> {} tokens (1 message preserved)",
+            pre_tokens, post_tokens
+        );
+        (pre_tokens, true)
+    }
+
+    /// AggressiveHalfHistoryCompact performs Layer 2 of the two-layer overflow recovery.
+    /// Called when Layer 1 (standard) fails — typically when a single newly-appended
+    /// message is enormous (huge tool_result, pasted file, etc.) so popping K=1 didn't
+    /// bring the request below the window.
+    ///
+    /// Pulls back ~half the history (clamped: min 4, max 64, never more than N-2).
+    /// This sacrifices prompt cache (breaking both cache checkpoints) but guarantees
+    /// the compression call fits. It's a survival tradeoff: cache miss now to avoid
+    /// losing the entire conversation.
+    pub async fn aggressive_half_history_compact(
+        &mut self,
+        context: &mut ConversationContext,
+        client: &reqwest::Client,
+        model: &str,
+        api_key: &str,
+        base_url: &str,
+        system_prompt: &str,
+    ) -> (usize, bool) {
+        let history_size = context.len();
+        if history_size <= 2 {
+            eprintln!("[aggressive-compact] history too small for aggressive compaction");
+            return (0, false);
+        }
+
+        // Calculate pull-back: half the history, clamped
+        let half = history_size / 2;
+        let mut pull_back = half.max(4);
+        pull_back = pull_back.min((history_size - 2).max(1));
+        pull_back = pull_back.min(64);
+
+        if pull_back <= 0 {
+            eprintln!("[aggressive-compact] pull_back calculation invalid");
+            return (0, false);
+        }
+
+        let pulled = context.pull_back_from_tail(pull_back);
+        if pulled.is_empty() {
+            eprintln!("[aggressive-compact] failed to pull back messages");
+            return (0, false);
+        }
+
+        let pre_tokens = estimate_total_tokens(context.messages());
+        eprintln!(
+            "[aggressive-compact] Layer 2: pulled back {}/{} messages (sacrificing prompt cache), running compaction ({} tokens)",
+            pull_back, history_size, pre_tokens
+        );
+
+        // Run compaction with aggressively reduced history.
+        self.compact(
+            context,
+            client,
+            model,
+            api_key,
+            base_url,
+            system_prompt,
+        ).await;
+
+        // Re-append the pulled-back messages.
+        let pulled_len = pulled.len();
+        context.re_append_entries(pulled);
+
+        // Validate tool pairing after re-appending
+        context.validate_tool_pairing();
+        context.fix_role_alternation();
+
+        let post_tokens = estimate_total_tokens(context.messages());
+        eprintln!(
+            "[aggressive-compact] Complete: {} -> {} tokens ({} messages preserved in tail)",
+            pre_tokens, post_tokens, pulled_len
+        );
+        (pre_tokens, true)
     }
 }
 

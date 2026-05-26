@@ -70,6 +70,11 @@ fn get_agent_type_config(agent_type: &str) -> Option<&'static AgentTypeConfig> {
             deny_tools: vec!["write_file", "edit_file", "multi_edit", "fileops"],
         });
 
+        map.insert("fork", AgentTypeConfig {
+            prompt_modifier: FORK_PROMPT,
+            deny_tools: vec![], // fork agents use parent's full tool set, no filtering at registry level
+        });
+
         map
     });
 
@@ -373,11 +378,133 @@ pub fn clone_context_for_fork(
     }
 }
 
-/// Spawn a sub-agent and return immediately.
+/// Sync mode: run sub-agent in current thread, block until completion.
+/// Returns the result directly to the caller (no notification needed).
+fn spawn_sub_agent_sync_mode(
+    parent_config: &Config,
+    parent_registry: &Registry,
+    prompt: &str,
+    subagent_type: &str,
+    model: &str,
+    allowed_tools: &[String],
+    disallowed_tools: &[String],
+    inherit_context: bool,
+    max_turns: usize,
+    parent_context: Option<Arc<RwLock<ConversationContext>>>,
+    start: std::time::Instant,
+) -> (String, String, String, String, usize, u64) {
+    let agent_id = generate_agent_id();
+
+    // Build child config and registry
+    let child_config = build_child_config(parent_config, model, max_turns);
+    let child_registry = build_child_registry(
+        parent_registry,
+        subagent_type,
+        allowed_tools,
+        disallowed_tools,
+        false, // sync mode
+    );
+
+    let child_sys_prompt = build_sub_agent_system_prompt(
+        &child_registry,
+        &child_config.model,
+        subagent_type,
+    );
+
+    // Capture parent entries for fork mode
+    let parent_entries: Vec<Message> = if inherit_context {
+        if let Some(ref parent_ctx) = parent_context {
+            let ctx = parent_ctx.blocking_read();
+            ctx.entries().to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Create and run child agent loop in current thread
+    match AgentLoop::new_for_sub_agent(child_config.clone(), child_registry.clone(), &child_sys_prompt, false) {
+        Ok(mut child_loop) => {
+            // Apply fork mode: inject parent context entries into child
+            if !parent_entries.is_empty() {
+                let last_tool_use_idx = parent_entries
+                    .iter()
+                    .rposition(|msg| matches!(msg.content, MessageContent::ToolUseBlocks(_)))
+                    .map(|i| i as isize)
+                    .unwrap_or(-1);
+
+                let mut cloned: Vec<Message> = Vec::new();
+                for (i, entry) in parent_entries.iter().enumerate() {
+                    if i as isize == last_tool_use_idx {
+                        continue;
+                    }
+                    match &entry.content {
+                        MessageContent::Text(_)
+                        | MessageContent::ToolUseBlocks(_)
+                        | MessageContent::ToolResultBlocks(_)
+                        | MessageContent::Summary(_)
+                        | MessageContent::AntiReplay(_)
+                        | MessageContent::Goal(_)
+                        | MessageContent::CompressionInstruction { .. }
+                        | MessageContent::CompressedSummary { .. } => {
+                            cloned.push(entry.clone());
+                        }
+                        MessageContent::CompactBoundary { .. }
+                        | MessageContent::Attachment(_) => {
+                            continue;
+                        }
+                    }
+                }
+
+                let mut child_ctx = child_loop.context.blocking_write();
+                for msg in cloned {
+                    child_ctx.add_message(msg);
+                }
+            }
+
+            // Run the child loop and get result directly
+            let result = child_loop.run(prompt);
+
+            let final_result = if result.is_empty() {
+                child_loop.get_partial_result()
+            } else {
+                result
+            };
+
+            let tools_used = child_loop.tools_used_count();
+            let total_tokens = child_loop.total_tokens();
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            (
+                agent_id,
+                final_result,
+                String::new(),
+                String::new(),
+                tools_used,
+                duration_ms,
+            )
+        }
+        Err(e) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            (
+                agent_id,
+                String::new(),
+                format!("failed to create sub-agent: {e}"),
+                String::new(),
+                0,
+                duration_ms,
+            )
+        }
+    }
+}
+
+/// Spawn a sub-agent with both sync and async execution support.
 ///
-/// This function ALWAYS runs sub-agents in background mode. The agent tool should
-/// call this directly without any sync path — the caller receives the agent ID
-/// immediately and the agent runs on a separate thread.
+/// When `run_in_background=true` (default), the agent runs in a separate thread
+/// and returns immediately with an agent ID.
+/// When `run_in_background=false`, the agent runs in the current thread and
+/// blocks until completion, returning the result directly.
 ///
 /// When `agent_task_store` is provided, the agent is tracked in the store
 /// with output isolation (no terminal pollution).
@@ -387,7 +514,7 @@ pub fn spawn_sub_agent_sync(
     prompt: &str,
     subagent_type: &str,
     model: &str,
-    _run_in_background: bool, // DEPRECATED — always runs in background
+    run_in_background: bool, // true = async/background, false = sync/blocking
     allowed_tools: &[String],
     disallowed_tools: &[String],
     inherit_context: bool,
@@ -414,14 +541,33 @@ pub fn spawn_sub_agent_sync(
 
     let agent_id = generate_agent_id();
 
+    // Sync mode: run in current thread, block until complete
+    if !run_in_background {
+        return spawn_sub_agent_sync_mode(
+            parent_config,
+            parent_registry,
+            prompt,
+            subagent_type,
+            model,
+            allowed_tools,
+            disallowed_tools,
+            inherit_context,
+            max_turns,
+            parent_context,
+            start,
+        );
+    }
+
+    // Async mode (background): spawn in separate thread, return immediately
     // Build child config and registry
+    let run_in_background_actual = run_in_background;
     let child_config = build_child_config(parent_config, model, max_turns);
     let child_registry = build_child_registry(
         parent_registry,
         subagent_type,
         allowed_tools,
         disallowed_tools,
-        true, // always run in background
+        run_in_background_actual,
     );
 
     let child_sys_prompt = build_sub_agent_system_prompt(
@@ -833,6 +979,18 @@ PARTIAL is for environmental limitations only (no test framework, tool unavailab
 
 - **FAIL**: include what failed, exact error output, reproduction steps.
 - **PARTIAL**: what was verified, what could not be and why, what the implementer should know."#;
+
+const FORK_PROMPT: &str = r#"You are a forked worker process. You are NOT the main agent.
+
+RULES:
+- Do NOT spawn sub-agents — execute tasks directly yourself
+- Do NOT converse, ask questions, or suggest next steps
+- Do NOT editorialize or add meta-commentary
+- USE your tools directly: Bash, Read, Write, etc.
+- Do NOT emit text between tool calls — use tools silently, then report once at the end
+- Stay strictly within your directive scope
+- Your response MUST begin with Scope: followed by a one-line summary
+- REPORT structured facts, then stop"#;
 
 #[cfg(test)]
 mod tests {
