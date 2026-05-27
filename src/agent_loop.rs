@@ -4254,8 +4254,8 @@ fn collect_read_tool_file_paths(ctx: &ConversationContext) -> std::collections::
             last_deltas_state: std::cell::RefCell::new(DeltasState::None),
             cached_system_prompt: CachedSystemPrompt::new(),
             cached_mc: Arc::new(CachedMicrocompactTracker::new()),
-            storm_breaker: StormBreaker::new(),
-            truncated_saver: TruncatedResultSaver::new(&config.project_dir.to_string_lossy()),
+            storm_breaker,
+            truncated_saver,
         })
     }
     /// Called at tool-round boundaries so the sub-agent can process messages

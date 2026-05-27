@@ -5,6 +5,39 @@ edition = "2021"
 description = "A lightweight AI coding assistant in Rust"
 license = "MIT"
 
+[features]
+default = ["tools-web", "tools-terminal"]
+
+# Tool feature flags
+tools-web = []                          # web_search, web_fetch, exa_search
+tools-terminal = []                     # system, process, runtime_info, terminal
+tools-notebook = []                     # notebook_edit
+tools-encoding = []                     # file_encoding (encoding_rs always included)
+
+# Extension feature flags
+feature-mcp = []                        # MCP server protocol
+feature-skills = []                     # skill loading and tracking
+feature-cron = []                       # cron scheduling
+feature-filehistory = []                # file history (12 tools)
+feature-session-memory = []             # session persistent memory
+feature-session-persistence = []        # session snapshots
+feature-work-task = []                  # work task management
+feature-telemetry = []                  # telemetry events
+feature-error-reporter = []             # error file logging
+feature-claudemd = []                   # CLAUDE.md injection
+feature-hooks = []                      # pre/post execution hooks
+feature-proactive-budget = []           # budget-aware prompting
+feature-agent-management = []           # agent_list/get/kill
+feature-plan-mode = []                  # enter/exit plan mode
+feature-send-message = []               # send_message tool
+feature-brief = []                      # brief tool
+feature-todo = []                       # todo_write
+feature-task = []                       # task_create/list/get/update/stop
+feature-transcript = []                 # conversation transcript
+feature-cleanup = []                    # stale file cleanup
+feature-settings = []                   # multi_settings
+feature-semver = []                     # semantic versioning
+
 [dependencies]
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -15,7 +48,7 @@ tokio = { version = "1.35", features = ["full"] }
 # Futures for StreamExt
 futures = "0.3"
 
-# HTTP client
+# HTTP client (always needed for API calls)
 reqwest = { version = "0.11", features = ["json", "rustls-tls", "blocking", "stream"], default-features = false }
 
 # Anthropic SDK (or compatible)
@@ -44,14 +77,13 @@ thiserror = "1.0"
 console = "0.16"
 dialoguer = "0.11"
 
-# Encoding
-base64 = "0.22"
+# Encoding (always needed for UTF8 handling in core)
 encoding_rs = "0.8"
 
-# Date/Time
+# Date/Time (needed for cost tracking, transcripts, etc.)
 chrono = { version = "0.4", features = ["serde"] }
 
-# Compression
+# Compression (used by file history, compact, etc.)
 flate2 = "1.0"
 brotli = "3.4"
 

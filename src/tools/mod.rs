@@ -130,6 +130,7 @@ pub fn upstream_to_internal_name(upstream: &str) -> &str {
 
 pub mod coercion;
 
+// Core tools - always available
 mod exec_tool;
 mod file_read;
 mod file_write;
@@ -140,36 +141,82 @@ mod glob_tool;
 mod grep_tool;
 mod list_dir;
 pub mod git_tool;
+
+// Terminal tools
+#[cfg(feature = "tools-terminal")]
 mod system_tool;
+#[cfg(feature = "tools-terminal")]
 mod process;
+#[cfg(feature = "tools-terminal")]
 mod runtime_info;
+#[cfg(feature = "tools-terminal")]
 mod terminal_tool;
+
+// Web tools
+#[cfg(feature = "tools-web")]
 mod web_search;
+#[cfg(feature = "tools-web")]
 mod web_fetch;
+#[cfg(feature = "tools-web")]
 mod exa_search;
+
+// MCP tools
+#[cfg(feature = "feature-mcp")]
 mod mcp_tools;
+
+// Skills tools
+#[cfg(feature = "feature-skills")]
 pub mod skill_tools;
+
+// File history tools
+#[cfg(feature = "feature-filehistory")]
 pub mod file_history_tools;
+
+// Session memory tools
+#[cfg(feature = "feature-session-memory")]
 pub mod memory_tool;
+
+// Task tools
+#[cfg(any(feature = "feature-task", feature = "feature-work-task"))]
 pub mod task_tool;
+
+// Agent tools (always compiled - agent_loop.rs depends on it)
 pub mod agent_store;
-mod brief_tool;
-pub mod tool_search_tool;
 pub mod agent_tools;
-mod enter_plan_mode;
-mod exit_plan_mode;
 pub mod agent_tool;
-pub mod todo_write;
-pub mod send_message;
-pub mod ask_user_question;
-pub mod notebook_edit;
-pub mod file_encoding;
-mod path_safety;
-mod filesystem_safety;
 pub mod agent_handle_store;
 pub mod agent_handoff;
 pub mod agent_sidechain;
 pub mod agent_worktree;
+
+// Brief tool
+#[cfg(feature = "feature-brief")]
+mod brief_tool;
+
+pub mod tool_search_tool;
+
+// Plan mode tools
+#[cfg(feature = "feature-plan-mode")]
+mod enter_plan_mode;
+#[cfg(feature = "feature-plan-mode")]
+mod exit_plan_mode;
+
+// Optional tools
+#[cfg(feature = "feature-todo")]
+pub mod todo_write;
+#[cfg(feature = "feature-send-message")]
+pub mod send_message;
+pub mod ask_user_question;
+
+#[cfg(feature = "tools-notebook")]
+pub mod notebook_edit;
+
+#[cfg(feature = "tools-encoding")]
+pub mod file_encoding;
+
+mod path_safety;
+mod filesystem_safety;
+
 pub mod bg_task_output;
 pub mod chunk_archival;
 pub mod output_cleaner;
@@ -203,9 +250,13 @@ pub use grep_tool::GrepTool;
 pub use glob_tool::GlobTool;
 pub use git_tool::GitTool;
 pub use git_tool::{find_git_root, get_branch, is_bare_repo, is_git_repo, get_git_status, has_uncommitted_changes, get_default_branch, get_current_commit_hash, is_dirty, get_git_context, get_git_context_for_prompt};
+#[cfg(feature = "tools-terminal")]
 pub use runtime_info::RuntimeInfoTool;
+#[cfg(feature = "tools-web")]
 pub use web_search::WebSearchTool;
+#[cfg(feature = "tools-notebook")]
 pub use notebook_edit::NotebookEditTool;
+#[cfg(feature = "tools-encoding")]
 pub use file_encoding::FileEncodingTool;
 
 use crate::config::Config;
@@ -695,6 +746,7 @@ impl Default for Registry {
 
 /// Register all built-in tools
 pub fn register_builtin_tools(registry: &Registry) {
+    // Core tools - always available
     registry.register(exec_tool::ExecTool::new());
     registry.register(file_read::FileReadTool::with_files_read(registry.files_read_handle()));
     registry.register(FileWriteTool::with_files_read(registry.files_read_handle()));
@@ -705,26 +757,48 @@ pub fn register_builtin_tools(registry: &Registry) {
     registry.register(grep_tool::GrepTool);
     registry.register(list_dir::ListDirTool);
     registry.register(git_tool::GitTool);
-    registry.register(system_tool::SystemTool);
-    registry.register(process::ProcessTool);
-    registry.register(runtime_info::RuntimeInfoTool);
-    registry.register(terminal_tool::TerminalTool);
-    registry.register(web_search::WebSearchTool);
-    registry.register(web_fetch::WebFetchTool);
-    registry.register(exa_search::ExaSearchTool);
-    registry.register(brief_tool::BriefTool::new());
     registry.register(ask_user_question::AskUserQuestionTool::new());
+
+    // Terminal tools
+    #[cfg(feature = "tools-terminal")]
+    {
+        registry.register(system_tool::SystemTool);
+        registry.register(process::ProcessTool);
+        registry.register(runtime_info::RuntimeInfoTool);
+        registry.register(terminal_tool::TerminalTool);
+    }
+
+    // Web tools
+    #[cfg(feature = "tools-web")]
+    {
+        registry.register(web_search::WebSearchTool);
+        registry.register(web_fetch::WebFetchTool);
+        registry.register(exa_search::ExaSearchTool);
+    }
+
+    // Notebook tool
+    #[cfg(feature = "tools-notebook")]
     registry.register(notebook_edit::NotebookEditTool::with_files_read(
         Some(registry.files_read_handle()),
     ));
+
+    // Encoding tool
+    #[cfg(feature = "tools-encoding")]
     registry.register(file_encoding::FileEncodingTool::with_files_read(
         Some(registry.files_read_handle()),
     ));
 
     // Cron tools
-    registry.register(crate::cron::CronCreateTool);
-    registry.register(crate::cron::CronDeleteTool);
-    registry.register(crate::cron::CronListTool);
+    #[cfg(feature = "feature-cron")]
+    {
+        registry.register(crate::cron::CronCreateTool);
+        registry.register(crate::cron::CronDeleteTool);
+        registry.register(crate::cron::CronListTool);
+    }
+
+    // Brief tool
+    #[cfg(feature = "feature-brief")]
+    registry.register(brief_tool::BriefTool::new());
 
     // ToolSearchTool: uses a shared tools list that gets populated
     // after all tools are registered (see finalize_tool_search).
@@ -735,20 +809,31 @@ pub fn register_builtin_tools(registry: &Registry) {
 }
 
 /// Register MCP and skills tools
+#[cfg(feature = "feature-mcp")]
 pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config, task_store: &crate::task_store::SharedTaskStore) {
     if let Some(mcp_manager) = &cfg.mcp_manager {
         registry.register(mcp_tools::ListMcpTools::new(mcp_manager.clone()));
         registry.register(mcp_tools::McpToolCaller::new(mcp_manager.clone(), Arc::clone(task_store)));
         registry.register(mcp_tools::McpServerStatus::new(mcp_manager.clone()));
     }
+}
+#[cfg(not(feature = "feature-mcp"))]
+pub fn register_mcp_and_skills(_registry: &Registry, _cfg: &Config, _task_store: &crate::task_store::SharedTaskStore) {}
 
+#[cfg(feature = "feature-skills")]
+pub fn register_skills(registry: &Registry, cfg: &Config) {
     if let Some(skill_loader) = &cfg.skill_loader {
         let arc_loader = Arc::new(skill_loader.clone());
         registry.register(skill_tools::ReadSkillTool::new(arc_loader.clone()));
         registry.register(skill_tools::ListSkillsTool::new(arc_loader.clone()));
         registry.register(skill_tools::SearchSkillTool::new(arc_loader));
     }
+}
+#[cfg(not(feature = "feature-skills"))]
+pub fn register_skills(_registry: &Registry, _cfg: &Config) {}
 
+#[cfg(feature = "feature-filehistory")]
+pub fn register_file_history_tools(registry: &Registry, cfg: &Config) {
     if let Some(arc_history) = &cfg.file_history {
         registry.register(file_history_tools::FileHistoryTool::new(arc_history.clone()));
         registry.register(file_history_tools::FileHistoryReadTool::new(arc_history.clone()));
@@ -765,14 +850,20 @@ pub fn register_mcp_and_skills(registry: &Registry, cfg: &Config, task_store: &c
         registry.register(file_history_tools::FileHistoryCheckoutTool::new(arc_history.clone()));
     }
 }
+#[cfg(not(feature = "feature-filehistory"))]
+pub fn register_file_history_tools(_registry: &Registry, _cfg: &Config) {}
 
 /// Register memory tools (Phase 4: Session Memory)
+#[cfg(feature = "feature-session-memory")]
 pub fn register_memory_tools(registry: &Registry, session_memory: &Arc<crate::session_memory::SessionMemory>) {
     registry.register(memory_tool::MemoryAddTool::new(Arc::clone(session_memory)));
     registry.register(memory_tool::MemorySearchTool::new(Arc::clone(session_memory)));
 }
+#[cfg(not(feature = "feature-session-memory"))]
+pub fn register_memory_tools(_registry: &Registry, _session_memory: &Arc<crate::session_memory::SessionMemory>) {}
 
 /// Register task tools (TaskCreate/TaskList/TaskGet/TaskUpdate/TaskStop)
+#[cfg(any(feature = "feature-work-task", feature = "feature-task"))]
 pub fn register_task_tools(registry: &Registry, store: &crate::work_task::SharedWorkTaskStore) {
     let store_clone = Arc::clone(store);
     registry.register(task_tool::TaskCreateTool::new(Arc::new(move |subject, desc, active_form, meta| {
@@ -802,6 +893,8 @@ pub fn register_task_tools(registry: &Registry, store: &crate::work_task::Shared
         store_clone.update_task(&id, &updates)
     })));
 }
+#[cfg(not(any(feature = "feature-work-task", feature = "feature-task")))]
+pub fn register_task_tools(_registry: &Registry, _store: &crate::work_task::SharedWorkTaskStore) {}
 
 /// Register agent tool with spawn callback
 pub fn register_agent_tool(registry: &Registry, spawn_func: agent_tool::AgentSpawnFunc) {
@@ -814,14 +907,20 @@ pub fn register_agent_management_tools(registry: &Registry, store: &agent_store:
 }
 
 /// Register TodoWrite tool
+#[cfg(feature = "feature-todo")]
 pub fn register_todo_write_tools(registry: &Registry, todo_list: &Arc<crate::context::TodoList>) {
     registry.register(todo_write::TodoWriteTool::new(Arc::clone(todo_list)));
 }
+#[cfg(not(feature = "feature-todo"))]
+pub fn register_todo_write_tools(_registry: &Registry, _todo_list: &Arc<crate::context::TodoList>) {}
 
 /// Register SendMessage tool
+#[cfg(feature = "feature-send-message")]
 pub fn register_send_message_tool(registry: &Registry, store: &agent_store::SharedAgentTaskStore) {
     registry.register(send_message::SendMessageTool::new(Arc::clone(store)));
 }
+#[cfg(not(feature = "feature-send-message"))]
+pub fn register_send_message_tool(_registry: &Registry, _store: &agent_store::SharedAgentTaskStore) {}
 
 /// Register bash background task tools (task_stop, task_output) and the exec tool
 /// with a background callback.
@@ -1040,6 +1139,7 @@ pub fn is_path_allowed_with_workspace(workspace: &std::path::Path, path: &str) -
 /// Register EnterPlanMode and ExitPlanMode tools.
 /// These tools return ToolResult with mode_change side-effects.
 /// The AgentLoop is responsible for applying the mode changes.
+#[cfg(feature = "feature-plan-mode")]
 pub fn register_plan_mode_tools(registry: &Registry, cfg: &Config) {
     let cfg_for_enter = cfg.clone();
     registry.register(enter_plan_mode::EnterPlanModeTool {
@@ -1052,3 +1152,5 @@ pub fn register_plan_mode_tools(registry: &Registry, cfg: &Config) {
         get_pre_plan_mode: Box::new(move || *cfg_for_exit.pre_plan_mode.lock().unwrap_or_else(|e| e.into_inner())),
     });
 }
+#[cfg(not(feature = "feature-plan-mode"))]
+pub fn register_plan_mode_tools(_registry: &Registry, _cfg: &Config) {}

@@ -968,13 +968,14 @@ impl ConversationContext {
         self.fix_role_alternation();
     }
 
-    /// MinimumHistory drops to bare minimum - only first user message and last 2 entries.
-    /// Compact-boundary-aware.
+    /// MinimumHistory drops to bare minimum - only first user message and last 6 entries.
+    /// Keep 6 entries: enough to preserve at least one complete tool_use/tool_result pair.
+    /// Previous value of 2 was too aggressive and broke pairing, causing 2013 errors.
     pub fn minimum_history(&mut self) {
         if self.messages.len() <= 3 {
             return;
         }
-        self.messages = self.truncate_with_boundary(1, 2);
+        self.messages = self.truncate_with_boundary(1, 6);
         self.validate_tool_pairing();
         self.fix_role_alternation();
     }
