@@ -341,7 +341,7 @@ mod tests {
                 ]
             }),
             serde_json::json!({
-                "role": "tool",
+                "role": "user",
                 "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]
             }),
         ];

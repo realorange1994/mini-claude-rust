@@ -828,22 +828,37 @@ impl ConversationContext {
         }
 
         // Merge consecutive same-role messages (API requires strict alternation).
-        // This handles cases where fix_role_alternation couldn't merge due to
-        // type mismatches (e.g., ToolResultContent + TextContent both user role).
-        // The API allows a single user message to contain mixed text and tool_result blocks.
+        // CRITICAL: Never merge tool_result blocks with non-tool_result content.
+        // Doing so destroys the tool_use/tool_result pairing, causing API error 2013.
+        // Only merge when content types are compatible:
+        // - Both have tool_result blocks → safe to merge
+        // - Neither has tool_result blocks → safe to merge
+        // - One has tool_result, the other has text → DO NOT merge
         let mut merged: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
         for msg in messages {
             if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
                 if let Some(last) = merged.last_mut() {
                     if let Some(last_role) = last.get("role").and_then(|r| r.as_str()) {
                         if last_role == role {
-                            // Merge content blocks
-                            if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
-                                if let Some(new_blocks) = msg.get("content").and_then(|c| c.as_array()) {
-                                    arr.extend(new_blocks.clone());
+                            // Check if content types are compatible
+                            let last_has_tool_result = last.get("content")
+                                .and_then(|c| c.as_array())
+                                .map(|arr| arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")))
+                                .unwrap_or(false);
+                            let curr_has_tool_result = msg.get("content")
+                                .and_then(|c| c.as_array())
+                                .map(|arr| arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")))
+                                .unwrap_or(false);
+
+                            // Only merge when both have tool_result or both don't have tool_result
+                            if last_has_tool_result == curr_has_tool_result {
+                                if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                    if let Some(new_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                                        arr.extend(new_blocks.clone());
+                                    }
                                 }
+                                continue;
                             }
-                            continue;
                         }
                     }
                 }

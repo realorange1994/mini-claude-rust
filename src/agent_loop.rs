@@ -1785,11 +1785,21 @@ impl AgentLoop {
                     // 2013 error: tool_result doesn't follow tool_call -- repair pairing before retry
                     if err_str.contains("2013") || err_str.contains("tool call result does not follow tool call") {
                         agent_emit!("[!] Tool pairing error (2013), repairing context...");
-                        let mut ctx = self.context.write().await;
-                        ctx.validate_tool_pairing();
-                        ctx.fix_role_alternation();
-                        // Inject a recovery hint so the model produces properly sequenced tool calls
-                        ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
+                        {
+                            let mut ctx = self.context.write().await;
+                            ctx.validate_tool_pairing();
+                            ctx.fix_role_alternation();
+                            // Inject a recovery hint so the model produces properly sequenced tool calls
+                            ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
+                        }
+                        // Apply fix_tool_call_pairing on rebuilt messages to drop remaining
+                        // unpaired tool_calls (matching Go behavior). The repaired context
+                        // will be used on the next loop iteration via entries_to_messages_async.
+                        let rebuilt = self.entries_to_messages_async().await;
+                        let (_filtered, dropped_calls, dropped_tools) = crate::cache_optimizer::fix_tool_call_pairing(rebuilt);
+                        if dropped_calls > 0 || dropped_tools > 0 {
+                            agent_emit!("[2013-repair] dropped {} unpaired tool_calls, {} stray tools", dropped_calls, dropped_tools);
+                        }
                         continue;
                     }
 
@@ -2068,15 +2078,25 @@ impl AgentLoop {
                             // Inject a recovery hint so the model produces properly sequenced tool calls
                             ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
                         }
-                        // Rebuild messages from repaired context so the fix takes effect on retry
+                        // Rebuild messages from repaired context and apply fix_tool_call_pairing
+                        // to drop any remaining unpaired tool_calls (matching Go behavior)
                         let rebuilt = self.entries_to_messages_async().await;
+                        let (filtered, dropped_calls, dropped_tools) = crate::cache_optimizer::fix_tool_call_pairing(rebuilt);
+                        if dropped_calls > 0 || dropped_tools > 0 {
+                            agent_emit!("[2013-repair] dropped {} unpaired tool_calls, {} stray tools", dropped_calls, dropped_tools);
+                        }
+                        let messages = if filtered.is_empty() {
+                            self.entries_to_messages_async().await
+                        } else {
+                            filtered
+                        };
                         // Retry with repaired messages instead of falling back to non-streaming
-                        match self.try_stream_once(system_prompt, &rebuilt, tools).await {
+                        match self.try_stream_once(system_prompt, &messages, tools).await {
                             Ok(result) => return Ok(result),
                             Err(e2) => {
                                 agent_emit!("[!] Stream still failed after 2013 repair: {}", e2);
                                 // Fall through to non-streaming with rebuilt messages
-                                return self.call_with_non_streaming_fallback(system_prompt, &rebuilt, tools).await;
+                                return self.call_with_non_streaming_fallback(system_prompt, &messages, tools).await;
                             }
                         }
                     }
@@ -2305,14 +2325,21 @@ impl AgentLoop {
                             let mut ctx = self.context.write().await;
                             ctx.validate_tool_pairing();
                             ctx.fix_role_alternation();
-                        }
-                        // Inject a recovery hint so the model produces properly sequenced tool calls
-                        {
-                            let mut ctx = self.context.write().await;
+                            // Inject a recovery hint so the model produces properly sequenced tool calls
                             ctx.add_user_message("A tool call result was not properly paired with its call. Please ensure each tool_use block is immediately followed by its corresponding tool_result, with no extra assistant messages in between. Resume with your next action.".to_string());
                         }
-                        // Rebuild messages from repaired context and retry
-                        current_messages = self.entries_to_messages_async().await;
+                        // Rebuild messages from repaired context and apply fix_tool_call_pairing
+                        // to drop any remaining unpaired tool_calls (matching Go behavior)
+                        let rebuilt = self.entries_to_messages_async().await;
+                        let (filtered, dropped_calls, dropped_tools) = crate::cache_optimizer::fix_tool_call_pairing(rebuilt);
+                        if dropped_calls > 0 || dropped_tools > 0 {
+                            agent_emit!("[2013-repair] dropped {} unpaired tool_calls, {} stray tools", dropped_calls, dropped_tools);
+                        }
+                        current_messages = if filtered.is_empty() {
+                            self.entries_to_messages_async().await
+                        } else {
+                            filtered
+                        };
                         consecutive_500s = 0;
                         continue;
                     }
